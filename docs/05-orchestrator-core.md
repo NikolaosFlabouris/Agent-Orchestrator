@@ -94,6 +94,8 @@ The orchestrator and agents have separate git responsibilities. Agents perform g
 
 **Forgejo API client convention:** all `forgejo.*` functions accept a `repo` object (from `db.getRepo()`) and extract `repo.owner` and `repo.name` internally for API path construction (e.g., `/api/v1/repos/{owner}/{name}/branches/{branch}`). The pseudocode uses `forgejo.get_branch(repo, branch_name)` rather than `forgejo.get_branch(repo.owner, repo.name, branch_name)` for brevity.
 
+**Label resolution:** the pseudocode uses `relabel: status/X` shorthand to mean "replace the issue's status labels with the named label." The Forgejo API for replacing labels (`PUT /repos/{owner}/{repo}/issues/{index}/labels`) requires integer label IDs, not names. The Forgejo client provides `replaceLabelByNames(repo, issueNumber, labelNames)` which resolves names to IDs via `GET /repos/{owner}/{repo}/labels`, creating missing labels on first use. A per-repo label name→ID cache avoids repeated lookups. Label operations in the post-agent flows are best-effort (caught and logged on failure) since Forgejo label sync is secondary to the DB status which is the source of truth.
+
 ### Workspace Preparation (before agent)
 
 Branch names are generated deterministically by the orchestrator when a task is first created:
@@ -422,12 +424,21 @@ launch_dev_container(task, feedback=null):
     agent_tool: effective_tool_id, agent_command: effective_command
   }
 
-  # 4. Create and start container
-  container = createAgentContainer(task, repo)
+  # 4. Assemble environment variables (caller's responsibility — not done inside createAgentContainer)
+  env = buildEnv(task, repo, effective_tool)
+    # buildEnv reads tool.env_vars (non-secret config from DB) and
+    # tool.auth_config (env var names whose values come from process.env)
+
+  # 5. Create and start container
+  container = createAgentContainer({
+    task, repo, tool: effective_tool,
+    workdir, taskDir, outputDir, cacheDir,
+    env
+  })
   container.start()
   db.update_task(task.id, container_id: container.id, started_at: now())
 
-  # 5. Record attempt
+  # 6. Record attempt
   start_attempt(task, 'develop')
 
   relabel: status/in-progress
@@ -480,12 +491,19 @@ launch_review_container(task):
     agent_tool: effective_tool_id, agent_command: effective_command
   }
 
-  # 3. Create and start container
-  container = createAgentContainer(task, repo)
+  # 4. Assemble environment variables
+  env = buildEnv(task, repo, effective_tool)
+
+  # 5. Create and start container
+  container = createAgentContainer({
+    task, repo, tool: effective_tool,
+    workdir, taskDir, outputDir, cacheDir,
+    env
+  })
   container.start()
   db.update_task(task.id, container_id: container.id)
 
-  # 4. Record attempt
+  # 6. Record attempt
   start_attempt(task, 'review')
 
   relabel: status/in-review
@@ -1169,11 +1187,11 @@ Note: the agent token appears in `.git/config` within the workspace directory. T
 
 ### Agent tool credentials (container environment variables)
 
-LLM API keys and agent tool configuration are injected as container environment variables:
+LLM API keys and agent tool configuration are injected as container environment variables. The env assembly is handled by the scheduler's `buildEnv` method (the caller of `createAgentContainer`), which passes the assembled `env` array via `CreateContainerOptions.env`. This keeps the Docker manager decoupled from credential resolution:
 
 ```typescript
-function getAgentToolEnv(task: Task, repo: Repo, tool: AgentTool): string[] {
-  // tool is already resolved: task.agent_tool || repo.agent_tool (see createAgentContainer)
+function buildEnv(task: Task, repo: Repo, tool: AgentTool): string[] {
+  // tool is already resolved: task.agent_tool || repo.agent_tool
   const env: string[] = [];
 
   // Static env vars from tool config (non-secret, stored in DB)

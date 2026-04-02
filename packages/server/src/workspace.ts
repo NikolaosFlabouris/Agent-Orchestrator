@@ -1,0 +1,319 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { Task } from '@orchestrator/shared';
+import { getRepo } from './db.js';
+import type { ForgejoClient } from './forgejo.js';
+import type { FastifyBaseLogger } from 'fastify';
+
+const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
+const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
+const AGENT_TOKEN = process.env.FORGEJO_AGENT_TOKEN ?? '';
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+export function getWorkdir(task: Task): string {
+  return path.join(WORKSPACES_ROOT, `issue-${task.issue_id}`);
+}
+
+export function getTaskDir(task: Task): string {
+  return path.join(getWorkdir(task), '.task');
+}
+
+export function getOutputDir(task: Task): string {
+  return path.join(getWorkdir(task), '.output');
+}
+
+export function getCacheDir(repoOwner: string, repoName: string): string {
+  return path.join(
+    process.env.CACHES_ROOT ?? '/caches',
+    `${repoOwner}-${repoName}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Branch naming
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a deterministic branch name for a task.
+ * Format: agent/issue-{id}-{sanitized_title}
+ *
+ * sanitized_title: lowercase, spaces to hyphens, strip non-alphanumeric (except hyphens),
+ * truncate to 50 chars, no trailing hyphens.
+ */
+export function generateBranchName(issueId: number, title: string): string {
+  let sanitized = title
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .slice(0, 50)
+    .replace(/-+$/, '');
+
+  if (!sanitized) {
+    sanitized = 'task';
+  }
+
+  return `agent/issue-${issueId}-${sanitized}`;
+}
+
+// ---------------------------------------------------------------------------
+// Git helpers
+// ---------------------------------------------------------------------------
+
+function git(args: string[], cwd: string, log: FastifyBaseLogger): string {
+  log.debug({ event: 'git_exec', args, cwd }, `git ${args[0]}`);
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 120_000, // 2 minute timeout for git operations
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch (err: unknown) {
+    const error = err as { stderr?: string; message?: string };
+    const stderr = error.stderr ?? error.message ?? String(err);
+    throw new Error(`git ${args[0]} failed: ${stderr}`);
+  }
+}
+
+function getAgentAuthUrl(repoOwner: string, repoName: string): string {
+  const url = new URL(FORGEJO_URL);
+  return `${url.protocol}//agent:${AGENT_TOKEN}@${url.host}/${repoOwner}/${repoName}.git`;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace state verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify and restore the workspace to a known-good git state.
+ * Aborts stale rebase/merge, restores expected branch.
+ */
+export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
+  const workdir = getWorkdir(task);
+  if (!fs.existsSync(workdir)) return;
+
+  const gitDir = path.join(workdir, '.git');
+  if (!fs.existsSync(gitDir)) return;
+
+  // Abort any in-progress rebase
+  if (
+    fs.existsSync(path.join(gitDir, 'rebase-merge')) ||
+    fs.existsSync(path.join(gitDir, 'rebase-apply'))
+  ) {
+    try {
+      git(['rebase', '--abort'], workdir, log);
+      log.warn(
+        { event: 'rebase_aborted', task_id: task.id },
+        'Aborted stale rebase left by agent'
+      );
+    } catch {
+      // Best effort
+    }
+  }
+
+  // Abort any in-progress merge conflict
+  if (fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))) {
+    try {
+      git(['merge', '--abort'], workdir, log);
+      log.warn(
+        { event: 'merge_aborted', task_id: task.id },
+        'Aborted stale merge left by agent'
+      );
+    } catch {
+      // Best effort
+    }
+  }
+
+  // Ensure we're on the expected branch
+  if (task.branch_name) {
+    try {
+      const currentBranch = git(
+        ['branch', '--show-current'],
+        workdir,
+        log
+      );
+      if (currentBranch !== task.branch_name) {
+        try {
+          git(['checkout', task.branch_name], workdir, log);
+        } catch {
+          // Branch doesn't exist locally — recreate from remote
+          git(
+            ['fetch', 'origin', task.branch_name],
+            workdir,
+            log
+          );
+          git(
+            ['checkout', '-B', task.branch_name, `origin/${task.branch_name}`],
+            workdir,
+            log
+          );
+        }
+        log.warn(
+          {
+            event: 'branch_restored',
+            task_id: task.id,
+            expected: task.branch_name,
+            found: currentBranch,
+          },
+          'Restored expected branch'
+        );
+      }
+    } catch {
+      // Non-fatal — workspace may be newly cloned
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace preparation
+// ---------------------------------------------------------------------------
+
+/**
+ * Prepare the workspace for an agent container.
+ * Clones if new, sets URL if existing, checks out branch.
+ */
+export function prepareWorkspace(
+  task: Task,
+  log: FastifyBaseLogger
+): void {
+  const repo = getRepo(task.repo_id);
+  if (!repo) {
+    throw new Error(`Repo not found for task ${task.id}`);
+  }
+
+  const workdir = getWorkdir(task);
+  const authUrl = getAgentAuthUrl(repo.owner, repo.name);
+
+  if (!fs.existsSync(path.join(workdir, '.git'))) {
+    // Clone workspace
+    log.info(
+      { event: 'workspace_clone', task_id: task.id },
+      'Cloning workspace'
+    );
+    fs.mkdirSync(workdir, { recursive: true });
+    execFileSync('git', ['clone', authUrl, workdir], {
+      encoding: 'utf-8',
+      timeout: 300_000, // 5 minute timeout for clone
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } else {
+    // Workspace exists — update remote URL (token rotation)
+    git(['remote', 'set-url', 'origin', authUrl], workdir, log);
+  }
+
+  if (task.attempt === 1) {
+    // New task: create branch from latest base
+    git(['fetch', 'origin', repo.base_branch], workdir, log);
+    git(
+      ['checkout', '-B', task.branch_name!, `origin/${repo.base_branch}`],
+      workdir,
+      log
+    );
+  } else {
+    // Rework: checkout the existing branch as-is
+    verifyWorkspaceState(task, log);
+    try {
+      git(['checkout', task.branch_name!], workdir, log);
+    } catch {
+      // Local branch missing — try to recreate from remote
+      try {
+        git(['fetch', 'origin', task.branch_name!], workdir, log);
+        git(
+          [
+            'checkout',
+            '-B',
+            task.branch_name!,
+            `origin/${task.branch_name}`,
+          ],
+          workdir,
+          log
+        );
+        log.warn(
+          { event: 'rework_branch_restored', task_id: task.id },
+          'Local branch missing, restored from remote'
+        );
+      } catch {
+        // Remote branch also gone — unrecoverable
+        log.error(
+          { event: 'rework_branch_lost', task_id: task.id },
+          'Branch not found on local or remote'
+        );
+        throw new Error(
+          `Branch ${task.branch_name} not found on local or remote`
+        );
+      }
+    }
+  }
+
+  // Ensure output and task dirs exist with correct ownership
+  const taskDir = getTaskDir(task);
+  const outputDir = getOutputDir(task);
+  fs.mkdirSync(taskDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  // Ensure cache directory exists
+  const cacheDir = getCacheDir(repo.owner, repo.name);
+  fs.mkdirSync(cacheDir, { recursive: true });
+
+  log.info(
+    { event: 'workspace_ready', task_id: task.id, workdir },
+    'Workspace prepared'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Change detection (for salvage / recovery)
+// ---------------------------------------------------------------------------
+
+export interface ChangeDetection {
+  hasUncommitted: boolean;
+  hasUntracked: boolean;
+  hasLocalCommits: boolean;
+}
+
+export function detectChanges(
+  task: Task,
+  baseBranch: string,
+  log: FastifyBaseLogger
+): ChangeDetection {
+  const workdir = getWorkdir(task);
+
+  let hasUncommitted = false;
+  try {
+    git(['diff', '--quiet'], workdir, log);
+    git(['diff', '--cached', '--quiet'], workdir, log);
+  } catch {
+    hasUncommitted = true;
+  }
+
+  let hasUntracked = false;
+  try {
+    const untracked = git(
+      ['ls-files', '--others', '--exclude-standard'],
+      workdir,
+      log
+    );
+    hasUntracked = untracked.length > 0;
+  } catch {
+    // Best effort
+  }
+
+  let hasLocalCommits = false;
+  try {
+    const commits = git(
+      ['log', `origin/${baseBranch}..HEAD`, '--oneline'],
+      workdir,
+      log
+    );
+    hasLocalCommits = commits.length > 0;
+  } catch {
+    // Best effort
+  }
+
+  return { hasUncommitted, hasUntracked, hasLocalCommits };
+}

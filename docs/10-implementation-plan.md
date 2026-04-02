@@ -77,9 +77,9 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - Dispatch to `onDevAgentComplete` or `onReviewAgentComplete` based on role from `/task/meta.json`
 
 4. **Mock agent image** (`images/test-mock/`)
-   - Dockerfile extending base
+   - Standalone Dockerfile (ubuntu:24.04 + git + jq — does not extend the agent base image, which is a Slice 3 deliverable)
    - `mock-harness.sh`: reads `meta.json`, creates a test file, commits, pushes, writes `result.json`
-   - Supports develop and review roles, failure and timeout modes via meta.json flags
+   - Supports develop and review roles, failure and timeout modes via meta.json flags (`mock_mode`, `mock_verdict`)
 
 **Validation:** Insert a task row with `status: 'queued'` directly in the DB. The scheduler picks it up, prepares the workspace, starts a mock agent container, detects completion, reads result.json. Task transitions through `queued → preparing → in-progress`. Container is cleaned up. Slot is freed.
 

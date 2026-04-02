@@ -167,20 +167,22 @@ Two agents working on the same repo in parallel could corrupt shared caches. The
 
 ## Container Creation
 
-The orchestrator creates agent containers via the Docker API (dockerode):
+The orchestrator creates agent containers via the Docker API (dockerode). The `createAgentContainer` function receives a pre-assembled options object — tool resolution, path computation, environment variable assembly, and directory creation are handled by the caller (the launch helpers in `packages/server/src/agents/`). This keeps the Docker manager focused on container lifecycle and avoids coupling it to the database or workspace logic.
 
 ```typescript
-async function createAgentContainer(task: Task, repo: Repo) {
-  // Resolve agent tool: task override takes precedence over repo default
-  const toolId = task.agent_tool || repo.agent_tool;
-  const tool = db.getAgentTool(toolId);
+interface CreateContainerOptions {
+  task: Task;
+  repo: Repo;
+  tool: AgentTool;
+  workdir: string;    // e.g. /workspaces/issue-42
+  taskDir: string;    // e.g. /workspaces/issue-42/.task
+  outputDir: string;  // e.g. /workspaces/issue-42/.output
+  cacheDir: string;   // e.g. /caches/org-reponame
+  env: string[];      // pre-assembled environment variables
+}
 
-  // Paths are derived from the task's issue ID — not stored in the DB
-  const workdir = `/workspaces/issue-${task.issue_id}`;
-  const taskDir = `${workdir}/.task`;
-  const outputDir = `${workdir}/.output`;
-  const cacheDir = `/caches/${repo.owner}-${repo.name}`;
-  await fs.mkdir(cacheDir, { recursive: true });
+async function createAgentContainer(opts: CreateContainerOptions) {
+  const { task, repo, tool, workdir, taskDir, outputDir, cacheDir, env } = opts;
 
   const mounts = [
     `${workdir}:/repo`,
@@ -206,6 +208,10 @@ async function createAgentContainer(task: Task, repo: Repo) {
     ? ['npx', 'tsx', '/usr/local/bin/harness-sdk.ts']
     : ['/usr/local/bin/harness-cli'];
 
+  // Resource limits — per-repo override or global default from settings
+  const memoryMb = repo.container_memory_mb ?? getSettingInt('default_container_memory_mb');
+  const cpuCores = repo.container_cpu_cores ?? getSettingInt('default_container_cpu_cores');
+
   return docker.createContainer({
     Image: `orchestrator-agent-${repo.image_type}:latest`,  // image from repo (language runtime)
     Entrypoint: entrypoint,                                  // harness from tool type (sdk vs cli)
@@ -216,14 +222,12 @@ async function createAgentContainer(task: Task, repo: Repo) {
     User: '1000:1000',   // run as non-root agent user
     HostConfig: {
       Binds: mounts,
-      Memory: 4 * 1024 * 1024 * 1024,  // 4GB
+      Memory: memoryMb * 1024 * 1024,
       CpuPeriod: 100000,
-      CpuQuota: 200000,                  // 2 CPUs
+      CpuQuota: cpuCores * 100000,
       NetworkMode: 'agent-network',
     },
-    Env: [
-      ...getAgentToolEnv(task, repo, tool),
-    ],
+    Env: env,
   });
 }
 ```

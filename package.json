@@ -1,0 +1,14 @@
+{
+  "name": "agent-orchestration",
+  "private": true,
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/ui"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "dev": "npm run dev --workspace=packages/server",
+    "test": "npm test --workspace=packages/server"
+  }
+}

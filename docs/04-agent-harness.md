@@ -344,7 +344,7 @@ Used for `cli` type tools (OpenCode, Claude Code CLI):
 set -euo pipefail
 
 OUTPUT_DIR="/output"
-AGENT_LOG="$OUTPUT_DIR/agent.log"
+AGENT_LOG="$OUTPUT_DIR/progress.log"
 RESULT="$OUTPUT_DIR/result.json"
 TASK_DIR="/task"
 META="$TASK_DIR/meta.json"
