@@ -1,6 +1,10 @@
-# Known Issues
+# TODO
 
-## Git clone fails inside vitest worker processes on Windows
+## End-to-end test implementation
+
+The e2e test plan is documented in [11 - E2E Test Plan](./11-e2e-test-plan.md). The test file exists at `packages/server/src/__tests__/e2e/task-lifecycle.test.ts` with 8 test case stubs (`.todo`). These need to be implemented against a running orchestrator with Docker and Forgejo.
+
+## Investigate: git clone fails inside vitest worker processes on Windows
 
 **Status:** Open — needs investigation
 
