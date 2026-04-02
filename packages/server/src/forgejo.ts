@@ -13,6 +13,7 @@ export interface ForgejoIssue {
   labels: ForgejoLabel[];
   assignees: ForgejoUser[];
   html_url: string;
+  created_at: string;
 }
 
 export interface ForgejoLabel {
@@ -43,6 +44,14 @@ export interface ForgejoBranch {
 export interface ForgejoUser {
   id: number;
   login: string;
+}
+
+export interface ForgejoHook {
+  id: number;
+  type: string;
+  config: { url: string; content_type: string };
+  events: string[];
+  active: boolean;
 }
 
 export class ForgejoApiError extends Error {
@@ -118,6 +127,19 @@ export class ForgejoClient {
   }
 
   // ---- Issues ----
+
+  async listIssues(
+    repo: Repo,
+    params?: { state?: 'open' | 'closed'; labels?: string }
+  ): Promise<ForgejoIssue[]> {
+    const qs = new URLSearchParams({ type: 'issues' });
+    if (params?.state) qs.set('state', params.state);
+    if (params?.labels) qs.set('labels', params.labels);
+    return this.request<ForgejoIssue[]>(
+      'GET',
+      `${this.repoPath(repo)}/issues?${qs.toString()}`
+    );
+  }
 
   async getIssue(repo: Repo, issueNumber: number): Promise<ForgejoIssue> {
     return this.request<ForgejoIssue>(
@@ -314,6 +336,38 @@ export class ForgejoClient {
       'PATCH',
       `${this.repoPath(repo)}/pulls/${prNumber}`,
       { state: 'closed' }
+    );
+  }
+
+  // ---- Webhooks ----
+
+  async listHooks(repo: Repo): Promise<ForgejoHook[]> {
+    return this.request<ForgejoHook[]>(
+      'GET',
+      `${this.repoPath(repo)}/hooks`
+    );
+  }
+
+  async createHook(
+    repo: Repo,
+    data: {
+      type: string;
+      config: { url: string; content_type: string; secret: string };
+      events: string[];
+      active: boolean;
+    }
+  ): Promise<ForgejoHook> {
+    return this.request<ForgejoHook>(
+      'POST',
+      `${this.repoPath(repo)}/hooks`,
+      data
+    );
+  }
+
+  async deleteHook(repo: Repo, hookId: number): Promise<void> {
+    await this.request(
+      'DELETE',
+      `${this.repoPath(repo)}/hooks/${hookId}`
     );
   }
 }

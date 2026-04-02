@@ -1,0 +1,13 @@
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:14
+    ports:
+      - "3001:3000"
+    volumes:
+      - forgejo-test-data:/data
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+
+volumes:
+  forgejo-test-data:

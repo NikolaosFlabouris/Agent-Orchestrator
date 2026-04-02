@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
 import { getRepo, getTask, getSetting, updateTask } from '../db.js';
+import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { getOutputDir } from '../workspace.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -36,7 +37,7 @@ export async function attemptMerge(
     if (pr.mergeable === false) {
       const newAttempt = freshTask.attempt + 1;
       if (newAttempt > freshTask.max_attempts) {
-        updateTask(task.id, {
+        updateTaskWithSync(task.id, {
           status: 'failed',
           attempt: newAttempt,
           completed_at: new Date().toISOString(),
@@ -55,7 +56,7 @@ export async function attemptMerge(
         return;
       }
       // Rework in same slot — task needs to rebase
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'changes-needed',
         attempt: newAttempt,
       });
@@ -82,7 +83,8 @@ export async function attemptMerge(
     await forgejo.mergePullRequest(repo, freshTask.pr_number!, mergeStrategy);
 
     // Merge succeeded
-    updateTask(task.id, {
+    recordTaskEvent(task.id, 'pr_merged', `PR #${freshTask.pr_number} merged via ${mergeStrategy}`);
+    updateTaskWithSync(task.id, {
       status: 'merged',
       completed_at: new Date().toISOString(),
     });
@@ -110,7 +112,7 @@ export async function attemptMerge(
       const newAttempt = freshTask.attempt + 1;
 
       if (newAttempt > freshTask.max_attempts) {
-        updateTask(task.id, {
+        updateTaskWithSync(task.id, {
           status: 'failed',
           attempt: newAttempt,
           completed_at: new Date().toISOString(),
@@ -130,7 +132,7 @@ export async function attemptMerge(
       }
 
       // Rework in same slot
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'changes-needed',
         attempt: newAttempt,
       });
@@ -153,7 +155,7 @@ export async function attemptMerge(
       );
     } else {
       // Unexpected merge error
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
@@ -210,6 +212,8 @@ export async function processReviewVerdict(
     }
   }
 
+  recordTaskEvent(task.id, 'review_verdict', `Review verdict: ${review.verdict}${review.summary ? ' — ' + review.summary : ''}`);
+
   if (review.verdict === 'approved') {
     // Check for human-merge label
     let hasHumanMerge = false;
@@ -223,7 +227,7 @@ export async function processReviewVerdict(
     }
 
     if (hasHumanMerge) {
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'awaiting-human-merge',
         completed_at: new Date().toISOString(),
       });
@@ -265,7 +269,7 @@ export async function processReviewVerdict(
     } catch { /* best effort */ }
 
     if (newAttempt > freshTask.max_attempts) {
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'failed',
         attempt: newAttempt,
         completed_at: new Date().toISOString(),
@@ -283,7 +287,7 @@ export async function processReviewVerdict(
       );
     } else {
       // Rework in same slot
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'changes-needed',
         attempt: newAttempt,
       });
@@ -296,7 +300,7 @@ export async function processReviewVerdict(
       await launchDevContainer(updatedTask, feedbackStr);
     }
   } else if (review.verdict === 'unclear') {
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       status: 'needs-human-review',
       completed_at: new Date().toISOString(),
     });
@@ -337,7 +341,7 @@ export async function handleReviewFailure(
   }
 
   // Exceeded retries — escalate to human
-  updateTask(task.id, {
+  updateTaskWithSync(task.id, {
     status: 'needs-human-review',
     completed_at: new Date().toISOString(),
   });

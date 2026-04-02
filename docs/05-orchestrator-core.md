@@ -56,7 +56,7 @@ The queue is a priority FIFO with a configurable concurrency limiter:
 
 ### Queue Position
 
-`queue_position` uses sparse integer ordering. New tasks are assigned `MAX(queue_position) + 1`. When a task leaves the queue (starts processing, is cancelled, fails, or is reset), its position is cleared — remaining positions are not renumbered. Gaps are harmless since ordering uses `ORDER BY queue_position ASC`. Drag-and-drop reordering in the UI swaps position values between the dragged task and the target position.
+`queue_position` uses sparse integer ordering. New tasks are assigned `MAX(queue_position) + 1`. When a task leaves the queue (starts processing, is cancelled, fails, or is reset), its position is cleared — remaining positions are not renumbered. Gaps are harmless since ordering uses `ORDER BY queue_position ASC`. Drag-and-drop reordering in the UI sends `PATCH /api/tasks/:id` with `{ action: "reorder", queue_position: N }` where N is the target task's position. The server swaps the positions of the two tasks implicitly — the dragged task gets the target's position, and the target task gets the dragged task's old position. This ensures no two tasks share a position value.
 
 ### Slot Lifecycle
 
@@ -822,8 +822,13 @@ reset_task(task, reason="Reset by user"):
   workdir = /workspaces/issue-{task.issue_id}/
   if workdir exists: rm -rf workdir
 
-  # 5. Remove all status labels from the Forgejo issue (return to unqueued)
-  forgejo.remove_labels(task.issue_id, prefix: 'status/')
+  # 5. Remove status/* labels from the Forgejo issue (return to unqueued).
+  # Preserve non-status labels (human-merge, human-review, repo/*).
+  # The Forgejo API has no prefix-based removal — fetch current labels,
+  # filter out status/* labels, then PUT back the remainder.
+  issue = forgejo.get_issue(repo, task.issue_id)
+  non_status = [l for l in issue.labels if not l.name.startswith('status/')]
+  forgejo.replace_label(task.issue_id, [l.id for l in non_status])
   forgejo.comment_on_issue(task.issue_id,
     "Task reset: {reason}. Branch, PR, and workspace deleted. Issue is unqueued.")
 
@@ -1172,6 +1177,8 @@ All secrets are loaded from environment variables (sourced from `.env` files) at
 | LLM API keys (Anthropic, etc.) | `.env` → `process.env.ANTHROPIC_API_KEY` (etc.) | Long-lived (API key) |
 | OAuth2 client ID + secret | `.env` → `process.env.FORGEJO_OAUTH_CLIENT_*` | Long-lived (app registration) |
 | OAuth2 user session tokens | In memory (signed cookie) | Short-lived (session) |
+| Webhook secret | `.env` → `process.env.FORGEJO_WEBHOOK_SECRET` | Long-lived (shared secret for HMAC-SHA256 verification) |
+| Orchestrator URL | `.env` → `process.env.ORCHESTRATOR_URL` | Configuration (used for webhook callback registration, must be reachable from Forgejo — e.g., `http://orchestrator:8080` in Docker) |
 
 ### Git credential (workspace remote URL)
 

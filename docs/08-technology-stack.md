@@ -250,7 +250,7 @@ The `tasks.status` column stores the label name without the `status/` prefix (e.
 
 The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields (`owner`, `name`, `base_branch`, `image_type`, `agent_tool`) are accessed via: `repo = db.getRepo(task.repo_id)`. The pseudocode in other documents uses `repo.base_branch`, `repo.owner`, `repo.name` etc. — these always come from the joined `repos` row.
 
-The issue `title` is not cached in the `tasks` table. It is fetched from the Forgejo API on demand when needed (commit messages, PR body). This avoids stale data if the issue title is edited in Forgejo.
+The issue `title` is not stored in the `tasks` table. The REST API populates `issue_title` from the Forgejo API when practical (single-task endpoints like `GET /api/tasks/:id`), and falls back to a placeholder (`Issue #N`) in list responses to avoid N Forgejo API calls. This avoids stale data if the issue title is edited in Forgejo, at the cost of titles only appearing after the Forgejo API is reachable. The UI can fetch updated titles client-side for display purposes.
 
 The following fields are held in memory on the task object during the active slot lifecycle. They do not need to survive a restart — startup recovery re-evaluates state from external sources:
 
@@ -381,6 +381,7 @@ All settings keys, their types, and defaults. Seeded on first run by `seedDefaul
 | `disk_threshold_bytes` | integer | `53687091200` | Disk usage warning threshold (50 GB) |
 | `default_container_memory_mb` | integer | `4096` | Default container memory limit |
 | `default_container_cpu_cores` | integer | `2` | Default container CPU limit |
+| `last_shutdown` | string | `''` | Records how the orchestrator last exited (`graceful` or empty). Used by startup recovery to distinguish clean shutdown from crash. |
 
 Each migration is idempotent and runs inside the startup sequence before the scheduler starts. No external migration framework is needed — the schema is small enough that a sequential version check covers all foreseeable changes.
 

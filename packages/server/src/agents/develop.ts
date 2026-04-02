@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import type { Task } from '@orchestrator/shared';
 import { getRepo, getTask, updateTask } from '../db.js';
+import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import {
   verifyWorkspaceState,
@@ -54,7 +55,7 @@ export async function postDevAgent(
     try {
       const baseBranch = await forgejo.getBranch(repo, repo.base_branch);
       if (branchSha === baseBranch.commit.id) {
-        updateTask(task.id, {
+        updateTaskWithSync(task.id, {
           status: 'failed',
           completed_at: new Date().toISOString(),
         });
@@ -106,7 +107,7 @@ export async function postDevAgent(
       !changes.hasUntracked &&
       !changes.hasLocalCommits
     ) {
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
@@ -182,7 +183,7 @@ export async function postDevAgent(
     }
 
     if (!pushSucceeded) {
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
@@ -200,6 +201,7 @@ export async function postDevAgent(
       return false;
     }
 
+    recordTaskEvent(task.id, 'work_salvaged', 'Local work salvaged and pushed to remote');
     log.info(
       { event: 'work_salvaged', task_id: task.id },
       'Local work salvaged and pushed'
@@ -216,6 +218,7 @@ export async function postDevAgent(
         base: repo.base_branch,
       });
       updateTask(task.id, { pr_number: pr.number });
+      recordTaskEvent(task.id, 'pr_created', `Pull request #${pr.number} created`);
       log.info(
         { event: 'pr_created', task_id: task.id, pr_number: pr.number },
         'Pull request created'
@@ -230,7 +233,7 @@ export async function postDevAgent(
       } catch { /* best effort */ }
     }
   } catch (err) {
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       status: 'failed',
       completed_at: new Date().toISOString(),
     });
@@ -267,7 +270,7 @@ export async function handleDevFailure(
 
   if (newAttempt > freshTask.max_attempts) {
     // Max attempts exhausted
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       status: 'failed',
       attempt: newAttempt,
       completed_at: new Date().toISOString(),
@@ -291,7 +294,7 @@ export async function handleDevFailure(
     );
   } else {
     // Retry in the same slot
-    updateTask(task.id, { attempt: newAttempt, status: 'preparing' });
+    updateTaskWithSync(task.id, { attempt: newAttempt, status: 'preparing' });
     try {
       if (repo) {
         await forgejo.commentOnIssue(

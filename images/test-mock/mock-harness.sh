@@ -79,7 +79,7 @@ EOF
 Automated implementation for issue #${ISSUE_ID}
 Attempt: ${ATTEMPT}"
 
-  git push origin "$BRANCH_NAME" || git push -f origin "$BRANCH_NAME"
+  git push origin "$BRANCH_NAME" 2>/dev/null || git push -f origin "$BRANCH_NAME" 2>/dev/null || echo "Push failed (no remote configured) — continuing"
 
   echo "Mock develop agent: push complete."
 

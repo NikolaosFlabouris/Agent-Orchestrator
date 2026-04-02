@@ -95,6 +95,15 @@ export interface Settings {
   disk_threshold_bytes: string;
   default_container_memory_mb: string;
   default_container_cpu_cores: string;
+  last_shutdown: string;
 }
 
 export type SettingsKey = keyof Settings;
+
+export interface TaskEvent {
+  id: number;
+  task_id: number;
+  event_type: string;
+  message: string;
+  created_at: string;
+}

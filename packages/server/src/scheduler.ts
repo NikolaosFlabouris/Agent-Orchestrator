@@ -10,6 +10,7 @@ import {
   updateTask,
   insertAttempt,
   updateAttempt,
+  getRunningAttempt,
   getTasks,
 } from './db.js';
 import { ForgejoClient } from './forgejo.js';
@@ -41,6 +42,7 @@ import {
   processReviewVerdict,
   handleReviewFailure,
 } from './agents/review.js';
+import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 // ---------------------------------------------------------------------------
@@ -161,6 +163,23 @@ export class Scheduler {
     });
   }
 
+  /**
+   * Process a completed task given pre-read result and role.
+   * Used by shutdown drain and startup recovery when they've already
+   * read result.json and meta.json themselves.
+   */
+  async processCompletedTask(
+    task: Task,
+    result: AgentResult,
+    role: 'develop' | 'review'
+  ): Promise<void> {
+    if (role === 'develop') {
+      await this.onDevAgentComplete(task, result);
+    } else {
+      await this.onReviewAgentComplete(task, result);
+    }
+  }
+
   // ---- Main tick ----
 
   async tick(): Promise<void> {
@@ -244,6 +263,12 @@ export class Scheduler {
         'meta.json not found — assuming develop role'
       );
     }
+
+    // Record container exit event
+    recordTaskEvent(task.id, 'container_exited', `Container exited (${result.status})`);
+
+    // Signal stream completion to WebSocket clients
+    notifyStreamComplete(task.id);
 
     // Remove container
     try {
@@ -355,7 +380,7 @@ export class Scheduler {
     verifyWorkspaceState(task, this.log);
 
     // Update status to preparing
-    updateTask(task.id, { status: 'preparing' });
+    updateTaskWithSync(task.id, { status: 'preparing' });
 
     // Prepare workspace
     prepareWorkspace(task, this.log);
@@ -380,7 +405,7 @@ export class Scheduler {
     });
 
     await startContainer(container);
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       container_id: container.id,
       started_at: new Date().toISOString(),
       status: 'in-progress',
@@ -401,6 +426,8 @@ export class Scheduler {
 
     // Set up container completion callback
     this.watchContainer(container, task.id);
+
+    recordTaskEvent(task.id, 'container_started', `Dev container started (attempt ${task.attempt})`);
 
     this.log.info(
       { event: 'dev_container_started', task_id: task.id, attempt: task.attempt },
@@ -460,7 +487,7 @@ export class Scheduler {
     });
 
     await startContainer(container);
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       container_id: container.id,
       status: 'in-review',
     });
@@ -483,6 +510,8 @@ export class Scheduler {
 
     // Set up container completion callback
     this.watchContainer(container, task.id);
+
+    recordTaskEvent(task.id, 'container_started', `Review container started (attempt ${task.attempt})`);
 
     this.log.info(
       { event: 'review_container_started', task_id: task.id, attempt: task.attempt },
@@ -508,7 +537,7 @@ export class Scheduler {
     }
 
     if (hasHumanReview) {
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'awaiting-human-review',
         completed_at: new Date().toISOString(),
       });
@@ -701,11 +730,38 @@ export class Scheduler {
   // ---- Attempt tracking ----
 
   private completeAttempt(task: Task, result: AgentResult): void {
+    let attemptId: number;
     const state = activeState.get(task.id);
-    if (!state) return;
+
+    if (state) {
+      attemptId = state.currentAttemptId;
+    } else {
+      // Recovery path: activeState is empty after restart.
+      // Look up the attempt row by composite key, or create a new one.
+      const metaPath = path.join(getTaskDir(task), 'meta.json');
+      let role: 'develop' | 'review' = 'develop';
+      try {
+        const raw = fs.readFileSync(metaPath, 'utf-8');
+        role = JSON.parse(raw).role ?? 'develop';
+      } catch { /* default to develop */ }
+
+      const existing = getRunningAttempt(task.id, task.attempt, role);
+      if (existing) {
+        attemptId = existing.id;
+      } else {
+        // Orchestrator crashed before creating the attempt row — create one now
+        const newAttempt = insertAttempt({
+          task_id: task.id,
+          attempt_number: task.attempt,
+          role,
+          status: 'running',
+        });
+        attemptId = newAttempt.id;
+      }
+    }
 
     // Record cost
-    this.recordAttemptCost(task, result, state.currentAttemptId);
+    this.recordAttemptCost(task, result, attemptId);
 
     // Read review verdict if present
     let verdict: string | null = null;
@@ -729,7 +785,7 @@ export class Scheduler {
     else if (result.status === 'timeout') attemptStatus = 'timeout';
     else attemptStatus = 'failed';
 
-    updateAttempt(state.currentAttemptId, {
+    updateAttempt(attemptId, {
       status: attemptStatus as any,
       completed_at: new Date().toISOString(),
       verdict,
@@ -785,7 +841,7 @@ export class Scheduler {
 
     if (newCount >= 3) {
       // Permanent failure
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'failed',
         prep_failure_count: newCount,
         completed_at: new Date().toISOString(),
@@ -796,7 +852,7 @@ export class Scheduler {
       );
     } else {
       // Transient failure — return to queue
-      updateTask(task.id, {
+      updateTaskWithSync(task.id, {
         status: 'queued',
         prep_failure_count: newCount,
       });
@@ -940,7 +996,7 @@ export class Scheduler {
  * Normalize model name by stripping date suffix.
  * "claude-sonnet-4-20250514" → "claude-sonnet-4"
  */
-function normalizeModelName(model: string): string {
+export function normalizeModelName(model: string): string {
   // Strip trailing date suffix like -YYYYMMDD
   return model.replace(/-\d{8}$/, '');
 }
@@ -958,7 +1014,7 @@ function isNotFoundError(err: unknown): boolean {
 // Prompt templates (from doc 04)
 // ---------------------------------------------------------------------------
 
-function buildDevPrompt(
+export function buildDevPrompt(
   task: Task,
   repo: Repo,
   issue: { title: string; body: string },
@@ -1015,7 +1071,7 @@ Address all feedback items while preserving the working parts of the implementat
   return prompt;
 }
 
-function buildReviewPrompt(
+export function buildReviewPrompt(
   task: Task,
   repo: Repo,
   issue: { title: string; body: string }

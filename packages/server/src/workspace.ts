@@ -5,6 +5,7 @@ import type { Task } from '@orchestrator/shared';
 import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
+import { insertTaskEvent } from './db.js';
 
 const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
@@ -201,6 +202,7 @@ export function prepareWorkspace(
       timeout: 300_000, // 5 minute timeout for clone
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    insertTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
   } else {
     // Workspace exists — update remote URL (token rotation)
     git(['remote', 'set-url', 'origin', authUrl], workdir, log);
@@ -214,6 +216,7 @@ export function prepareWorkspace(
       workdir,
       log
     );
+    insertTaskEvent(task.id, 'branch_created', `Branch ${task.branch_name} created from ${repo.base_branch}`);
   } else {
     // Rework: checkout the existing branch as-is
     verifyWorkspaceState(task, log);

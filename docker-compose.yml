@@ -1,0 +1,20 @@
+services:
+  orchestrator:
+    build: .
+    container_name: orchestrator
+    restart: unless-stopped
+    stop_grace_period: 35m
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - orchestrator-data:/data
+      - workspaces:/workspaces
+      - caches:/caches
+    env_file:
+      - .env
+
+volumes:
+  orchestrator-data:
+  workspaces:
+  caches:

@@ -467,17 +467,14 @@ The UI dashboard header uses `state`, `active_slots`, `max_concurrency`, `queue_
 
 ### Dashboard WebSocket Events
 
+All WebSocket events use `type` as the discriminator field (matching the `DashboardEvent` union type in `events.ts`). The primary event types send full task objects rather than partial updates, simplifying client-side state management:
+
 ```json
-{"event": "task_phase_changed", "task_id": 42, "phase": "reviewing", "attempt": 1}
-{"event": "task_completed", "task_id": 39, "result": "merged", "attempts": 2}
-{"event": "task_queued", "task_id": 47, "position": 5}
-{"event": "task_cancelled", "task_id": 43}
-{"event": "slot_freed", "active": 2, "max": 5}
-{"event": "slot_filled", "active": 3, "max": 5, "task_id": 44}
-{"event": "task_blocked", "task_id": 45, "blocked_by": [44]}
-{"event": "queue_paused"}
-{"event": "queue_resumed"}
-{"event": "alert", "level": "warning", "message": "Task #36 failed after 3 attempts"}
+{"type": "snapshot", "tasks": [...], "activeCount": 3, "maxConcurrency": 5, "queueDepth": 7, "paused": false}
+{"type": "task_updated", "task": {"id": 42, "status": "in-review", "..."}}
+{"type": "task_created", "task": {"id": 47, "status": "queued", "..."}}
+{"type": "task_removed", "taskId": 43}
+{"type": "status_changed", "paused": false, "activeCount": 3, "queueDepth": 6}
 ```
 
 The UI subscribes to the dashboard WebSocket on load and maintains local state from events. REST endpoints are used for actions and initial page load only.
@@ -490,26 +487,18 @@ The snapshot combines the data from `GET /api/tasks` and `GET /api/status` into 
 
 ```json
 {
-  "event": "snapshot",
+  "type": "snapshot",
   "tasks": [
     { "id": 1, "issue_id": 42, "status": "in-progress", "..." : "..." }
   ],
-  "status": {
-    "state": "running",
-    "active_slots": 3,
-    "max_concurrency": 5,
-    "queue_depth": 7,
-    "daily_completions": 12,
-    "daily_cost_usd": 28.50,
-    "forgejo_connected": true
-  },
-  "alerts": [
-    { "level": "warning", "message": "Task #36 failed after 3 attempts" }
-  ]
+  "activeCount": 3,
+  "maxConcurrency": 5,
+  "queueDepth": 7,
+  "paused": false
 }
 ```
 
-The `tasks` array uses the same task object shape as `GET /api/tasks`. The `status` object uses the same shape as `GET /api/status` (UI-relevant fields). The `alerts` array contains any active alert banners.
+The snapshot uses the `DashboardSnapshot` type from `events.ts`. The `tasks` array uses the same task object shape as `GET /api/tasks`. Top-level fields provide the status summary. The client replaces its entire local state with the snapshot on (re)connect.
 
 **On disconnect:** the client reconnects automatically with exponential backoff (1s, 2s, 4s, 8s, max 30s). On successful reconnection, the server sends a fresh state snapshot, and the client replaces its local state entirely (not merged, to avoid stale data).
 

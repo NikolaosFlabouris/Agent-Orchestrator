@@ -3,4 +3,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+*.tsbuildinfo
 .env
+.env.test
+.test-tmp-*

@@ -7,6 +7,7 @@ import type {
   AttemptStatus,
   Repo,
   AgentTool,
+  TaskEvent,
   SettingsKey,
 } from '@orchestrator/shared';
 
@@ -122,6 +123,16 @@ function createTables(db: Database.Database): void {
       auth_type TEXT NOT NULL,
       auth_config TEXT NOT NULL DEFAULT '{}'
     );
+
+    CREATE TABLE IF NOT EXISTS task_events (
+      id INTEGER PRIMARY KEY,
+      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      event_type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
   `);
 }
 
@@ -142,11 +153,21 @@ function runMigrations(db: Database.Database): void {
     ).run();
   }
 
-  // Future migrations:
-  // if (version < 2) {
-  //   db.exec('ALTER TABLE repos ADD COLUMN new_field TEXT');
-  //   db.prepare("UPDATE settings SET value = '2' WHERE key = 'schema_version'").run();
-  // }
+  if (version < 2) {
+    // Add task_events table (created by CREATE TABLE IF NOT EXISTS above for new installs,
+    // this migration handles existing databases upgrading from version 1)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS task_events (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES tasks(id),
+        event_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
+    `);
+    db.prepare("UPDATE settings SET value = '2' WHERE key = 'schema_version'").run();
+  }
 }
 
 function seedDefaultSettings(db: Database.Database): void {
@@ -379,6 +400,22 @@ export function getAttempts(taskId: number): Attempt[] {
     .all(taskId) as Attempt[];
 }
 
+/**
+ * Find a running attempt by composite key (for recovery).
+ * On restart, activeState is lost — this looks up the attempt row directly.
+ */
+export function getRunningAttempt(
+  taskId: number,
+  attemptNumber: number,
+  role: AttemptRole
+): Attempt | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM attempts WHERE task_id = ? AND attempt_number = ? AND role = ? AND status = 'running' ORDER BY id DESC LIMIT 1"
+    )
+    .get(taskId, attemptNumber, role) as Attempt | undefined;
+}
+
 // -- Repos --
 
 export function getRepo(id: number): Repo | undefined {
@@ -411,6 +448,32 @@ export function getAgentTools(): AgentTool[] {
   return getDb()
     .prepare('SELECT * FROM agent_tools ORDER BY id')
     .all() as AgentTool[];
+}
+
+// -- Task Events --
+
+export function insertTaskEvent(
+  taskId: number,
+  eventType: string,
+  message: string
+): TaskEvent {
+  const result = getDb()
+    .prepare(
+      'INSERT INTO task_events (task_id, event_type, message) VALUES (?, ?, ?)'
+    )
+    .run(taskId, eventType, message);
+
+  return getDb()
+    .prepare('SELECT * FROM task_events WHERE id = ?')
+    .get(result.lastInsertRowid) as TaskEvent;
+}
+
+export function getTaskEvents(taskId: number): TaskEvent[] {
+  return getDb()
+    .prepare(
+      'SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC'
+    )
+    .all(taskId) as TaskEvent[];
 }
 
 // -- Settings --

@@ -178,6 +178,40 @@ export function getContainer(containerId: string): Docker.Container {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------
+
+const AGENT_NETWORK = 'agent-network';
+
+/**
+ * Ensure the agent-network Docker network exists.
+ * Creates it idempotently — safe to call on every startup.
+ */
+export async function ensureAgentNetwork(): Promise<void> {
+  const docker = getDocker();
+
+  try {
+    const network = docker.getNetwork(AGENT_NETWORK);
+    await network.inspect();
+    // Network already exists
+  } catch (err: unknown) {
+    if (isDockerError(err) && err.statusCode === 404) {
+      // Network doesn't exist — create it
+      await docker.createNetwork({
+        Name: AGENT_NETWORK,
+        Driver: 'bridge',
+      });
+    } else {
+      throw err;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function isDockerError(err: unknown): err is { statusCode: number } {
   return (
     typeof err === 'object' &&
