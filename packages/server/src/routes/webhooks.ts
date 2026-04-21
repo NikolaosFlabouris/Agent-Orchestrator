@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { scanForHumanMergeConflicts } from '../conflict-detector.js';
 
 // Terminal-state tasks that should re-enter the queue when the user re-applies
 // status/queued in Forgejo. Mirrors the set in polling.ts. 'merged' is excluded —
@@ -100,7 +101,7 @@ export function createWebhookRoutes(
         if (eventType === 'issues') {
           await handleIssueEvent(payload, forgejo, scheduler, log);
         } else if (eventType === 'pull_request') {
-          await handlePullRequestEvent(payload, scheduler, log);
+          await handlePullRequestEvent(payload, forgejo, scheduler, log);
         }
         // issue_comment events are informational — no action needed
       } catch (err) {
@@ -248,6 +249,7 @@ async function handleIssueEvent(
 
 async function handlePullRequestEvent(
   payload: WebhookPayload,
+  forgejo: ForgejoClient,
   scheduler: Scheduler,
   log: import('fastify').FastifyBaseLogger
 ): Promise<void> {
@@ -256,8 +258,6 @@ async function handlePullRequestEvent(
 
   // PR merged externally
   if (payload.action === 'closed' && pr.merged) {
-    // Find the task associated with this PR
-    // PR number might match an issue number in our tasks table via pr_number
     const repoData = payload.repository;
     if (!repoData) return;
 
@@ -267,30 +267,57 @@ async function handlePullRequestEvent(
     );
     if (!repo) return;
 
-    // Search for a task with this PR number
+    // Find the task associated with this PR (may be one we tracked, or a
+    // human-merged sibling — either way we want to scan the repo afterwards).
     const allTasks = getTasks({ repo_id: repo.id });
     const task = allTasks.find((t) => t.pr_number === pr.number);
 
-    if (!task) return;
-
-    // Idempotency: skip if already terminal
-    if (TERMINAL_STATUSES.has(task.status)) {
-      log.info(
-        { event: 'webhook_pr_merged_already_terminal', task_id: task.id },
-        'PR merged webhook but task already in terminal state'
-      );
-      return;
+    if (task) {
+      if (TERMINAL_STATUSES.has(task.status)) {
+        log.info(
+          { event: 'webhook_pr_merged_already_terminal', task_id: task.id },
+          'PR merged webhook but task already in terminal state'
+        );
+      } else {
+        updateTask(task.id, {
+          status: 'merged',
+          completed_at: new Date().toISOString(),
+        });
+        log.info(
+          { event: 'webhook_pr_merged', task_id: task.id, pr_number: pr.number },
+          'Task marked as merged — PR merged externally'
+        );
+      }
     }
 
-    updateTask(task.id, {
-      status: 'merged',
-      completed_at: new Date().toISOString(),
-    });
-
-    log.info(
-      { event: 'webhook_pr_merged', task_id: task.id, pr_number: pr.number },
-      'Task marked as merged — PR merged externally'
-    );
+    // Now that a PR merged, any other `awaiting-human-merge` task in this
+    // repo may have become stale. Scan them and auto-queue a rebase for any
+    // PR that's gone unmergeable. Detection is immediate here; the fallback
+    // poller does the same scan every minute in case this webhook was lost.
+    try {
+      const promoted = await scanForHumanMergeConflicts(
+        repo.id,
+        forgejo,
+        log,
+        () => scheduler.triggerTick()
+      );
+      if (promoted > 0) {
+        log.info(
+          {
+            event: 'webhook_post_merge_rebase_queued',
+            repo_id: repo.id,
+            promoted,
+            merged_pr: pr.number,
+          },
+          `Auto-queued ${promoted} task(s) for rebase after PR #${pr.number} merged`
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { event: 'webhook_post_merge_scan_failed', err },
+        'Failed to scan for human-merge conflicts after PR merged'
+      );
+    }
 
     scheduler.triggerTick();
   }

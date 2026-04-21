@@ -1,4 +1,5 @@
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { scanForHumanMergeConflicts } from './conflict-detector.js';
 
 // Terminal-state tasks that should re-enter the queue if the user re-applies
 // status/queued in Forgejo. 'merged' is intentionally excluded — the PR is
@@ -83,6 +84,16 @@ export class Poller {
       try {
         await this.pollRepoForQueuedIssues(repo);
         await this.detectExternalStateChanges(repo);
+        // Safety-net scan for `awaiting-human-merge` tasks that have gone
+        // stale because a sibling merged. The webhook handler performs the
+        // same scan immediately on merge; this runs every poll cycle as a
+        // fallback for dropped webhooks. checkHumanMergeConflict is idempotent.
+        await scanForHumanMergeConflicts(
+          repo.id,
+          this.forgejo,
+          this.log,
+          () => this.scheduler.triggerTick()
+        );
         foundNew = true;
       } catch (err) {
         this.log.warn(
