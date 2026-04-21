@@ -8,7 +8,7 @@ These tests validate the full task lifecycle against a running orchestrator with
 - Forgejo instance running with test user accounts and API tokens
 - Mock agent image built (`docker build -t orchestrator-agent-node:latest -f images/test-mock/Dockerfile images/test-mock/`)
 - Orchestrator configured with a test repository pointing to the mock agent tool
-- Environment variables: `TEST_E2E=true`, `TEST_FORGEJO_URL`, `TEST_FORGEJO_TOKEN`, `TEST_FORGEJO_USER`
+- Environment variables: `TEST_E2E=true`, `TEST_FORGEJO_URL`, `TEST_FORGEJO_ORCHESTRATOR_TOKEN`, `TEST_FORGEJO_USER`
 
 ## Test Cases
 

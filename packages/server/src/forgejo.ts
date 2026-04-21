@@ -46,6 +46,15 @@ export interface ForgejoUser {
   login: string;
 }
 
+export interface ForgejoRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { login: string };
+  default_branch: string;
+  html_url: string;
+}
+
 export interface ForgejoHook {
   id: number;
   type: string;
@@ -124,6 +133,15 @@ export class ForgejoClient {
 
   async getCurrentUser(): Promise<ForgejoUser> {
     return this.request<ForgejoUser>('GET', '/user');
+  }
+
+  // ---- Repositories ----
+
+  async listUserRepos(limit = 50): Promise<ForgejoRepo[]> {
+    return this.request<ForgejoRepo[]>(
+      'GET',
+      `/user/repos?limit=${limit}`
+    );
   }
 
   // ---- Issues ----

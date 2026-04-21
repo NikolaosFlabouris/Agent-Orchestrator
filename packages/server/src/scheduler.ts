@@ -36,6 +36,7 @@ import {
   getOutputDir,
   getCacheDir,
   generateBranchName,
+  writeAgentConfigFile,
 } from './workspace.js';
 import { postDevAgent, handleDevFailure } from './agents/develop.js';
 import {
@@ -388,6 +389,9 @@ export class Scheduler {
     // Write task files
     this.writeTaskFiles(task, repo, tool, issue, feedback);
 
+    // Write tool-specific config file (e.g. opencode.json) into the workspace
+    writeAgentConfigFile(task, tool, this.log);
+
     // Resolve config
     const effective = this.resolveConfig(task, repo, tool);
 
@@ -469,6 +473,9 @@ export class Scheduler {
 
     // Write task files
     this.writeTaskFiles(task, repo, tool, issue, null, 'review');
+
+    // Write tool-specific config file (e.g. opencode.json) into the workspace
+    writeAgentConfigFile(task, tool, this.log);
 
     // Resolve config
     const effective = this.resolveConfig(task, repo, tool);
@@ -879,10 +886,16 @@ export class Scheduler {
     repo: Repo,
     tool: AgentTool
   ): { model: string; maxTurns: number; timeout: number; command: string } {
+    // Timeout resolution: tool > repo > global. Per-tool override is useful
+    // for raising the limit on free/local tools (e.g. OpenCode + Ollama) while
+    // keeping API-backed tools on a tighter safety budget.
     return {
       model: task.model ?? repo.model ?? getSetting('default_model') ?? 'sonnet',
       maxTurns: repo.max_turns ?? (getSettingInt('default_max_turns') || 100),
-      timeout: repo.timeout_minutes ?? (getSettingInt('agent_timeout_minutes') || 30),
+      timeout:
+        tool.timeout_minutes ??
+        repo.timeout_minutes ??
+        (getSettingInt('agent_timeout_minutes') || 30),
       command: tool.command_template ?? '',
     };
   }
@@ -890,11 +903,21 @@ export class Scheduler {
   private buildEnv(task: Task, repo: Repo, tool: AgentTool): string[] {
     const env: string[] = [];
 
-    // Static env vars from tool config
+    // Static env vars from tool config. If the JSON looks like a config file
+    // (top-level `provider`/`permission`/`agent` key — typical of OpenCode's
+    // opencode.json shape), skip env-var injection: it would set garbage env
+    // vars like `provider=[object Object]`. The config is written to
+    // /repo/opencode.json instead by writeAgentConfigFile.
     try {
       const envVars = JSON.parse(tool.env_vars);
-      for (const [key, value] of Object.entries(envVars)) {
-        env.push(`${key}=${value}`);
+      const isConfigShaped =
+        envVars &&
+        typeof envVars === 'object' &&
+        ('provider' in envVars || 'permission' in envVars || 'agent' in envVars);
+      if (!isConfigShaped) {
+        for (const [key, value] of Object.entries(envVars)) {
+          env.push(`${key}=${value}`);
+        }
       }
     } catch {
       // Invalid JSON in env_vars

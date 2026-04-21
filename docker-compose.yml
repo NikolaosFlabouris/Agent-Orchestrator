@@ -1,20 +1,50 @@
+# Before first boot:
+#   1. cp .env.example .env  and fill in tokens / API keys
+#   2. ./scripts/build-agent-images.sh   (builds orchestrator-agent-{base,node,python,go}:latest)
+#   3. docker compose up -d
+#   4. npm run seed:tools                (populates the agent_tools table with defaults)
+# See docs/quick-start.md for the full bring-up procedure.
+
 services:
   orchestrator:
     build: .
     container_name: orchestrator
     restart: unless-stopped
+    # stop_grace_period must be >= agent_timeout_minutes + a few minutes of drain slack.
+    # If you raise agent_timeout_minutes in the UI, raise this too and `docker compose up -d`.
     stop_grace_period: 35m
     ports:
-      - "8080:8080"
+      - "8081:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data
-      - workspaces:/workspaces
-      - caches:/caches
+      # /workspaces and /caches are bind mounts (NOT named volumes) because the
+      # orchestrator passes its in-container `/workspaces/issue-N` path through
+      # the Docker socket as the source of agent-container bind mounts. The
+      # Docker daemon interprets that source as a HOST path. With a named
+      # volume, the host has no `/workspaces/...` and Docker silently creates
+      # an empty directory — agents launch with an empty /repo and immediately
+      # fail. With a bind mount, the orchestrator's `/workspaces` is the same
+      # filesystem path on the host, so the agent sees the actual workspace.
+      # The host directories are gitignored.
+      - ./workspaces:/workspaces
+      - ./caches:/caches
     env_file:
       - .env
+    networks:
+      - default
+      - agent-network
+
+networks:
+  # Shared bridge network for orchestrator <-> agent containers.
+  # Marked external because the orchestrator creates this network itself at
+  # boot via ensureAgentNetwork() (see packages/server/src/docker.ts). Compose
+  # only attaches to it. If the network does not yet exist on a fresh host,
+  # `scripts/build-agent-images.sh` creates it idempotently, or create it
+  # manually with `docker network create agent-network`.
+  agent-network:
+    external: true
+    name: agent-network
 
 volumes:
   orchestrator-data:
-  workspaces:
-  caches:

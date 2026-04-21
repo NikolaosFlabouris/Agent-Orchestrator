@@ -7,3 +7,10 @@ dist/
 .env
 .env.test
 .test-tmp-*
+
+# Orchestrator runtime data — bind-mounted into the orchestrator container.
+# The orchestrator passes its in-container /workspaces path through the Docker
+# socket as a bind-mount source, which the daemon interprets as a host path,
+# so the in-container path must equal the host path. See docker-compose.yml.
+/workspaces/
+/caches/

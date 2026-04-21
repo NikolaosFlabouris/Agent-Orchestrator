@@ -10,6 +10,30 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
       return { repos: getRepos() };
     });
 
+    // GET /api/repos/available — list repos from Forgejo not yet registered
+    app.get('/api/repos/available', async (_request, reply) => {
+      try {
+        const forgejoRepos = await forgejo.listUserRepos();
+        const registered = getRepos();
+        const registeredSet = new Set(
+          registered.map((r) => `${r.owner}/${r.name}`)
+        );
+        const available = forgejoRepos
+          .filter((r) => !registeredSet.has(r.full_name))
+          .map((r) => ({
+            owner: r.owner.login,
+            name: r.name,
+            full_name: r.full_name,
+            default_branch: r.default_branch,
+          }));
+        return { repos: available };
+      } catch (err) {
+        return reply.status(500).send({
+          error: `Failed to fetch Forgejo repos: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    });
+
     // POST /api/repos
     app.post('/api/repos', async (request, reply) => {
       const body = request.body as Record<string, unknown>;

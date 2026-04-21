@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Task } from '@orchestrator/shared';
+import type { Task, AgentTool } from '@orchestrator/shared';
 import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -10,6 +10,37 @@ import { insertTaskEvent } from './db.js';
 const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 const AGENT_TOKEN = process.env.FORGEJO_AGENT_TOKEN ?? '';
+
+// Agent containers run as UID/GID 1000 (the `agent` user in the base image).
+// The orchestrator runs as root, so any file/dir it creates inside the shared
+// /workspaces, /caches volumes is root-owned and unwritable by the agent.
+// Chown everything we create to 1000:1000 so the agent can read/write.
+const AGENT_UID = 1000;
+const AGENT_GID = 1000;
+
+/** chown a directory tree to the agent user. No-op on non-Linux (chown is a
+ *  Windows no-op in Node anyway). Safe to call on every prepare since chown is
+ *  idempotent and cheap. */
+function chownRecursive(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  try {
+    fs.chownSync(dir, AGENT_UID, AGENT_GID);
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        chownRecursive(child);
+      } else {
+        try {
+          fs.chownSync(child, AGENT_UID, AGENT_GID);
+        } catch {
+          /* best effort — file may have vanished */
+        }
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -253,7 +284,7 @@ export function prepareWorkspace(
     }
   }
 
-  // Ensure output and task dirs exist with correct ownership
+  // Ensure output and task dirs exist
   const taskDir = getTaskDir(task);
   const outputDir = getOutputDir(task);
   fs.mkdirSync(taskDir, { recursive: true });
@@ -263,10 +294,110 @@ export function prepareWorkspace(
   const cacheDir = getCacheDir(repo.owner, repo.name);
   fs.mkdirSync(cacheDir, { recursive: true });
 
+  // Add orchestrator/agent metadata paths to the per-clone exclude list. These
+  // are NOT in the upstream .gitignore (and shouldn't be — they're orchestrator
+  // implementation details). Without this, the salvage logic's `git add -A`
+  // sweeps them into a commit and the resulting PR contains only orchestrator
+  // metadata instead of real source changes. .git/info/exclude is local-only
+  // (never committed, never pushed), so this is the right place.
+  writeLocalGitExclude(workdir, [
+    '.task/',
+    '.output/',
+    'opencode.json',
+    '.opencode/',
+  ]);
+
+  // Chown everything to the agent user. The orchestrator runs as root and the
+  // git clone / mkdir above creates root-owned files; without this the agent
+  // (UID 1000) can't write to /output/progress.log and the harness exits 2.
+  // Idempotent — safe to run on every prepare (including reworks).
+  chownRecursive(workdir);
+  chownRecursive(cacheDir);
+
   log.info(
     { event: 'workspace_ready', task_id: task.id, workdir },
     'Workspace prepared'
   );
+}
+
+function writeLocalGitExclude(workdir: string, patterns: string[]): void {
+  const excludePath = path.join(workdir, '.git', 'info', 'exclude');
+  try {
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    let existing = '';
+    try {
+      existing = fs.readFileSync(excludePath, 'utf-8');
+    } catch {
+      /* file doesn't exist yet */
+    }
+    const lines = new Set(existing.split('\n').map((l) => l.trim()));
+    let changed = false;
+    for (const p of patterns) {
+      if (!lines.has(p)) {
+        lines.add(p);
+        changed = true;
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(
+        excludePath,
+        Array.from(lines).filter(Boolean).join('\n') + '\n'
+      );
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent tool config-file injection
+// ---------------------------------------------------------------------------
+//
+// Some agent tools (notably OpenCode) take their provider/model/permission
+// config from a JSON file (opencode.json), NOT from environment variables. The
+// orchestrator's agent_tools.env_vars column accepts a JSON object; if that
+// object looks like an OpenCode config (top-level `provider` or `permission`
+// key), write it to /repo/opencode.json so OpenCode picks it up. The file is
+// in the local git exclude list so it never enters a commit.
+//
+// This is a per-tool concern but lives in workspace.ts so the file lands
+// before the agent container starts. Called from the scheduler.
+
+export function writeAgentConfigFile(
+  task: Task,
+  tool: AgentTool,
+  log: FastifyBaseLogger
+): void {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(tool.env_vars || '{}');
+  } catch {
+    return;
+  }
+  const looksLikeOpenCodeConfig =
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    ('provider' in parsed || 'permission' in parsed || 'agent' in parsed);
+  if (!looksLikeOpenCodeConfig) return;
+
+  const target = path.join(getWorkdir(task), 'opencode.json');
+  try {
+    fs.writeFileSync(target, JSON.stringify(parsed, null, 2));
+    try {
+      fs.chownSync(target, 1000, 1000);
+    } catch {
+      /* best effort on non-Linux */
+    }
+    log.info(
+      { event: 'agent_config_written', task_id: task.id, tool_id: tool.id, path: target },
+      'Wrote OpenCode config from tool env_vars'
+    );
+  } catch (err) {
+    log.warn(
+      { event: 'agent_config_write_failed', task_id: task.id, err },
+      'Failed to write OpenCode config'
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

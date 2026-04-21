@@ -121,7 +121,9 @@ function createTables(db: Database.Database): void {
       command_template TEXT,
       env_vars TEXT NOT NULL DEFAULT '{}',
       auth_type TEXT NOT NULL,
-      auth_config TEXT NOT NULL DEFAULT '{}'
+      auth_config TEXT NOT NULL DEFAULT '{}',
+      -- Optional per-tool timeout. Null = fall through to repo then global.
+      timeout_minutes INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS task_events (
@@ -167,6 +169,19 @@ function runMigrations(db: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
     `);
     db.prepare("UPDATE settings SET value = '2' WHERE key = 'schema_version'").run();
+  }
+
+  if (version < 3) {
+    // Per-tool timeout override. Null means fall through to repo/global.
+    // Useful for raising the limit on free/local tools (e.g. OpenCode + Ollama
+    // on a 30B parameter model) without loosening API-backed tool budgets.
+    const cols = db
+      .prepare("PRAGMA table_info(agent_tools)")
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'timeout_minutes')) {
+      db.exec('ALTER TABLE agent_tools ADD COLUMN timeout_minutes INTEGER');
+    }
+    db.prepare("UPDATE settings SET value = '3' WHERE key = 'schema_version'").run();
   }
 }
 

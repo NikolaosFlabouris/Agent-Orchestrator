@@ -35,10 +35,21 @@ fi
 # The orchestrator assembles the full prompt before the container starts.
 PROMPT="$TASK_DIR/prompt.md"
 
-# Substitute prompt into command template
-TASK_PROMPT=$(cat "$PROMPT")
-export TASK_PROMPT
-RESOLVED_COMMAND=$(envsubst '${TASK_PROMPT}' <<< "$AGENT_COMMAND")
+# Prompt substitution:
+# - {{PROMPT_FILE}} (preferred) — replaced with the literal path /task/prompt.md.
+#   The agent tool reads the file itself; prompt content never hits the shell.
+#   Safe against shell metacharacters in user-authored issue bodies.
+# - ${TASK_PROMPT} (legacy) — prompt text inlined via envsubst into bash -c.
+#   Vulnerable to shell metacharacters; kept for backward compatibility only.
+if [[ "$AGENT_COMMAND" == *"{{PROMPT_FILE}}"* ]]; then
+  # Safe path: substitute the file path, not the content.
+  RESOLVED_COMMAND="${AGENT_COMMAND//\{\{PROMPT_FILE\}\}/$PROMPT}"
+else
+  # Legacy path: inline prompt text (unsafe with untrusted input).
+  TASK_PROMPT=$(cat "$PROMPT")
+  export TASK_PROMPT
+  RESOLVED_COMMAND=$(envsubst '${TASK_PROMPT}' <<< "$AGENT_COMMAND")
+fi
 
 # Run agent with timeout
 AGENT_EXIT=0

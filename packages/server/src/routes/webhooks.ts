@@ -1,6 +1,18 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
+
+// Terminal-state tasks that should re-enter the queue when the user re-applies
+// status/queued in Forgejo. Mirrors the set in polling.ts. 'merged' is excluded —
+// open a new issue for further work on an already-merged PR.
+const REQUEUEABLE_FROM_LABEL = new Set<string>([
+  'failed',
+  'cancelled',
+  'reset',
+  'awaiting-human-merge',
+  'awaiting-human-review',
+  'needs-human-review',
+]);
 import {
   getTaskByIssue,
   getRepoByOwnerName,
@@ -132,17 +144,45 @@ async function handleIssueEvent(
     );
 
     if (hasQueued) {
-      // Idempotency: check if task already exists
       const existing = getTaskByIssue(issue.number);
       if (existing) {
-        log.info(
-          {
-            event: 'webhook_duplicate_queue',
-            issue_id: issue.number,
-            existing_status: existing.status,
-          },
-          `Duplicate queue request for issue #${issue.number}, already tracked as ${existing.status}`
-        );
+        // Already tracked. Re-queue only if the task is in a re-queueable
+        // terminal state — the user re-labeled to request another attempt.
+        //
+        // Re-queue is a soft reset (mirrors polling.ts): clear branch/PR and
+        // reset attempt to 1. The prior branch may have been deleted on
+        // Forgejo, so trying to rework against it would hit "branch not found".
+        if (REQUEUEABLE_FROM_LABEL.has(existing.status)) {
+          updateTask(existing.id, {
+            status: 'queued',
+            container_id: null,
+            branch_name: null,
+            pr_number: null,
+            attempt: 1,
+            prep_failure_count: 0,
+            started_at: null,
+            completed_at: null,
+          });
+          log.info(
+            {
+              event: 'webhook_task_requeued',
+              task_id: existing.id,
+              issue_id: issue.number,
+              previous_status: existing.status,
+            },
+            `Task #${existing.id} re-queued by webhook (was ${existing.status})`
+          );
+          scheduler.triggerTick();
+        } else {
+          log.info(
+            {
+              event: 'webhook_duplicate_queue',
+              issue_id: issue.number,
+              existing_status: existing.status,
+            },
+            `Duplicate queue request for issue #${issue.number}, already tracked as ${existing.status}`
+          );
+        }
         return;
       }
 

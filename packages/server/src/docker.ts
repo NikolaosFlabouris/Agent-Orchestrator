@@ -1,4 +1,6 @@
 import Docker from 'dockerode';
+import os from 'node:os';
+import fs from 'node:fs';
 import type { Task, Repo, AgentTool } from '@orchestrator/shared';
 import { getSetting, getSettingInt } from './db.js';
 
@@ -18,6 +20,69 @@ export function getDocker(): Docker {
     throw new Error('Docker not initialized. Call initDocker() first.');
   }
   return _docker;
+}
+
+// ---------------------------------------------------------------------------
+// Host-path translation for sibling containers
+// ---------------------------------------------------------------------------
+//
+// The orchestrator runs inside a container. When it asks the Docker daemon to
+// create a sibling agent container with a bind mount, the daemon interprets the
+// bind source as a HOST path — NOT a path inside the orchestrator. On plain
+// Linux with matching host bind mounts (e.g. `./workspaces:/workspaces`) these
+// two paths happen to agree, so passing `/workspaces/issue-N` works. On Docker
+// Desktop (Windows/macOS), the host path is something like
+// `C:\Users\...\workspaces` and the daemon has no idea what `/workspaces` means
+// — it silently creates an empty directory (or maps into its own rootfs
+// overlay) and the agent sees nothing.
+//
+// To be portable, we inspect the orchestrator's own container at boot, read
+// the host `Source` for each of its mounts, and translate in-container paths
+// to host paths when constructing agent bind-mount specs.
+
+let _hostPathMap: Map<string, string> | null = null;
+
+async function loadHostPathMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    const id = (process.env.HOSTNAME ?? os.hostname()).trim();
+    if (!id) return map;
+    const self = await _docker.getContainer(id).inspect();
+    for (const m of self.Mounts ?? []) {
+      if (m.Destination && m.Source) {
+        map.set(m.Destination.replace(/\/+$/, ''), m.Source.replace(/\/+$/, ''));
+      }
+    }
+  } catch {
+    // Best effort — on plain Linux or if inspect fails, in-container paths
+    // happen to equal host paths for bind-mounted working directories, so
+    // falling through with an empty map is a safe default.
+  }
+  return map;
+}
+
+export async function initHostPathMap(): Promise<void> {
+  _hostPathMap = await loadHostPathMap();
+}
+
+/** Translate an in-container absolute path (e.g. /workspaces/issue-1) to the
+ *  corresponding HOST path the Docker daemon can resolve. Falls back to the
+ *  input if no mapping is known. */
+export function toHostPath(inContainerPath: string): string {
+  if (!_hostPathMap) return inContainerPath;
+  const normalized = inContainerPath.replace(/\/+$/, '');
+  // Find the longest matching destination prefix.
+  let best: { dest: string; source: string } | null = null;
+  for (const [dest, source] of _hostPathMap.entries()) {
+    if (normalized === dest || normalized.startsWith(dest + '/')) {
+      if (!best || dest.length > best.dest.length) {
+        best = { dest, source };
+      }
+    }
+  }
+  if (!best) return inContainerPath;
+  const suffix = normalized.slice(best.dest.length);
+  return best.source + suffix;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,23 +113,35 @@ export async function createAgentContainer(
 ): Promise<Docker.Container> {
   const { task, repo, tool, workdir, taskDir, outputDir, cacheDir, env } = opts;
 
+  // The orchestrator passes in paths as they appear INSIDE its own container.
+  // The Docker daemon interprets bind-mount sources as HOST paths, so translate
+  // before constructing the Binds array. No-op on plain Linux where the two
+  // agree. Also ensure language-specific cache subdirectories exist and are
+  // writable by the agent user before Docker auto-creates them as root-owned.
+  ensureCacheSubdirs(cacheDir, repo.image_type);
+
+  const workdirHost = toHostPath(workdir);
+  const taskDirHost = toHostPath(taskDir);
+  const outputDirHost = toHostPath(outputDir);
+  const cacheDirHost = toHostPath(cacheDir);
+
   const mounts = [
-    `${workdir}:/repo`,
-    `${taskDir}:/task`,
-    `${outputDir}:/output`,
-    `${cacheDir}:/cache`,
+    `${workdirHost}:/repo`,
+    `${taskDirHost}:/task`,
+    `${outputDirHost}:/output`,
+    `${cacheDirHost}:/cache`,
   ];
 
   // Language-specific cache mounts
   if (repo.image_type === 'node') {
-    mounts.push(`${cacheDir}/node_modules:/repo/node_modules`);
-    mounts.push(`${cacheDir}/npm-cache:/home/agent/.npm`);
+    mounts.push(`${cacheDirHost}/node_modules:/repo/node_modules`);
+    mounts.push(`${cacheDirHost}/npm-cache:/home/agent/.npm`);
   } else if (repo.image_type === 'python') {
-    mounts.push(`${cacheDir}/venv:/repo/.venv`);
-    mounts.push(`${cacheDir}/pip-cache:/home/agent/.cache/pip`);
+    mounts.push(`${cacheDirHost}/venv:/repo/.venv`);
+    mounts.push(`${cacheDirHost}/pip-cache:/home/agent/.cache/pip`);
   } else if (repo.image_type === 'go') {
-    mounts.push(`${cacheDir}/go-mod-cache:/home/agent/go/pkg/mod`);
-    mounts.push(`${cacheDir}/go-build-cache:/home/agent/.cache/go-build`);
+    mounts.push(`${cacheDirHost}/go-mod-cache:/home/agent/go/pkg/mod`);
+    mounts.push(`${cacheDirHost}/go-build-cache:/home/agent/.cache/go-build`);
   }
 
   // Entrypoint determined by tool type
@@ -175,8 +252,31 @@ export function getContainer(containerId: string): Docker.Container {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Cache-dir pre-creation (so Docker does not auto-create as root)
 // ---------------------------------------------------------------------------
+
+const CACHE_SUBDIRS: Record<string, string[]> = {
+  node: ['node_modules', 'npm-cache'],
+  python: ['venv', 'pip-cache'],
+  go: ['go-mod-cache', 'go-build-cache'],
+};
+
+function ensureCacheSubdirs(cacheDir: string, imageType: string): void {
+  const subs = CACHE_SUBDIRS[imageType] ?? [];
+  for (const sub of subs) {
+    const p = `${cacheDir}/${sub}`;
+    try {
+      fs.mkdirSync(p, { recursive: true });
+      try {
+        fs.chownSync(p, 1000, 1000);
+      } catch {
+        /* non-Linux host or no permission — best effort */
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Network

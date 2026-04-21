@@ -1,4 +1,16 @@
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
+
+// Terminal-state tasks that should re-enter the queue if the user re-applies
+// status/queued in Forgejo. 'merged' is intentionally excluded — the PR is
+// already in; open a new issue for further work.
+const REQUEUEABLE_FROM_LABEL = new Set<string>([
+  'failed',
+  'cancelled',
+  'reset',
+  'awaiting-human-merge',
+  'awaiting-human-review',
+  'needs-human-review',
+]);
 import {
   getRepos,
   getTaskByIssue,
@@ -108,9 +120,43 @@ export class Poller {
     }
 
     for (const issue of issues) {
-      // Idempotency check
       const existing = getTaskByIssue(issue.number);
-      if (existing) continue;
+
+      if (existing) {
+        // Issue is already tracked. Re-queue only if the task is in a
+        // re-queueable terminal state — the human re-labeled the issue
+        // status/queued to ask for another attempt. 'merged' is intentionally
+        // excluded: if the PR is already in, opening another attempt on the
+        // same issue is confusing; the user should create a new issue instead.
+        //
+        // Re-queue is a soft reset: branch/PR are cleared (the previous branch
+        // may have been deleted on Forgejo, and trying to rework against it
+        // hits "branch not found"); attempt is reset to 1 so the user gets a
+        // full retry budget. To preserve the prior branch, use the orchestrator
+        // UI's reset+requeue flow instead.
+        if (REQUEUEABLE_FROM_LABEL.has(existing.status)) {
+          updateTask(existing.id, {
+            status: 'queued',
+            container_id: null,
+            branch_name: null,
+            pr_number: null,
+            attempt: 1,
+            prep_failure_count: 0,
+            started_at: null,
+            completed_at: null,
+          });
+          this.log.info(
+            {
+              event: 'poll_task_requeued',
+              task_id: existing.id,
+              issue_id: issue.number,
+              previous_status: existing.status,
+            },
+            `Task #${existing.id} re-queued by Forgejo label change (was ${existing.status})`
+          );
+        }
+        continue;
+      }
 
       // New task from Forgejo
       insertTask({

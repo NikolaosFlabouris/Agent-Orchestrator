@@ -77,6 +77,10 @@ export interface AgentTool {
   env_vars: string;
   auth_type: string;
   auth_config: string;
+  /** Per-tool runtime cap in minutes. Resolution order:
+   *  task (not yet supported) > tool.timeout_minutes > repo.timeout_minutes >
+   *  settings.agent_timeout_minutes. Null means "fall through". */
+  timeout_minutes: number | null;
 }
 
 export type AgentToolType = 'sdk' | 'cli';

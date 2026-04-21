@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
-import type { RepoResponse, ToolResponse, CredentialStatus } from '../api.js';
+import type { RepoResponse, ToolResponse, CredentialStatus, ForgejoRepoResponse } from '../api.js';
 
 const SAFE_SCRIPT_PATTERNS = [
   /^npm\s+(ci|install)$/,
@@ -147,12 +147,14 @@ function GlobalSettings() {
 function RepoSettings() {
   const [repos, setRepos] = useState<RepoResponse[]>([]);
   const [tools, setTools] = useState<ToolResponse[]>([]);
+  const [availableRepos, setAvailableRepos] = useState<ForgejoRepoResponse[]>([]);
   const [editing, setEditing] = useState<Partial<RepoResponse> | null>(null);
   const [isNew, setIsNew] = useState(false);
 
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
     api.getTools().then((r) => setTools(r.tools)).catch(() => {});
+    api.getAvailableRepos().then((r) => setAvailableRepos(r.repos)).catch(() => {});
   }, []);
 
   async function handleSave() {
@@ -204,6 +206,7 @@ function RepoSettings() {
         onClick={() => {
           setEditing({ base_branch: 'main', image_type: 'node', agent_tool: '' });
           setIsNew(true);
+          api.getAvailableRepos().then((r) => setAvailableRepos(r.repos)).catch(() => {});
         }}
         className="text-sm text-blue-400 hover:text-blue-300"
       >
@@ -217,24 +220,28 @@ function RepoSettings() {
           </h3>
           <div className="grid grid-cols-2 gap-4">
             {isNew && (
-              <>
-                <div>
-                  <label className="block text-sm mb-1">Owner</label>
-                  <input
-                    value={editing.owner ?? ''}
-                    onChange={(e) => setEditing({ ...editing, owner: e.target.value })}
+              <div className="col-span-2">
+                <label className="block text-sm mb-1">Repository</label>
+                {availableRepos.length > 0 ? (
+                  <select
+                    value={editing.owner && editing.name ? `${editing.owner}/${editing.name}` : ''}
+                    onChange={(e) => {
+                      const selected = availableRepos.find((r) => r.full_name === e.target.value);
+                      if (selected) {
+                        setEditing({ ...editing, owner: selected.owner, name: selected.name, base_branch: selected.default_branch });
+                      }
+                    }}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-1">Name</label>
-                  <input
-                    value={editing.name ?? ''}
-                    onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-                  />
-                </div>
-              </>
+                  >
+                    <option value="">Select a repository...</option>
+                    {availableRepos.map((r) => (
+                      <option key={r.full_name} value={r.full_name}>{r.full_name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-gray-500 text-sm py-2">No unregistered repositories found in Forgejo</p>
+                )}
+              </div>
             )}
             <div>
               <label className="block text-sm mb-1">Base branch</label>
@@ -357,10 +364,58 @@ function RepoSettings() {
 
 function ToolSettings() {
   const [tools, setTools] = useState<ToolResponse[]>([]);
+  const [editing, setEditing] = useState<Partial<ToolResponse> | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [envVarsText, setEnvVarsText] = useState('{}');
+  const [authConfigText, setAuthConfigText] = useState('{}');
 
   useEffect(() => {
     api.getTools().then((r) => setTools(r.tools)).catch(() => {});
   }, []);
+
+  function startEdit(tool: ToolResponse) {
+    setEditing({ ...tool });
+    setEnvVarsText(JSON.stringify(tool.env_vars, null, 2));
+    setAuthConfigText(JSON.stringify(tool.auth_config, null, 2));
+    setIsNew(false);
+  }
+
+  function startCreate() {
+    setEditing({ id: '', display_name: '', type: 'cli', command_template: '', auth_type: 'none', env_vars: {}, auth_config: {} });
+    setEnvVarsText('{}');
+    setAuthConfigText('{}');
+    setIsNew(true);
+  }
+
+  async function handleSave() {
+    if (!editing) return;
+    let envVars: Record<string, string>;
+    let authConfig: Record<string, unknown>;
+    try {
+      envVars = JSON.parse(envVarsText);
+    } catch {
+      return; // Invalid JSON
+    }
+    try {
+      authConfig = JSON.parse(authConfigText);
+    } catch {
+      return;
+    }
+    const payload = { ...editing, env_vars: envVars, auth_config: authConfig };
+    try {
+      if (isNew) {
+        const tool = await api.createTool(payload);
+        setTools((prev) => [...prev, tool]);
+      } else {
+        const tool = await api.updateTool(editing.id!, payload);
+        setTools((prev) => prev.map((t) => (t.id === tool.id ? tool : t)));
+      }
+      setEditing(null);
+      setIsNew(false);
+    } catch {
+      // Error
+    }
+  }
 
   const statusColors: Record<string, string> = {
     configured: 'text-green-400',
@@ -370,7 +425,7 @@ function ToolSettings() {
 
   return (
     <div className="space-y-4">
-      {tools.length === 0 ? (
+      {tools.length === 0 && !editing ? (
         <p className="text-gray-500 text-sm">No agent tools configured</p>
       ) : (
         tools.map((tool) => (
@@ -386,9 +441,17 @@ function ToolSettings() {
                   Type: {tool.type}
                 </span>
               </div>
-              <span className={`text-sm ${statusColors[tool.auth_status] ?? 'text-gray-400'}`}>
-                {tool.auth_status}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className={`text-sm ${statusColors[tool.auth_status] ?? 'text-gray-400'}`}>
+                  {tool.auth_status}
+                </span>
+                <button
+                  onClick={() => startEdit(tool)}
+                  className="text-sm text-blue-400 hover:text-blue-300"
+                >
+                  Edit
+                </button>
+              </div>
             </div>
             {tool.command_template && (
               <div className="mt-2 text-xs font-mono text-gray-400 truncate">
@@ -397,11 +460,129 @@ function ToolSettings() {
             )}
             {Object.keys(tool.env_vars).length > 0 && (
               <div className="mt-2 text-xs text-gray-500">
-                Env: {Object.keys(tool.env_vars).join(', ')}
+                Env: {Object.entries(tool.env_vars).map(([k, v]) => `${k}=${v}`).join(', ')}
               </div>
             )}
           </div>
         ))
+      )}
+
+      <button
+        onClick={startCreate}
+        className="text-sm text-blue-400 hover:text-blue-300"
+      >
+        + Add tool
+      </button>
+
+      {editing && (
+        <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
+          <h3 className="font-medium">
+            {isNew ? 'Add Agent Tool' : `Edit ${editing.display_name}`}
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm mb-1">ID</label>
+              <input
+                value={editing.id ?? ''}
+                onChange={(e) => setEditing({ ...editing, id: e.target.value })}
+                disabled={!isNew}
+                placeholder="e.g. opencode-local"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Display name</label>
+              <input
+                value={editing.display_name ?? ''}
+                onChange={(e) => setEditing({ ...editing, display_name: e.target.value })}
+                placeholder="e.g. OpenCode (Local LLM)"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Type</label>
+              <select
+                value={editing.type ?? 'cli'}
+                onChange={(e) => setEditing({ ...editing, type: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                <option value="cli">cli</option>
+                <option value="sdk">sdk</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Auth type</label>
+              <select
+                value={editing.auth_type ?? 'none'}
+                onChange={(e) => setEditing({ ...editing, auth_type: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                <option value="none">none</option>
+                <option value="api-key">api-key</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">
+                Timeout override (minutes)
+                <span className="text-gray-500 font-normal"> — blank = use repo/global default</span>
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={editing.timeout_minutes ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    timeout_minutes: e.target.value ? parseInt(e.target.value, 10) : null,
+                  })
+                }
+                placeholder="e.g. 2880 for 48h on a free/local tool"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm mb-1">Command template</label>
+            <input
+              value={editing.command_template ?? ''}
+              onChange={(e) => setEditing({ ...editing, command_template: e.target.value })}
+              placeholder='e.g. opencode run --non-interactive --prompt "${TASK_PROMPT}"'
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-1">Environment variables (JSON)</label>
+            <textarea
+              value={envVarsText}
+              onChange={(e) => setEnvVarsText(e.target.value)}
+              placeholder='{"OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1"}'
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[80px]"
+            />
+          </div>
+          <div>
+            <label className="block text-sm mb-1">Auth config (JSON)</label>
+            <textarea
+              value={authConfigText}
+              onChange={(e) => setAuthConfigText(e.target.value)}
+              placeholder='{"env_var": "OPENCODE_API_KEY", "optional": true}'
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[60px]"
+            />
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={handleSave}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => { setEditing(null); setIsNew(false); }}
+              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

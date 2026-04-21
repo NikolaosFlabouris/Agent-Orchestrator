@@ -8,6 +8,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     credentials: 'same-origin',
   });
 
+  if (res.status === 401) {
+    window.location.href = '/auth/login';
+    throw new Error('Unauthorized — redirecting to login');
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || `${res.status} ${res.statusText}`);
@@ -48,6 +53,8 @@ export const api = {
     request<Record<string, unknown>>('PATCH', '/api/settings', updates),
 
   // -- Repos --
+  getAvailableRepos: () =>
+    request<{ repos: ForgejoRepoResponse[] }>('GET', '/api/repos/available'),
   getRepos: () =>
     request<{ repos: RepoResponse[] }>('GET', '/api/repos'),
   createRepo: (data: Partial<RepoResponse>) =>
@@ -184,11 +191,19 @@ export interface ToolResponse {
   auth_type: string;
   auth_config: Record<string, unknown>;
   auth_status: string;
+  timeout_minutes: number | null;
 }
 
 export interface CredentialStatus {
   name: string;
   configured: boolean;
+}
+
+export interface ForgejoRepoResponse {
+  owner: string;
+  name: string;
+  full_name: string;
+  default_branch: string;
 }
 
 export interface IssueResponse {

@@ -15,11 +15,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Install agent tools (as root, before switching user)
 RUN npm install -g @anthropic-ai/claude-code
-# OpenCode (Go binary)
-RUN curl -fsSL https://get.opencode.ai | bash
+# OpenCode is distributed via npm — installs to /usr/local/bin (on the agent
+# user's PATH). The previous `curl -fsSL https://get.opencode.ai | bash` line
+# silently failed because that hostname does not exist; the official installer
+# lives at https://opencode.ai/install but is user-scoped, so npm is preferred.
+RUN npm install -g opencode-ai
+# pi-coding-agent — minimal terminal coding harness with multi-provider support
+# (Anthropic, OpenAI, Ollama via models.json, etc.). Invoked non-interactively
+# with `pi -p "<prompt>"` for autonomous dev-env use, same pattern as OpenCode.
+RUN npm install -g @mariozechner/pi-coding-agent
 
 # Install Claude Agent SDK for TypeScript harness
-RUN npm install -g @anthropic-ai/agent-sdk
+RUN npm install -g @anthropic-ai/claude-agent-sdk
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts
 COPY harness/harness-cli.sh /usr/local/bin/harness-cli
@@ -28,7 +35,9 @@ RUN chmod +x /usr/local/bin/harness-cli
 # Create non-root agent user
 # UID/GID 1000 aligns with the default first user on most Linux systems,
 # which simplifies file ownership on bind-mounted volumes.
-RUN groupadd -g 1000 agent && \
+# Ubuntu 24.04 ships with a default 'ubuntu' user at UID/GID 1000 — remove it first.
+RUN userdel -r ubuntu 2>/dev/null; groupdel ubuntu 2>/dev/null; \
+    groupadd -g 1000 agent && \
     useradd -u 1000 -g agent -m -s /bin/bash agent
 
 USER agent

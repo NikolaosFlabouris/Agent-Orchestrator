@@ -56,7 +56,7 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN curl -fsSL https://get.opencode.ai | bash
 
 # Install Claude Agent SDK for TypeScript harness
-RUN npm install -g @anthropic-ai/agent-sdk
+RUN npm install -g @anthropic-ai/claude-agent-sdk
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts
 COPY harness/harness-cli.sh /usr/local/bin/harness-cli

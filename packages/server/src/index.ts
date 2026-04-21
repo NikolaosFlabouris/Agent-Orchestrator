@@ -1,42 +1,49 @@
-import Fastify from 'fastify';
-import fastifyWebsocket from '@fastify/websocket';
-import fastifyStatic from '@fastify/static';
-import fastifyCookie from '@fastify/cookie';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { initDatabase } from './db.js';
-import { ForgejoClient } from './forgejo.js';
-import { initDocker, listContainers, ensureAgentNetwork } from './docker.js';
-import { Scheduler } from './scheduler.js';
-import { gracefulShutdown } from './shutdown.js';
-import { onStartup } from './recovery.js';
-import { Poller } from './polling.js';
-import { verifyWebhooks } from './webhooks.js';
-import { createTaskRoutes } from './routes/tasks.js';
-import { settingsRoutes } from './routes/settings.js';
-import { createRepoRoutes } from './routes/repos.js';
-import { toolRoutes } from './routes/tools.js';
-import { createStatusRoutes } from './routes/status.js';
-import { createWebhookRoutes } from './routes/webhooks.js';
-import { dashboardWs } from './ws/dashboard.js';
-import { outputWs } from './ws/output.js';
-import { registerAuth } from './auth.js';
-import { initStateSync } from './state-sync.js';
+import Fastify from "fastify";
+import fastifyWebsocket from "@fastify/websocket";
+import fastifyStatic from "@fastify/static";
+import fastifyCookie from "@fastify/cookie";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { initDatabase } from "./db.js";
+import { ForgejoClient } from "./forgejo.js";
+import {
+  initDocker,
+  listContainers,
+  ensureAgentNetwork,
+  initHostPathMap,
+} from "./docker.js";
+import { Scheduler } from "./scheduler.js";
+import { gracefulShutdown } from "./shutdown.js";
+import { onStartup } from "./recovery.js";
+import { Poller } from "./polling.js";
+import { verifyWebhooks } from "./webhooks.js";
+import { createTaskRoutes } from "./routes/tasks.js";
+import { settingsRoutes } from "./routes/settings.js";
+import { createRepoRoutes } from "./routes/repos.js";
+import { toolRoutes } from "./routes/tools.js";
+import { createStatusRoutes } from "./routes/status.js";
+import { createWebhookRoutes } from "./routes/webhooks.js";
+import { dashboardWs } from "./ws/dashboard.js";
+import { outputWs } from "./ws/output.js";
+import { registerAuth } from "./auth.js";
+import { initStateSync } from "./state-sync.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
-const FORGEJO_TOKEN = process.env.FORGEJO_TOKEN ?? '';
-const DB_PATH = process.env.DB_PATH ?? path.join(process.cwd(), 'orchestrator.db');
-const PORT = parseInt(process.env.PORT ?? '8080', 10);
-const HOST = process.env.HOST ?? '0.0.0.0';
-const COOKIE_SECRET = process.env.COOKIE_SECRET ?? 'orchestrator-dev-secret-change-in-production';
+const FORGEJO_URL = process.env.FORGEJO_URL ?? "http://forgejo:3000";
+const FORGEJO_ORCHESTRATOR_TOKEN = process.env.FORGEJO_ORCHESTRATOR_TOKEN ?? "";
+const DATA_DIR = process.env.DATA_DIR ?? process.cwd();
+const DB_PATH = process.env.DB_PATH ?? path.join(DATA_DIR, "orchestrator.db");
+const PORT = parseInt(process.env.PORT ?? "8080", 10);
+const HOST = process.env.HOST ?? "0.0.0.0";
+const COOKIE_SECRET =
+  process.env.COOKIE_SECRET ?? "orchestrator-dev-secret-change-in-production";
 
 async function main() {
   // -- Fastify with Pino logger --
   const app = Fastify({
     logger: {
-      level: process.env.LOG_LEVEL ?? 'info',
+      level: process.env.LOG_LEVEL ?? "info",
     },
   });
 
@@ -49,29 +56,29 @@ async function main() {
   await app.register(fastifyWebsocket);
 
   // -- Database --
-  log.info({ event: 'db_init', path: DB_PATH }, 'Initializing database');
+  log.info({ event: "db_init", path: DB_PATH }, "Initializing database");
   const db = initDatabase(DB_PATH);
-  log.info({ event: 'db_ready' }, 'Database initialized');
+  log.info({ event: "db_ready" }, "Database initialized");
 
   // -- Forgejo client --
-  const forgejo = new ForgejoClient(FORGEJO_URL, FORGEJO_TOKEN);
-  if (FORGEJO_TOKEN) {
+  const forgejo = new ForgejoClient(FORGEJO_URL, FORGEJO_ORCHESTRATOR_TOKEN);
+  if (FORGEJO_ORCHESTRATOR_TOKEN) {
     try {
       const user = await forgejo.getCurrentUser();
       log.info(
-        { event: 'forgejo_connected', user: user.login },
-        'Forgejo connection verified'
+        { event: "forgejo_connected", user: user.login },
+        "Forgejo connection verified",
       );
     } catch (err) {
       log.error(
-        { event: 'forgejo_connection_failed', err },
-        'Failed to connect to Forgejo'
+        { event: "forgejo_connection_failed", err },
+        "Failed to connect to Forgejo",
       );
     }
   } else {
     log.warn(
-      { event: 'forgejo_no_token' },
-      'FORGEJO_TOKEN not set — Forgejo client disabled'
+      { event: "forgejo_no_token" },
+      "FORGEJO_ORCHESTRATOR_TOKEN not set — Forgejo client disabled",
     );
   }
 
@@ -79,15 +86,16 @@ async function main() {
   try {
     initDocker();
     await ensureAgentNetwork();
+    await initHostPathMap();
     const containers = await listContainers();
     log.info(
-      { event: 'docker_connected', managedContainers: containers.length },
-      'Docker connection verified, agent-network ready'
+      { event: "docker_connected", managedContainers: containers.length },
+      "Docker connection verified, agent-network ready",
     );
   } catch (err) {
     log.error(
-      { event: 'docker_connection_failed', err },
-      'Failed to connect to Docker'
+      { event: "docker_connection_failed", err },
+      "Failed to connect to Docker",
     );
   }
 
@@ -101,7 +109,7 @@ async function main() {
   await onStartup(forgejo, scheduler, log);
 
   // -- Verify webhooks --
-  if (FORGEJO_TOKEN) {
+  if (FORGEJO_ORCHESTRATOR_TOKEN) {
     await verifyWebhooks(forgejo, log);
   }
 
@@ -125,42 +133,45 @@ async function main() {
   await app.register(outputWs);
 
   // -- Health route --
-  app.get('/health', async () => ({ status: 'ok' }));
+  app.get("/health", async () => ({ status: "ok" }));
 
   // -- Pause / Resume routes --
-  app.post('/api/status/pause', async () => {
+  app.post("/api/status/pause", async () => {
     scheduler.pause();
     return { paused: true };
   });
 
-  app.post('/api/status/resume', async () => {
+  app.post("/api/status/resume", async () => {
     scheduler.resume();
     return { paused: false };
   });
 
   // -- Static file serving for the UI build --
-  const uiDistPath = path.resolve(__dirname, '../../ui/dist');
+  const uiDistPath = path.resolve(__dirname, "../../ui/dist");
   try {
     await app.register(fastifyStatic, {
       root: uiDistPath,
-      prefix: '/',
+      prefix: "/",
       wildcard: false,
     });
 
     // SPA fallback — serve index.html for client-side routes
     app.setNotFoundHandler(async (_request, reply) => {
-      return reply.sendFile('index.html', uiDistPath);
+      return reply.sendFile("index.html", uiDistPath);
     });
   } catch {
     log.warn(
-      { event: 'ui_not_found', path: uiDistPath },
-      'UI build not found — static serving disabled'
+      { event: "ui_not_found", path: uiDistPath },
+      "UI build not found — static serving disabled",
     );
   }
 
   // -- Start server --
   await app.listen({ port: PORT, host: HOST });
-  log.info({ event: 'server_started', port: PORT }, 'Orchestrator server started');
+  log.info(
+    { event: "server_started", port: PORT },
+    "Orchestrator server started",
+  );
 
   // -- Start scheduler --
   scheduler.start();
@@ -173,7 +184,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    log.info({ event: 'shutdown', signal }, 'Shutting down');
+    log.info({ event: "shutdown", signal }, "Shutting down");
 
     poller.stop();
 
@@ -184,11 +195,11 @@ async function main() {
     });
   };
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 main().catch((err) => {
-  console.error('Fatal startup error:', err);
+  console.error("Fatal startup error:", err);
   process.exit(1);
 });

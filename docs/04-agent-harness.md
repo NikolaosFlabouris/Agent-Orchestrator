@@ -34,6 +34,17 @@ The agent harness is the container entrypoint. It manages the agent tool lifecyc
 
 The `agent_tool` field determines which harness path runs. The `agent_command` field is only used for CLI-type tools (e.g., OpenCode).
 
+### Prompt substitution in CLI command templates
+
+CLI tools receive the task prompt through `agent_command` via one of two placeholders:
+
+- **`{{PROMPT_FILE}}` (preferred).** The harness substitutes the literal path `/task/prompt.md`. The tool reads the file itself, so prompt content never touches the shell and is immune to metacharacters (backticks, `$()`, unbalanced quotes) in issue bodies.
+  ```
+  opencode run "$(cat {{PROMPT_FILE}})"
+  claude --print --dangerously-skip-permissions < {{PROMPT_FILE}}
+  ```
+- **`${TASK_PROMPT}` (legacy).** The harness reads `prompt.md`, exports it as an env var, and `envsubst`s it into the command before `bash -c`. Shell metacharacters in the prompt can corrupt the command or execute as shell; kept for backwards compatibility only. New tool definitions should use `{{PROMPT_FILE}}`.
+
 ### Outputs (written by harness)
 
 ```
@@ -175,7 +186,7 @@ The `--bare` flag is important for automation: it skips OAuth, keychain reads, C
   "id": "opencode-anthropic",
   "display_name": "OpenCode (Anthropic API)",
   "type": "cli",
-  "command_template": "opencode run --non-interactive --prompt \"${TASK_PROMPT}\"",
+  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\"",
   "env_vars": {
     "OPENCODE_PROVIDER": "anthropic",
     "OPENCODE_MODEL": "claude-sonnet-4-20250514"
@@ -199,7 +210,7 @@ The `--bare` flag is important for automation: it skips OAuth, keychain reads, C
   "id": "opencode-local",
   "display_name": "OpenCode (Local LLM)",
   "type": "cli",
-  "command_template": "opencode run --non-interactive --prompt \"${TASK_PROMPT}\"",
+  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\"",
   "env_vars": {
     "OPENCODE_PROVIDER": "openai-compatible",
     "OPENCODE_MODEL": "codestral-latest",
@@ -226,6 +237,57 @@ The `OPENCODE_BASE_URL` should use the LLM server's LAN IP or hostname, not `loc
 - LocalAI (`http://host:8080/v1`)
 - LM Studio (`http://host:1234/v1`)
 
+#### pi-coding-agent with Anthropic API
+
+- **Type:** `cli`
+- **Authentication:** Anthropic API key (`ANTHROPIC_API_KEY`)
+- **Cost model:** Pay-per-token via Anthropic API
+- **Invocation:** Shell command with `-p` (print) and `@file` prompt inclusion
+
+```json
+{
+  "id": "pi-anthropic",
+  "display_name": "pi (Anthropic API)",
+  "type": "cli",
+  "command_template": "pi -p --mode json --no-session --model anthropic/claude-sonnet-4-5 @{{PROMPT_FILE}}",
+  "env_vars": {},
+  "auth_type": "api-key",
+  "auth_config": {
+    "env_var": "ANTHROPIC_API_KEY"
+  }
+}
+```
+
+pi is a minimal terminal coding harness (`@mariozechner/pi-coding-agent`) that
+supports many providers — Anthropic, OpenAI, Gemini, OpenRouter, Groq, Ollama,
+LM Studio, vLLM, and more. Flags and behaviour can change between releases;
+before enabling pi, run `docker run --rm -it orchestrator-agent-base:latest
+pi --help` and confirm the `command_template` still matches.
+
+#### pi-coding-agent with Locally Hosted LLM
+
+- **Type:** `cli`
+- **Authentication:** None (Ollama ignores the API key)
+- **Cost model:** Infrastructure cost only (self-hosted)
+- **Invocation:** Shell command that bootstraps `~/.pi/agent/models.json` then runs pi
+
+pi configures custom providers (Ollama, vLLM, LM Studio) via a `models.json`
+file in `~/.pi/agent/`, not CLI flags. The `command_template` writes that
+file inline before invoking pi so the tool works out of the box. Edit the
+model `id` to match something you've pulled on your Ollama server.
+
+```json
+{
+  "id": "pi-ollama",
+  "display_name": "pi (Local Ollama)",
+  "type": "cli",
+  "command_template": "mkdir -p ~/.pi/agent && printf '%s' '{\"providers\":{\"ollama\":{\"baseUrl\":\"http://host.docker.internal:11434/v1\",\"api\":\"openai-completions\",\"apiKey\":\"ollama\",\"compat\":{\"supportsDeveloperRole\":false,\"supportsReasoningEffort\":false},\"models\":[{\"id\":\"qwen2.5-coder:14b\"}]}}}' > ~/.pi/agent/models.json && pi -p --mode json --no-session --model ollama/qwen2.5-coder:14b @{{PROMPT_FILE}}",
+  "env_vars": {},
+  "auth_type": "none",
+  "auth_config": {}
+}
+```
+
 ### Tool Selection
 
 Each repository has a default agent tool configured in the `repos` table. Individual tasks can override this default via the `tasks.agent_tool` column (set at task creation time in the UI).
@@ -249,7 +311,7 @@ Used for `sdk` type tools (Claude Agent SDK):
 
 ```typescript
 // harness/harness-sdk.ts
-import { query, ClaudeAgentOptions } from '@anthropic-ai/agent-sdk';
+import { query, ClaudeAgentOptions } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 

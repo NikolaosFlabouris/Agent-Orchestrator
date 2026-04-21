@@ -1,4 +1,4 @@
-import { query } from '@anthropic-ai/agent-sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 
@@ -77,10 +77,14 @@ async function main() {
   }, timeoutMs);
 
   try {
+    // No allowedTools allowlist — agent containers are ephemeral, non-root,
+    // and isolated on the agent-network bridge. The orchestrator's trust model
+    // is "give the agent full capability inside its sandbox", not restrict-
+    // list tools. bypassPermissions grants all tools including Write/MultiEdit/
+    // TodoWrite/NotebookEdit/WebFetch/WebSearch.
     for await (const message of query({
       prompt,
       options: {
-        allowedTools: ['Read', 'Edit', 'Bash', 'Glob', 'Grep'],
         permissionMode: 'bypassPermissions',
         model: meta.model || 'sonnet',
         maxTurns: meta.max_turns || 100,

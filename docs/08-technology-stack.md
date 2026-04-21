@@ -64,7 +64,7 @@ Standard Node.js Docker client. Talks to the Docker socket directly. Supports:
 
 With agents handling their own git fetch, commit, and push, the orchestrator's git usage is limited to workspace preparation (clone, fetch, checkout, branch creation) and occasional salvage (add, commit, push for work the agent left uncommitted). These are straightforward commands executed via Node.js `child_process.execFileSync('git', [...args], { cwd: workdir })`. No wrapper library is needed for this limited surface area.
 
-### Agent SDK: @anthropic-ai/agent-sdk (TypeScript)
+### Agent SDK: @anthropic-ai/claude-agent-sdk (TypeScript)
 
 The Claude Agent SDK provides the same agent loop and tools as Claude Code, programmable in TypeScript. Used for the SDK-type agent harness. Key features:
 
@@ -236,7 +236,7 @@ Pino is included with Fastify (not a separate dependency). Webhook HMAC verifica
 
 | Package | Purpose |
 |---------|---------|
-| `@anthropic-ai/agent-sdk` | Claude Agent SDK (TypeScript) |
+| `@anthropic-ai/claude-agent-sdk` | Claude Agent SDK (TypeScript) |
 | `@anthropic-ai/claude-code` | Claude Code CLI (global install) |
 | OpenCode binary | Alternative agent tool |
 

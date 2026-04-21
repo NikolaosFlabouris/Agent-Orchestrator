@@ -20,8 +20,8 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
 
     getDb()
       .prepare(
-        `INSERT INTO agent_tools (id, display_name, type, command_template, env_vars, auth_type, auth_config)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agent_tools (id, display_name, type, command_template, env_vars, auth_type, auth_config, timeout_minutes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         body.id,
@@ -34,7 +34,8 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
         body.auth_type,
         typeof body.auth_config === 'object'
           ? JSON.stringify(body.auth_config)
-          : body.auth_config ?? '{}'
+          : body.auth_config ?? '{}',
+        body.timeout_minutes ?? null
       );
 
     const tool = getAgentTool(body.id as string);
@@ -52,7 +53,7 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
 
       const body = request.body as Record<string, unknown>;
       const updatable = [
-        'display_name', 'type', 'command_template', 'auth_type',
+        'display_name', 'type', 'command_template', 'auth_type', 'timeout_minutes',
       ];
       const sets: string[] = [];
       const params: unknown[] = [];
@@ -135,5 +136,6 @@ function enrichTool(tool: AgentTool) {
     auth_type: tool.auth_type,
     auth_config: authConfigParsed,
     auth_status: authStatus,
+    timeout_minutes: tool.timeout_minutes,
   };
 }
