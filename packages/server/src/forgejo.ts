@@ -117,12 +117,17 @@ export class ForgejoClient {
       );
     }
 
-    // 204 No Content
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    return (await response.json()) as T;
+    // Handle empty successful responses. Forgejo returns 200 with NO body on
+    // some writes (notably POST /pulls/:id/merge — merge succeeds, Content-
+    // Length is 0). Calling response.json() on an empty body throws
+    // "Unexpected end of JSON input" which the caller sees as a failure,
+    // even though the server-side operation succeeded. This was the source
+    // of the "task marked failed after successful merge" bug. 204 gets the
+    // same treatment for symmetry (DELETE /branches, POST /comments, etc.).
+    if (response.status === 204) return undefined as T;
+    const text = await response.text();
+    if (!text) return undefined as T;
+    return JSON.parse(text) as T;
   }
 
   private repoPath(repo: Repo): string {

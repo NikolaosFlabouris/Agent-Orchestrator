@@ -104,6 +104,49 @@ export async function attemptMerge(
     );
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
+
+    // Recover from "merge actually succeeded but the client couldn't see it".
+    // Known case: POST /pulls/:id/merge returned 200 with an empty body, and
+    // the Forgejo client previously crashed trying to JSON.parse(""). A
+    // subsequent retry then hits 405 because the PR is already merged.
+    // Either way, the PR is merged on the server — honour that rather than
+    // marking the task failed. We re-fetch the PR and trust its `merged`
+    // field as the source of truth.
+    try {
+      const pr = await forgejo.getPullRequest(repo, freshTask.pr_number!);
+      if (pr.merged) {
+        recordTaskEvent(
+          task.id,
+          'pr_merged',
+          `PR #${freshTask.pr_number} merged via ${mergeStrategy} (detected after post-merge client error: ${errorMsg})`
+        );
+        updateTaskWithSync(task.id, {
+          status: 'merged',
+          completed_at: new Date().toISOString(),
+        });
+        try {
+          await forgejo.closeIssue(repo, task.issue_id);
+          await forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            `Merged via PR #${freshTask.pr_number}.`
+          );
+        } catch { /* best effort */ }
+        log.info(
+          {
+            event: 'task_merged_after_client_error',
+            task_id: task.id,
+            pr_number: freshTask.pr_number,
+            original_error: errorMsg,
+          },
+          'PR was already merged — recovering from client-side error'
+        );
+        return;
+      }
+    } catch {
+      // PR lookup itself failed — fall through to original error handling.
+    }
+
     const isConflict =
       errorMsg.includes('conflict') || errorMsg.includes('409');
 
