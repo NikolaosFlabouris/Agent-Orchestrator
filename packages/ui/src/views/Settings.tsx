@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
-import type { RepoResponse, ToolResponse, CredentialStatus, ForgejoRepoResponse } from '../api.js';
+import type {
+  RepoResponse,
+  ToolResponse,
+  CredentialStatus,
+  ForgejoRepoResponse,
+  ProviderResponse,
+} from '../api.js';
 
 const SAFE_SCRIPT_PATTERNS = [
   /^npm\s+(ci|install)$/,
@@ -11,7 +17,9 @@ const SAFE_SCRIPT_PATTERNS = [
 ];
 
 export function Settings() {
-  const [tab, setTab] = useState<'global' | 'repos' | 'tools' | 'credentials'>('global');
+  const [tab, setTab] = useState<
+    'global' | 'repos' | 'tools' | 'providers' | 'credentials'
+  >('global');
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -29,13 +37,21 @@ export function Settings() {
 
       <main className="mx-auto max-w-4xl px-6 py-6">
         <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit">
-          {(['global', 'repos', 'tools', 'credentials'] as const).map((t) => (
+          {(['global', 'repos', 'tools', 'providers', 'credentials'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`px-4 py-2 rounded text-sm capitalize ${tab === t ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
             >
-              {t === 'global' ? 'Global Settings' : t === 'repos' ? 'Repositories' : t === 'tools' ? 'Agent Tools' : 'Credentials'}
+              {t === 'global'
+                ? 'Global Settings'
+                : t === 'repos'
+                  ? 'Repositories'
+                  : t === 'tools'
+                    ? 'Agent Tools'
+                    : t === 'providers'
+                      ? 'Providers'
+                      : 'Credentials'}
             </button>
           ))}
         </div>
@@ -43,6 +59,7 @@ export function Settings() {
         {tab === 'global' && <GlobalSettings />}
         {tab === 'repos' && <RepoSettings />}
         {tab === 'tools' && <ToolSettings />}
+        {tab === 'providers' && <ProviderSettings />}
         {tab === 'credentials' && <CredentialSettings />}
       </main>
     </div>
@@ -369,6 +386,7 @@ function RepoSettings() {
 
 function ToolSettings() {
   const [tools, setTools] = useState<ToolResponse[]>([]);
+  const [providers, setProviders] = useState<ProviderResponse[]>([]);
   const [editing, setEditing] = useState<Partial<ToolResponse> | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [envVarsText, setEnvVarsText] = useState('{}');
@@ -378,6 +396,7 @@ function ToolSettings() {
 
   useEffect(() => {
     api.getTools().then((r) => setTools(r.tools)).catch(() => {});
+    api.getProviders().then((r) => setProviders(r.providers)).catch(() => {});
   }, []);
 
   function startEdit(tool: ToolResponse) {
@@ -588,6 +607,35 @@ function ToolSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">
+                Provider (concurrency pool)
+                <span className="text-gray-500 font-normal"> — optional; tools sharing a provider serialise against its limit</span>
+              </label>
+              <select
+                value={editing.provider_id ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    provider_id: e.target.value || null,
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                <option value="">No provider (use global max_concurrency only)</option>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name} (limit {p.concurrency_limit})
+                  </option>
+                ))}
+              </select>
+              {providers.length === 0 && (
+                <p className="text-xs text-gray-500 mt-1">
+                  No providers configured yet. Add one under the Providers tab
+                  to pool this tool with others.
+                </p>
+              )}
+            </div>
           </div>
           <div>
             <label className="block text-sm mb-1">Command template</label>
@@ -687,6 +735,232 @@ function CredentialSettings() {
               )}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Providers — concurrency-pool management
+// ---------------------------------------------------------------------------
+
+function ProviderSettings() {
+  const [providers, setProviders] = useState<ProviderResponse[]>([]);
+  const [editing, setEditing] = useState<Partial<ProviderResponse> | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function refresh(): void {
+    api.getProviders().then((r) => setProviders(r.providers)).catch(() => {});
+  }
+  useEffect(refresh, []);
+
+  function startCreate(): void {
+    setEditing({ id: '', display_name: '', concurrency_limit: 1, notes: '' });
+    setIsNew(true);
+    setError(null);
+  }
+  function startEdit(p: ProviderResponse): void {
+    setEditing({ ...p });
+    setIsNew(false);
+    setError(null);
+  }
+
+  async function handleSave(): Promise<void> {
+    if (!editing) return;
+    setError(null);
+    try {
+      if (isNew) {
+        await api.createProvider(editing);
+      } else {
+        await api.updateProvider(editing.id!, {
+          display_name: editing.display_name,
+          concurrency_limit: editing.concurrency_limit,
+          notes: editing.notes,
+        });
+      }
+      setEditing(null);
+      setIsNew(false);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    if (!window.confirm(`Delete provider ${id}?`)) return;
+    setError(null);
+    try {
+      await api.deleteProvider(id);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-gray-400">
+        Providers define concurrency pools. Tools assigned to the same provider
+        serialise against its <span className="font-mono">concurrency_limit</span>;
+        tools on different providers run in parallel. Tools with no provider
+        count against the global <span className="font-mono">max_concurrency</span>{' '}
+        only. Set <span className="font-mono">concurrency_limit: 0</span> to
+        pause a provider (its tools won't launch until raised).
+      </div>
+
+      {providers.length === 0 && !editing ? (
+        <p className="text-gray-500 text-sm">
+          No providers configured. Tools with no assigned provider share the
+          global pool.
+        </p>
+      ) : (
+        providers.map((p) => (
+          <div
+            key={p.id}
+            className="bg-gray-900 border border-gray-800 rounded p-4"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="font-medium">{p.display_name}</span>
+                <span className="text-gray-500 text-sm ml-2">({p.id})</span>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
+                <span
+                  className={
+                    p.concurrency_limit === 0
+                      ? 'text-yellow-400'
+                      : p.active_slots >= p.concurrency_limit
+                        ? 'text-orange-400'
+                        : 'text-gray-300'
+                  }
+                  title={
+                    p.concurrency_limit === 0
+                      ? 'Paused — no tasks launch'
+                      : `${p.active_slots} active / ${p.concurrency_limit} limit`
+                  }
+                >
+                  {p.active_slots}/{p.concurrency_limit}
+                  {p.concurrency_limit === 0 ? ' (paused)' : ''}
+                </span>
+                <span className="text-gray-500">
+                  {p.tools_using} tool{p.tools_using === 1 ? '' : 's'}
+                </span>
+                <button
+                  onClick={() => startEdit(p)}
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDelete(p.id)}
+                  disabled={p.tools_using > 0}
+                  className="text-red-400 hover:text-red-300 disabled:text-gray-600 disabled:cursor-not-allowed"
+                  title={
+                    p.tools_using > 0
+                      ? 'Reassign the tools using this provider first'
+                      : 'Delete provider'
+                  }
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+            {p.notes && (
+              <div className="mt-2 text-xs text-gray-500">{p.notes}</div>
+            )}
+          </div>
+        ))
+      )}
+
+      <button
+        onClick={startCreate}
+        className="text-sm text-blue-400 hover:text-blue-300"
+      >
+        + Add provider
+      </button>
+
+      {editing && (
+        <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
+          <h3 className="font-medium">
+            {isNew ? 'Add Provider' : `Edit ${editing.display_name}`}
+          </h3>
+          {error && (
+            <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+              {error}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm mb-1">ID</label>
+              <input
+                value={editing.id ?? ''}
+                onChange={(e) => setEditing({ ...editing, id: e.target.value })}
+                disabled={!isNew}
+                placeholder="e.g. ollama-local"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Display name</label>
+              <input
+                value={editing.display_name ?? ''}
+                onChange={(e) =>
+                  setEditing({ ...editing, display_name: e.target.value })
+                }
+                placeholder="e.g. Ollama (local)"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">
+                Concurrency limit
+                <span className="text-gray-500 font-normal"> — 0 pauses all assigned tools</span>
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={editing.concurrency_limit ?? 1}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    concurrency_limit: parseInt(e.target.value, 10) || 0,
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm mb-1">Notes (optional)</label>
+            <textarea
+              value={editing.notes ?? ''}
+              onChange={(e) =>
+                setEditing({ ...editing, notes: e.target.value })
+              }
+              placeholder="e.g. Ollama 0.11 on the GPU box, OLLAMA_NUM_PARALLEL=1"
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm min-h-[60px]"
+            />
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={handleSave}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => {
+                setEditing(null);
+                setIsNew(false);
+                setError(null);
+              }}
+              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>

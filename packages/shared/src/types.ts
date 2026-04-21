@@ -81,9 +81,27 @@ export interface AgentTool {
    *  task (not yet supported) > tool.timeout_minutes > repo.timeout_minutes >
    *  settings.agent_timeout_minutes. Null means "fall through". */
   timeout_minutes: number | null;
+  /** Concurrency pool this tool belongs to. Tools sharing a provider_id
+   *  serialise against that provider's concurrency_limit; tools with null
+   *  provider_id count against settings.max_concurrency only. */
+  provider_id: string | null;
 }
 
 export type AgentToolType = 'sdk' | 'cli';
+
+/** A provider represents an upstream resource (e.g. a specific Ollama server,
+ *  an Anthropic API key's rate-limit bucket) whose concurrent use the
+ *  orchestrator bounds via concurrency_limit. Two tools pointing at the same
+ *  provider share a slot budget; tools on different providers run in parallel. */
+export interface Provider {
+  id: string;
+  display_name: string;
+  /** Max simultaneous agent containers that can use this provider.
+   *  0 = paused (no tasks using this provider launch).
+   *  Respected in addition to settings.max_concurrency (absolute ceiling). */
+  concurrency_limit: number;
+  notes: string | null;
+}
 
 export interface Settings {
   schema_version: string;

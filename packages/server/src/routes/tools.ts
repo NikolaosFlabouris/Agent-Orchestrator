@@ -1,6 +1,21 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb, getAgentTool, getAgentTools } from '../db.js';
+import { getDb, getAgentTool, getAgentTools, getProvider } from '../db.js';
 import type { AgentTool } from '@orchestrator/shared';
+
+function validateProviderId(
+  providerId: unknown
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (providerId === undefined || providerId === null || providerId === '') {
+    return { ok: true, value: null };
+  }
+  if (typeof providerId !== 'string') {
+    return { ok: false, error: 'provider_id must be a string or null' };
+  }
+  if (!getProvider(providerId)) {
+    return { ok: false, error: `Unknown provider_id: ${providerId}` };
+  }
+  return { ok: true, value: providerId };
+}
 
 export async function toolRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/tools
@@ -18,10 +33,15 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: 'Required: id, display_name, type, auth_type' });
     }
 
+    const providerCheck = validateProviderId(body.provider_id);
+    if (!providerCheck.ok) {
+      return reply.status(400).send({ error: providerCheck.error });
+    }
+
     getDb()
       .prepare(
-        `INSERT INTO agent_tools (id, display_name, type, command_template, env_vars, auth_type, auth_config, timeout_minutes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agent_tools (id, display_name, type, command_template, env_vars, auth_type, auth_config, timeout_minutes, provider_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         body.id,
@@ -35,7 +55,8 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
         typeof body.auth_config === 'object'
           ? JSON.stringify(body.auth_config)
           : body.auth_config ?? '{}',
-        body.timeout_minutes ?? null
+        body.timeout_minutes ?? null,
+        providerCheck.value
       );
 
     const tool = getAgentTool(body.id as string);
@@ -79,6 +100,14 @@ export async function toolRoutes(app: FastifyInstance): Promise<void> {
             ? JSON.stringify(body.auth_config)
             : String(body.auth_config)
         );
+      }
+      if ('provider_id' in body) {
+        const check = validateProviderId(body.provider_id);
+        if (!check.ok) {
+          return reply.status(400).send({ error: check.error });
+        }
+        sets.push('provider_id = ?');
+        params.push(check.value);
       }
 
       if (sets.length === 0) {
@@ -137,5 +166,6 @@ function enrichTool(tool: AgentTool) {
     auth_config: authConfigParsed,
     auth_status: authStatus,
     timeout_minutes: tool.timeout_minutes,
+    provider_id: tool.provider_id,
   };
 }

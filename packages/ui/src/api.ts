@@ -75,6 +75,16 @@ export const api = {
     request<ToolResponse>('POST', '/api/tools', data),
   updateTool: (id: string, data: Partial<ToolResponse>) =>
     request<ToolResponse>('PATCH', `/api/tools/${id}`, data),
+
+  // -- Providers (concurrency pools) --
+  getProviders: () =>
+    request<{ providers: ProviderResponse[] }>('GET', '/api/providers'),
+  createProvider: (data: Partial<ProviderResponse>) =>
+    request<ProviderResponse>('POST', '/api/providers', data),
+  updateProvider: (id: string, data: Partial<ProviderResponse>) =>
+    request<ProviderResponse>('PATCH', `/api/providers/${id}`, data),
+  deleteProvider: (id: string) =>
+    request<void>('DELETE', `/api/providers/${id}`),
 };
 
 // -- Types --
@@ -137,6 +147,14 @@ export interface StatusResponse {
   daily_cost_usd: number;
   forgejo_connected: boolean;
   uptime_seconds: number;
+  /** Per-provider active-slot / concurrency-limit breakdown. Empty array when
+   *  no providers are configured (pre-v4 install or opt-out). */
+  providers: Array<{
+    id: string;
+    display_name: string;
+    concurrency_limit: number;
+    active_slots: number;
+  }>;
 }
 
 export interface CreateTaskRequest {
@@ -192,6 +210,18 @@ export interface ToolResponse {
   auth_config: Record<string, unknown>;
   auth_status: string;
   timeout_minutes: number | null;
+  provider_id: string | null;
+}
+
+export interface ProviderResponse {
+  id: string;
+  display_name: string;
+  concurrency_limit: number;
+  notes: string | null;
+  /** Number of tool rows referencing this provider (from GET/PATCH/POST). */
+  tools_using: number;
+  /** Number of tasks currently holding a slot against this provider. */
+  active_slots: number;
 }
 
 export interface CredentialStatus {

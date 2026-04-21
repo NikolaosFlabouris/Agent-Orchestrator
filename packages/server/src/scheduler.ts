@@ -5,6 +5,7 @@ import {
   getTask,
   getRepo,
   getAgentTool,
+  getProviders,
   getSetting,
   getSettingInt,
   updateTask,
@@ -13,6 +14,12 @@ import {
   getRunningAttempt,
   getTasks,
 } from './db.js';
+import {
+  countActiveByProvider,
+  canLaunchInPool,
+  limitMapFromProviders,
+  resolveProviderKey,
+} from './scheduler-pools.js';
 import { ForgejoClient } from './forgejo.js';
 import {
   createAgentContainer,
@@ -294,6 +301,25 @@ export class Scheduler {
     let available = getAvailableSlots();
     if (available <= 0) return;
 
+    // Per-provider pool accounting. Count how many tasks are currently holding
+    // a slot against each provider (active = has container_id and status is
+    // preparing / in-progress / in-review). Candidates whose provider is at
+    // its concurrency_limit are skipped; candidates for other providers (or
+    // for no provider at all) still launch. The global max_concurrency
+    // ceiling is respected by the outer `available` counter.
+    const active = [
+      ...getTasks({ status: 'preparing' }),
+      ...getTasks({ status: 'in-progress' }),
+      ...getTasks({ status: 'in-review' }),
+    ].filter((t) => t.container_id !== null);
+
+    const activeByProvider = countActiveByProvider(
+      active,
+      (t) => this.toolForTask(t),
+      (t) => getRepo(t.repo_id)
+    );
+    const limitByProvider = limitMapFromProviders(getProviders());
+
     const candidates = getCandidates();
 
     for (const candidate of candidates) {
@@ -308,6 +334,18 @@ export class Scheduler {
         task.status !== 'queued' &&
         task.status !== 'in-review' &&
         task.status !== 'changes-needed'
+      ) {
+        continue;
+      }
+
+      // Provider pool check — skip if this candidate's pool is saturated.
+      // We don't "break"; a later candidate on a different (idle) provider
+      // can still launch past a busy earlier one. This trades strict FIFO
+      // for "idle resources should be used", which is what pools are for.
+      const tool = this.toolForTask(task);
+      const providerKey = resolveProviderKey(task, tool, getRepo(task.repo_id));
+      if (
+        !canLaunchInPool(providerKey, activeByProvider, limitByProvider, available)
       ) {
         continue;
       }
@@ -334,7 +372,13 @@ export class Scheduler {
           // Queued: fresh task
           await this.launchDevContainer(task);
         }
+        // Accounting: decrement global, bump the provider counter so a
+        // subsequent candidate on the same pool sees the updated state.
         available--;
+        activeByProvider.set(
+          providerKey,
+          (activeByProvider.get(providerKey) ?? 0) + 1
+        );
       } catch (err) {
         this.log.error(
           { event: 'launch_failed', task_id: task.id, err },
@@ -879,6 +923,16 @@ export class Scheduler {
       throw new Error(`Agent tool '${toolId}' not found`);
     }
     return tool;
+  }
+
+  /** Best-effort tool lookup for a task, used by bookkeeping paths that
+   *  should not throw when a tool row has been deleted. Returns undefined
+   *  if the repo or tool is missing. */
+  private toolForTask(task: Task): AgentTool | undefined {
+    const repo = getRepo(task.repo_id);
+    if (!repo) return undefined;
+    const toolId = task.agent_tool ?? repo.agent_tool;
+    return getAgentTool(toolId);
   }
 
   private resolveConfig(

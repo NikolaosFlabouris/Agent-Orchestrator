@@ -7,6 +7,7 @@ import type {
   AttemptStatus,
   Repo,
   AgentTool,
+  Provider,
   TaskEvent,
   SettingsKey,
 } from '@orchestrator/shared';
@@ -114,6 +115,17 @@ function createTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
 
+    CREATE TABLE IF NOT EXISTS providers (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      -- Per-provider concurrency cap. 0 means "paused" (no task assigned to
+      -- this provider launches). NULL is not allowed. The scheduler still
+      -- respects settings.max_concurrency as an absolute ceiling across all
+      -- providers.
+      concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
+      notes TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS agent_tools (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
@@ -123,7 +135,11 @@ function createTables(db: Database.Database): void {
       auth_type TEXT NOT NULL,
       auth_config TEXT NOT NULL DEFAULT '{}',
       -- Optional per-tool timeout. Null = fall through to repo then global.
-      timeout_minutes INTEGER
+      timeout_minutes INTEGER,
+      -- Optional provider this tool belongs to, for concurrency pooling.
+      -- Null = tool has no pool; counts against the global max_concurrency
+      -- ceiling only.
+      provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS task_events (
@@ -182,6 +198,33 @@ function runMigrations(db: Database.Database): void {
       db.exec('ALTER TABLE agent_tools ADD COLUMN timeout_minutes INTEGER');
     }
     db.prepare("UPDATE settings SET value = '3' WHERE key = 'schema_version'").run();
+  }
+
+  if (version < 4) {
+    // Provider-scoped concurrency pools. A provider represents an upstream
+    // resource (e.g. a specific Ollama server, an Anthropic API key's rate-
+    // limit bucket) and carries a concurrency_limit. Tools assigned to the
+    // same provider serialise; tools on different providers run in parallel.
+    // Tools with NULL provider_id count against settings.max_concurrency only
+    // (preserves pre-v4 semantics verbatim for existing installs — no tools
+    // are auto-assigned; the user opts in by creating providers in the UI).
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS providers (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
+        notes TEXT
+      );
+    `);
+    const toolCols = db
+      .prepare("PRAGMA table_info(agent_tools)")
+      .all() as Array<{ name: string }>;
+    if (!toolCols.some((c) => c.name === 'provider_id')) {
+      db.exec(
+        'ALTER TABLE agent_tools ADD COLUMN provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL'
+      );
+    }
+    db.prepare("UPDATE settings SET value = '4' WHERE key = 'schema_version'").run();
   }
 }
 
@@ -463,6 +506,52 @@ export function getAgentTools(): AgentTool[] {
   return getDb()
     .prepare('SELECT * FROM agent_tools ORDER BY id')
     .all() as AgentTool[];
+}
+
+// -- Providers --
+
+export function getProvider(id: string): Provider | undefined {
+  return getDb()
+    .prepare('SELECT * FROM providers WHERE id = ?')
+    .get(id) as Provider | undefined;
+}
+
+export function getProviders(): Provider[] {
+  return getDb()
+    .prepare('SELECT * FROM providers ORDER BY id')
+    .all() as Provider[];
+}
+
+export function insertProvider(p: Provider): void {
+  getDb()
+    .prepare(
+      'INSERT INTO providers (id, display_name, concurrency_limit, notes) VALUES (?, ?, ?, ?)'
+    )
+    .run(p.id, p.display_name, p.concurrency_limit, p.notes ?? null);
+}
+
+export function updateProvider(
+  id: string,
+  updates: Partial<Omit<Provider, 'id'>>
+): void {
+  const entries = Object.entries(updates).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return;
+  const sets = entries.map(([k]) => `${k} = ?`).join(', ');
+  const values = entries.map(([, v]) => v);
+  getDb()
+    .prepare(`UPDATE providers SET ${sets} WHERE id = ?`)
+    .run(...values, id);
+}
+
+export function deleteProvider(id: string): void {
+  getDb().prepare('DELETE FROM providers WHERE id = ?').run(id);
+}
+
+export function countToolsUsingProvider(providerId: string): number {
+  const row = getDb()
+    .prepare('SELECT COUNT(*) AS n FROM agent_tools WHERE provider_id = ?')
+    .get(providerId) as { n: number };
+  return row.n;
 }
 
 // -- Task Events --

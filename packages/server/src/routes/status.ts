@@ -6,10 +6,15 @@ import {
   getDb,
   getSettingInt,
   getAgentTools,
+  getProviders,
+  getTasks,
+  getRepo,
+  getAgentTool,
 } from "../db.js";
 import type { Scheduler } from "../scheduler.js";
 import type { Poller } from "../polling.js";
 import { checkAlerts } from "../alerts.js";
+import { resolveProviderKey } from "../scheduler-pools.js";
 
 const startTime = Date.now();
 const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? "/workspaces";
@@ -35,6 +40,27 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
       const workspacesBytes = getDirSize(WORKSPACES_ROOT);
       const cachesBytes = getDirSize(CACHES_ROOT);
 
+      // Per-provider slot accounting — drives the Pools row on the dashboard.
+      const activeTasks = [
+        ...getTasks({ status: 'preparing' }),
+        ...getTasks({ status: 'in-progress' }),
+        ...getTasks({ status: 'in-review' }),
+      ].filter((t) => t.container_id !== null);
+      const activePerProvider = new Map<string, number>();
+      for (const task of activeTasks) {
+        const repo = getRepo(task.repo_id);
+        const toolId = task.agent_tool ?? repo?.agent_tool;
+        const tool = toolId ? getAgentTool(toolId) : undefined;
+        const key = resolveProviderKey(task, tool, repo);
+        activePerProvider.set(key, (activePerProvider.get(key) ?? 0) + 1);
+      }
+      const providers = getProviders().map((p) => ({
+        id: p.id,
+        display_name: p.display_name,
+        concurrency_limit: p.concurrency_limit,
+        active_slots: activePerProvider.get(p.id) ?? 0,
+      }));
+
       return {
         state: scheduler.isPaused() ? "paused" : "running",
         active_slots: activeSlots,
@@ -45,6 +71,7 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
         forgejo_connected: true,
         last_poll_at: poller?.lastPollAt ?? null,
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+        providers,
         disk: {
           workspaces_bytes: workspacesBytes,
           caches_bytes: cachesBytes,
