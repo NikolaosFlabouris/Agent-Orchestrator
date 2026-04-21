@@ -373,6 +373,8 @@ function ToolSettings() {
   const [isNew, setIsNew] = useState(false);
   const [envVarsText, setEnvVarsText] = useState('{}');
   const [authConfigText, setAuthConfigText] = useState('{}');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [serverError, setServerError] = useState<string | null>(null);
 
   useEffect(() => {
     api.getTools().then((r) => setTools(r.tools)).catch(() => {});
@@ -394,18 +396,39 @@ function ToolSettings() {
 
   async function handleSave() {
     if (!editing) return;
+    setServerError(null);
+    setErrors({});
+
+    const newErrors: Record<string, string> = {};
+    if (isNew && !editing.id) newErrors.id = 'This field is required';
+    if (!editing.display_name) newErrors.display_name = 'This field is required';
+    if (!editing.command_template) newErrors.command_template = 'This field is required';
+
+    try {
+      JSON.parse(envVarsText);
+    } catch {
+      newErrors.env_vars = 'Invalid JSON';
+    }
+    try {
+      JSON.parse(authConfigText);
+    } catch {
+      newErrors.auth_config = 'Invalid JSON';
+    }
+
+    if (Object.keys(newErrors).length > 0) {
+      setErrors(newErrors);
+      return;
+    }
+
     let envVars: Record<string, string>;
     let authConfig: Record<string, unknown>;
     try {
       envVars = JSON.parse(envVarsText);
-    } catch {
-      return; // Invalid JSON
-    }
-    try {
       authConfig = JSON.parse(authConfigText);
     } catch {
       return;
     }
+
     const payload = { ...editing, env_vars: envVars, auth_config: authConfig };
     try {
       if (isNew) {
@@ -417,8 +440,8 @@ function ToolSettings() {
       }
       setEditing(null);
       setIsNew(false);
-    } catch {
-      // Error
+    } catch (e: any) {
+      setServerError(e.message || 'An unexpected error occurred');
     }
   }
 
@@ -481,28 +504,48 @@ function ToolSettings() {
 
       {editing && (
         <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
-          <h3 className="font-medium">
-            {isNew ? 'Add Agent Tool' : `Edit ${editing.display_name}`}
-          </h3>
-          <div className="grid grid-cols-2 gap-4">
+           <h3 className="font-medium">
+             {isNew ? 'Add Agent Tool' : `Edit ${editing.display_name}`}
+           </h3>
+           {serverError && (
+             <div className="bg-red-900/50 border border-red-700 text-red-200 px-3 py-2 rounded text-sm">
+               {serverError}
+             </div>
+           )}
+           <div className="grid grid-cols-2 gap-4">
+
             <div>
               <label className="block text-sm mb-1">ID</label>
-              <input
-                value={editing.id ?? ''}
-                onChange={(e) => setEditing({ ...editing, id: e.target.value })}
-                disabled={!isNew}
-                placeholder="e.g. opencode-local"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
-              />
+               <input
+                 value={editing.id ?? ''}
+                 onChange={(e) => {
+                   setEditing({ ...editing, id: e.target.value });
+                   if (errors.id) setErrors({ ...errors, id: '' });
+                 }}
+                 disabled={!isNew}
+                 placeholder="e.g. opencode-local"
+                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm disabled:text-gray-500 ${
+                   errors.id ? 'border-red-500' : 'border-gray-700'
+                 }`}
+               />
+               {errors.id && <p className="text-red-500 text-xs mt-1">{errors.id}</p>}
+
             </div>
             <div>
               <label className="block text-sm mb-1">Display name</label>
-              <input
-                value={editing.display_name ?? ''}
-                onChange={(e) => setEditing({ ...editing, display_name: e.target.value })}
-                placeholder="e.g. OpenCode (Local LLM)"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-              />
+               <input
+                 value={editing.display_name ?? ''}
+                 onChange={(e) => {
+                   setEditing({ ...editing, display_name: e.target.value });
+                   if (errors.display_name) setErrors({ ...errors, display_name: '' });
+                 }}
+                 placeholder="e.g. OpenCode (Local LLM)"
+                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm ${
+                   errors.display_name ? 'border-red-500' : 'border-gray-700'
+                 }`}
+               />
+               {errors.display_name && <p className="text-red-500 text-xs mt-1">{errors.display_name}</p>}
+
             </div>
             <div>
               <label className="block text-sm mb-1">Type</label>
@@ -548,30 +591,51 @@ function ToolSettings() {
           </div>
           <div>
             <label className="block text-sm mb-1">Command template</label>
-            <input
-              value={editing.command_template ?? ''}
-              onChange={(e) => setEditing({ ...editing, command_template: e.target.value })}
-              placeholder='e.g. opencode run --non-interactive --prompt "${TASK_PROMPT}"'
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
-            />
+               <input
+                 value={editing.command_template ?? ''}
+                 onChange={(e) => {
+                   setEditing({ ...editing, command_template: e.target.value });
+                   if (errors.command_template) setErrors({ ...errors, command_template: '' });
+                 }}
+                 placeholder='e.g. opencode run --non-interactive --prompt "${TASK_PROMPT}"'
+                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono ${
+                   errors.command_template ? 'border-red-500' : 'border-gray-700'
+                 }`}
+               />
+               {errors.command_template && <p className="text-red-500 text-xs mt-1">{errors.command_template}</p>}
+
           </div>
           <div>
             <label className="block text-sm mb-1">Environment variables (JSON)</label>
-            <textarea
-              value={envVarsText}
-              onChange={(e) => setEnvVarsText(e.target.value)}
-              placeholder='{"OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1"}'
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[80px]"
-            />
+               <textarea
+                 value={envVarsText}
+                 onChange={(e) => {
+                   setEnvVarsText(e.target.value);
+                   if (errors.env_vars) setErrors({ ...errors, env_vars: '' });
+                 }}
+                 placeholder='{"OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1"}'
+                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono min-h-[80px] ${
+                   errors.env_vars ? 'border-red-500' : 'border-gray-700'
+                 }`}
+               />
+               {errors.env_vars && <p className="text-red-500 text-xs mt-1">{errors.env_vars}</p>}
+
           </div>
           <div>
             <label className="block text-sm mb-1">Auth config (JSON)</label>
-            <textarea
-              value={authConfigText}
-              onChange={(e) => setAuthConfigText(e.target.value)}
-              placeholder='{"env_var": "OPENCODE_API_KEY", "optional": true}'
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[60px]"
-            />
+               <textarea
+                 value={authConfigText}
+                 onChange={(e) => {
+                   setAuthConfigText(e.target.value);
+                   if (errors.auth_config) setErrors({ ...errors, auth_config: '' });
+                 }}
+                 placeholder='{"env_var": "OPENCODE_API_KEY", "optional": true}'
+                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono min-h-[60px] ${
+                   errors.auth_config ? 'border-red-500' : 'border-gray-700'
+                 }`}
+               />
+               {errors.auth_config && <p className="text-red-500 text-xs mt-1">{errors.auth_config}</p>}
+
           </div>
           <div className="flex gap-3">
             <button
