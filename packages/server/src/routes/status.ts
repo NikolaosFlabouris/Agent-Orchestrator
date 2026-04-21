@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import fsp from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 import {
   getActiveTaskCount,
@@ -20,6 +20,66 @@ const startTime = Date.now();
 const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? "/workspaces";
 const CACHES_ROOT = process.env.CACHES_ROOT ?? "/caches";
 
+// ---------------------------------------------------------------------------
+// Disk-usage cache (stale-while-revalidate)
+// ---------------------------------------------------------------------------
+//
+// /api/status used to compute WORKSPACES_ROOT + CACHES_ROOT directory sizes on
+// every request via synchronous recursive `fs.statSync`. With many workspaces
+// that scan can take tens of seconds, and because it runs on the event-loop
+// thread it blocked every other request behind it — the dashboard's 5s
+// auto-refresh stacks pending status calls, `/health` times out, WebSocket
+// upgrades stall. The orchestrator "runs" but the UI feels frozen.
+//
+// Fix: compute sizes with async fs.promises (no event-loop block), cache for
+// 60 s, and serve from cache even while a background refresh is in flight.
+// First call after boot returns zero bytes until the first refresh completes;
+// every subsequent call is instant.
+const DISK_CACHE_TTL_MS = 60_000;
+let diskCache: { workspaces: number; caches: number; at: number } | null =
+  null;
+let diskRefreshing: Promise<void> | null = null;
+
+async function getDirSizeAsync(dirPath: string): Promise<number> {
+  try {
+    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    let total = 0;
+    for (const entry of entries) {
+      const fullPath = `${dirPath}/${entry.name}`;
+      if (entry.isFile()) {
+        try {
+          total += (await fsp.stat(fullPath)).size;
+        } catch {
+          /* skip — file may have vanished mid-scan */
+        }
+      } else if (entry.isDirectory()) {
+        total += await getDirSizeAsync(fullPath);
+      }
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+function ensureDiskCache(): void {
+  if (diskCache && Date.now() - diskCache.at < DISK_CACHE_TTL_MS) return;
+  if (diskRefreshing) return;
+  diskRefreshing = (async () => {
+    const [workspaces, caches] = await Promise.all([
+      getDirSizeAsync(WORKSPACES_ROOT),
+      getDirSizeAsync(CACHES_ROOT),
+    ]);
+    diskCache = { workspaces, caches, at: Date.now() };
+  })().finally(() => {
+    diskRefreshing = null;
+  });
+}
+
+// Kick off the first refresh at module-load time so the cold-start window is
+// short. `void` discards the promise; errors are swallowed inside.
+void ensureDiskCache();
+
 export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
   return async function statusRoutes(app: FastifyInstance): Promise<void> {
     // GET /api/status
@@ -36,9 +96,11 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
         )
         .get() as { completions: number; cost: number };
 
-      // Disk usage
-      const workspacesBytes = getDirSize(WORKSPACES_ROOT);
-      const cachesBytes = getDirSize(CACHES_ROOT);
+      // Disk usage — served from a 60s cache refreshed in the background so
+      // the scan never blocks the event loop. See ensureDiskCache above.
+      ensureDiskCache();
+      const workspacesBytes = diskCache?.workspaces ?? 0;
+      const cachesBytes = diskCache?.caches ?? 0;
 
       // Per-provider slot accounting — drives the Pools row on the dashboard.
       const activeTasks = [
@@ -121,25 +183,3 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
   };
 }
 
-function getDirSize(dirPath: string): number {
-  try {
-    if (!fs.existsSync(dirPath)) return 0;
-    let total = 0;
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = `${dirPath}/${entry.name}`;
-      if (entry.isFile()) {
-        try {
-          total += fs.statSync(fullPath).size;
-        } catch {
-          /* skip */
-        }
-      } else if (entry.isDirectory()) {
-        total += getDirSize(fullPath);
-      }
-    }
-    return total;
-  } catch {
-    return 0;
-  }
-}
