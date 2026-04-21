@@ -97,9 +97,14 @@ export function CreateTask() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <header className="border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
-          &larr; Dashboard
-        </Link>
+        <div className="flex items-center justify-between">
+          <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
+            &larr; Dashboard
+          </Link>
+          <Link to="/help" className="text-blue-400 hover:text-blue-300 text-sm">
+            Help
+          </Link>
+        </div>
         <h1 className="text-xl font-semibold mt-1">Create Task</h1>
       </header>
 

@@ -97,6 +97,12 @@ export function Dashboard() {
             >
               Settings
             </Link>
+            <Link
+              to="/help"
+              className="text-blue-400 hover:text-blue-300"
+            >
+              Help
+            </Link>
           </div>
         </div>
       </header>

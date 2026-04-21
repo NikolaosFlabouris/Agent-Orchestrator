@@ -82,12 +82,20 @@ export function TaskDetail() {
       <header className="border-b border-gray-800 bg-gray-900 px-6 py-4">
         <div className="flex items-center justify-between">
           <div>
-            <Link
-              to="/"
-              className="text-blue-400 hover:text-blue-300 text-sm"
-            >
-              &larr; Dashboard
-            </Link>
+            <div className="flex items-center gap-4">
+              <Link
+                to="/"
+                className="text-blue-400 hover:text-blue-300 text-sm"
+              >
+                &larr; Dashboard
+              </Link>
+              <Link
+                to="/help"
+                className="text-blue-400 hover:text-blue-300 text-sm"
+              >
+                Help
+              </Link>
+            </div>
             <h1 className="text-xl font-semibold mt-1">
               <span className="text-blue-400 font-mono">
                 #{task.issue_id}
