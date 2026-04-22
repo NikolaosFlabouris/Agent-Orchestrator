@@ -11,7 +11,9 @@ import {
   inspectContainer,
 } from './docker.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
+import { resetTask } from './actions.js';
 import type { ForgejoClient } from './forgejo.js';
+import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -97,13 +99,12 @@ export async function detectOrphans(
 
 /**
  * Top-level sweep: detect orphans, then recover each one according to its
- * attempt role. Currently handles review orphans; dev orphans are logged
- * and deferred (see PR 2). Re-entry is prevented by a caller-supplied mutex
- * flag via the `Scheduler` integration; this function itself is not
- * mutex-aware.
+ * attempt role. Re-entry is prevented by a caller-supplied mutex flag via
+ * the `Scheduler` integration; this function itself is not mutex-aware.
  */
 export async function runOrphanSweep(
   forgejo: ForgejoClient,
+  scheduler: Scheduler,
   log: FastifyBaseLogger
 ): Promise<void> {
   const orphans = await detectOrphans(log);
@@ -132,13 +133,7 @@ export async function runOrphanSweep(
     if (stuckAttempt.role === 'review') {
       await recoverReviewOrphan(task, stuckAttempt, forgejo, log);
     } else {
-      // Dev orphan handling lands in PR 2 (requires destructive workspace
-      // + branch reset). For now, finalise nothing — leave the operator
-      // visibility to act manually.
-      log.info(
-        { event: 'orphan_dev_deferred', task_id: task.id, attempt_id: stuckAttempt.id },
-        'Dev orphan recovery deferred — skipping (PR 2)'
-      );
+      await recoverDevOrphan(task, stuckAttempt, forgejo, scheduler, log);
     }
   }
 }
@@ -204,6 +199,75 @@ export async function recoverReviewOrphan(
       attempt: nextAttempt,
     },
     'Review orphan recovered'
+  );
+}
+
+/**
+ * Recover a develop-role orphan.
+ *
+ * Unlike review, a dev container may have made uncommitted changes in its
+ * workspace before disappearing, and the branch it pushed is a speculative
+ * partial. We therefore call the full `resetTask` flow (stop stale
+ * container, delete remote branch, close PR, wipe workspace, clear status
+ * labels) and requeue the task at the back of the FIFO queue with the
+ * attempt counter bumped.
+ *
+ * Guards are the same as review recovery: a fresh orphan within
+ * CRASH_LOOP_WINDOW_MS or a bumped attempt exceeding max_attempts both
+ * escalate the task to `failed` instead of resetting.
+ */
+export async function recoverDevOrphan(
+  task: Task,
+  stuckAttempt: Attempt,
+  forgejo: ForgejoClient,
+  scheduler: Scheduler,
+  log: FastifyBaseLogger
+): Promise<void> {
+  finaliseAttemptAsFailed(stuckAttempt, 'Container disappeared before develop completed');
+
+  if (isCrashLoop(task, stuckAttempt)) {
+    await markExhausted(
+      task,
+      'Develop container crash-looped (new launch failed within 30 seconds)',
+      forgejo,
+      log
+    );
+    return;
+  }
+
+  const nextAttempt = task.attempt + 1;
+  if (nextAttempt > task.max_attempts) {
+    await markExhausted(
+      task,
+      `Exhausted ${task.max_attempts} attempts during orphan recovery`,
+      forgejo,
+      log
+    );
+    return;
+  }
+
+  // Hand off to the shared reset flow. `incrementAttempt` bumps
+  // tasks.attempt instead of resetting to 1; `requeue` drops the task back
+  // into the FIFO queue instead of the terminal `reset` state so the
+  // scheduler picks it up on the next tick without human intervention.
+  await resetTask(task, forgejo, scheduler, log, {
+    reason: `Dev orphan recovery (attempt ${nextAttempt}/${task.max_attempts})`,
+    incrementAttempt: true,
+    requeue: true,
+  });
+
+  recordTaskEvent(
+    task.id,
+    'orphan_recovery_triggered',
+    `Dev orphan recovered — requeued (attempt ${nextAttempt}/${task.max_attempts})`
+  );
+  log.info(
+    {
+      event: 'orphan_recovered_develop',
+      task_id: task.id,
+      attempt: nextAttempt,
+    },
+    'Dev orphan recovered'
   );
 }
 

@@ -216,7 +216,7 @@ export class Scheduler {
     if (this.orphanSweepInFlight) return;
     this.orphanSweepInFlight = true;
     try {
-      await runOrphanSweep(this.forgejo, this.log);
+      await runOrphanSweep(this.forgejo, this, this.log);
     } catch (err) {
       this.log.error(
         { event: 'orphan_sweep_error', err },

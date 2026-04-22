@@ -163,7 +163,7 @@ export async function onStartup(
   // built for. Tasks reconciled in step 3 are already consistent, so
   // the sweep is a no-op for them.
   try {
-    await runOrphanSweep(forgejo, log);
+    await runOrphanSweep(forgejo, scheduler, log);
   } catch (err) {
     log.error(
       { event: 'recovery_orphan_sweep_error', err },

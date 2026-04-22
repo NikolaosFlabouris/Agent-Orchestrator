@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
     inspectContainer: vi.fn(),
     updateTaskWithSync: vi.fn(),
     recordTaskEvent: vi.fn(),
+    resetTask: vi.fn<(...args: unknown[]) => Promise<void>>(),
   };
 });
 
@@ -39,10 +40,18 @@ vi.mock('../../state-sync.js', () => ({
   recordTaskEvent: mocks.recordTaskEvent,
 }));
 
+// actions.ts pulls in fs + docker + workspace + scheduler transitively; stub
+// it at module level so recoverDevOrphan's call to resetTask is observable
+// without exercising any of that.
+vi.mock('../../actions.js', () => ({
+  resetTask: mocks.resetTask,
+}));
+
 // Import after mocks are registered.
 const {
   detectOrphans,
   recoverReviewOrphan,
+  recoverDevOrphan,
   runOrphanSweep,
   computeTaskHealth,
 } = await import('../../orphan-recovery.js');
@@ -107,11 +116,17 @@ const fakeForgejo = {
   commentOnIssue: vi.fn().mockResolvedValue(undefined),
 } as any;
 
+// A bare stand-in for the Scheduler instance. The sweep only hands this
+// through to resetTask (mocked), so no method on it needs to be callable.
+const fakeScheduler = {} as any;
+
 beforeEach(() => {
   vi.clearAllMocks();
   // Keep getTasks returning empty by default so detectOrphans skips each
   // status bucket unless a test overrides it.
   mocks.getTasks.mockReturnValue([]);
+  // Default resetTask to a successful no-op.
+  mocks.resetTask.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -374,7 +389,7 @@ describe('runOrphanSweep', () => {
     );
     mocks.getAttempts.mockReturnValue([attempt]);
 
-    await runOrphanSweep(fakeForgejo, silentLog);
+    await runOrphanSweep(fakeForgejo, fakeScheduler, silentLog);
 
     // Attempt finalised.
     expect(mocks.updateAttempt).toHaveBeenCalledWith(
@@ -394,30 +409,130 @@ describe('runOrphanSweep', () => {
 
   it('is a no-op when Docker is unreachable', async () => {
     mocks.listContainers.mockRejectedValue(new Error('docker down'));
-    await runOrphanSweep(fakeForgejo, silentLog);
+    await runOrphanSweep(fakeForgejo, fakeScheduler, silentLog);
     expect(mocks.updateAttempt).not.toHaveBeenCalled();
     expect(mocks.updateTaskWithSync).not.toHaveBeenCalled();
   });
 
-  it('defers dev orphans (PR 2 scope)', async () => {
+  it('recovers dev orphans by delegating to resetTask with incrementAttempt+requeue', async () => {
     const task = mkTask({
       id: 4,
       status: 'in-progress',
       container_id: null,
+      attempt: 1,
+      max_attempts: 3,
     });
-    const attempt = mkAttempt({ task_id: 4, role: 'develop' });
+    const attempt = mkAttempt({
+      id: 200,
+      task_id: 4,
+      role: 'develop',
+      // Outside crash-loop window so recovery proceeds.
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
     mocks.listContainers.mockResolvedValue([]);
     mocks.getTasks.mockImplementation(({ status }) =>
       status === 'in-progress' ? [task] : []
     );
     mocks.getAttempts.mockReturnValue([attempt]);
 
-    await runOrphanSweep(fakeForgejo, silentLog);
+    await runOrphanSweep(fakeForgejo, fakeScheduler, silentLog);
 
-    // Detection event fires, but no recovery actions yet.
+    expect(mocks.updateAttempt).toHaveBeenCalledWith(
+      200,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(mocks.resetTask).toHaveBeenCalledWith(
+      task,
+      fakeForgejo,
+      fakeScheduler,
+      silentLog,
+      expect.objectContaining({ incrementAttempt: true, requeue: true })
+    );
     const eventTypes = mocks.recordTaskEvent.mock.calls.map((c) => c[1]);
     expect(eventTypes).toContain('orphan_detected');
-    expect(mocks.updateAttempt).not.toHaveBeenCalled();
-    expect(mocks.updateTaskWithSync).not.toHaveBeenCalled();
+    expect(eventTypes).toContain('orphan_recovery_triggered');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recoverDevOrphan
+// ---------------------------------------------------------------------------
+
+describe('recoverDevOrphan', () => {
+  it('finalises the stuck attempt and hands off to resetTask on happy path', async () => {
+    const task = mkTask({ id: 4, attempt: 1, max_attempts: 3 });
+    const attempt = mkAttempt({
+      id: 300,
+      task_id: 4,
+      role: 'develop',
+      started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+
+    await recoverDevOrphan(task, attempt, fakeForgejo, fakeScheduler, silentLog);
+
+    expect(mocks.updateAttempt).toHaveBeenCalledWith(
+      300,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(mocks.resetTask).toHaveBeenCalledTimes(1);
+    const resetArgs = mocks.resetTask.mock.calls[0];
+    expect(resetArgs[0]).toBe(task);
+    expect(resetArgs[4]).toMatchObject({
+      incrementAttempt: true,
+      requeue: true,
+    });
+    expect(mocks.recordTaskEvent).toHaveBeenCalledWith(
+      4,
+      'orphan_recovery_triggered',
+      expect.stringContaining('attempt 2/3')
+    );
+  });
+
+  it('escalates to failed when max_attempts has been reached (no resetTask call)', async () => {
+    const task = mkTask({ id: 4, attempt: 3, max_attempts: 3 });
+    const attempt = mkAttempt({
+      id: 301,
+      task_id: 4,
+      role: 'develop',
+      started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    mocks.getRepo.mockReturnValue({ id: 1, owner: 'o', name: 'r' });
+
+    await recoverDevOrphan(task, attempt, fakeForgejo, fakeScheduler, silentLog);
+
+    expect(mocks.resetTask).not.toHaveBeenCalled();
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      4,
+      expect.objectContaining({ status: 'failed', container_id: null })
+    );
+    expect(mocks.recordTaskEvent).toHaveBeenCalledWith(
+      4,
+      'orphan_recovery_exhausted',
+      expect.stringContaining('Exhausted')
+    );
+  });
+
+  it('escalates to failed on crash-loop (no resetTask call)', async () => {
+    const task = mkTask({ id: 4, attempt: 1, max_attempts: 5 });
+    const attempt = mkAttempt({
+      id: 302,
+      task_id: 4,
+      role: 'develop',
+      started_at: new Date(Date.now() - 5_000).toISOString(), // 5s ago
+    });
+    mocks.getRepo.mockReturnValue({ id: 1, owner: 'o', name: 'r' });
+
+    await recoverDevOrphan(task, attempt, fakeForgejo, fakeScheduler, silentLog);
+
+    expect(mocks.resetTask).not.toHaveBeenCalled();
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      4,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(mocks.recordTaskEvent).toHaveBeenCalledWith(
+      4,
+      'orphan_recovery_exhausted',
+      expect.stringContaining('crash-looped')
+    );
   });
 });

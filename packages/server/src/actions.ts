@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import type { Task } from '@orchestrator/shared';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
-import { getRepo, getTask, updateTask } from './db.js';
+import { getRepo, getTask, updateTask, getDb } from './db.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
 import {
@@ -89,17 +89,40 @@ export async function cancelTask(
   scheduler.triggerTick();
 }
 
+export interface ResetOptions {
+  /** Human-readable reason, surfaced in the task timeline and the Forgejo
+   *  issue comment. Defaults to "Reset by user". */
+  reason?: string;
+  /** When true, set `tasks.attempt = task.attempt + 1` instead of resetting
+   *  to 1. Used by orphan recovery so that a task which has been salvaged
+   *  three times shows attempt=4, and a genuine user-driven reset still
+   *  returns the counter to 1. */
+  incrementAttempt?: boolean;
+  /** When true, leave the task in `queued` (at the back of the FIFO queue)
+   *  instead of the terminal `reset` state. Used by orphan recovery to
+   *  auto-rerun the task without human intervention; user-driven resets
+   *  deliberately go to `reset` so the operator decides whether to re-queue. */
+  requeue?: boolean;
+}
+
 /**
  * Reset a task — stop container, delete branch, close PR, delete workspace,
  * remove labels, reset counters. Destructive operation.
+ *
+ * The `options` parameter lets orphan recovery share the cleanup flow while
+ * keeping its own post-state (attempt bumped, auto-requeued). User-driven
+ * resets use the defaults: attempt back to 1, status goes to `reset`.
  */
 export async function resetTask(
   task: Task,
   forgejo: ForgejoClient,
   scheduler: Scheduler,
   log: FastifyBaseLogger,
-  reason: string = 'Reset by user'
+  options: ResetOptions = {}
 ): Promise<void> {
+  const reason = options.reason ?? 'Reset by user';
+  const incrementAttempt = options.incrementAttempt ?? false;
+  const requeue = options.requeue ?? false;
   const repo = getRepo(task.repo_id);
 
   // 1. Stop running container
@@ -173,15 +196,27 @@ export async function resetTask(
 
   // 6. Clean up internal state
   recordTaskEvent(task.id, 'task_reset', `Reset: ${reason}`);
+  const nextStatus = requeue ? 'queued' : 'reset';
+  const nextAttempt = incrementAttempt ? task.attempt + 1 : 1;
+  // When requeuing, place the task at the back of the FIFO queue. Mirrors
+  // insertTask's default behaviour so we don't accidentally jump the line.
+  const queuePosition = requeue
+    ? ((
+        getDb()
+          .prepare('SELECT MAX(queue_position) as max_pos FROM tasks')
+          .get() as { max_pos: number | null }
+      ).max_pos ?? 0) + 1
+    : null;
   updateTaskWithSync(task.id, {
-    status: 'reset',
+    status: nextStatus,
     branch_name: null,
     pr_number: null,
     container_id: null,
-    attempt: 1,
+    attempt: nextAttempt,
     prep_failure_count: 0,
     started_at: null,
     completed_at: null,
+    queue_position: queuePosition,
   });
 
   log.info(
