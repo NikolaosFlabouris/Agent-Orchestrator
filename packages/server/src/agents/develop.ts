@@ -5,6 +5,11 @@ import { getRepo, getTask, updateTask } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import {
+  buildPullRequestBody,
+  ensureIssueLink,
+  hasIssueLink,
+} from '../forgejo-linking.js';
+import {
   verifyWorkspaceState,
   getWorkdir,
   detectChanges,
@@ -213,7 +218,10 @@ export async function postDevAgent(
     if (task.pr_number === null || task.pr_number === undefined) {
       const pr = await forgejo.createPullRequest(repo, {
         title: issueTitle,
-        body: `Automated PR for #${task.issue_id}\n\nCloses #${task.issue_id}`,
+        body: buildPullRequestBody({
+          issue_id: task.issue_id,
+          attempt: task.attempt,
+        }),
         head: task.branch_name!,
         base: repo.base_branch,
       });
@@ -223,7 +231,55 @@ export async function postDevAgent(
         { event: 'pr_created', task_id: task.id, pr_number: pr.number },
         'Pull request created'
       );
+
+      // Verify the closing-keyword link made it into the PR body. A correctly
+      // behaved Forgejo returns the body verbatim, so this should always be
+      // true — but if a server-side filter or a future code path stripped it,
+      // we repair before relying on the link downstream.
+      if (!hasIssueLink(pr.body, task.issue_id)) {
+        const repaired = ensureIssueLink(pr.body, task.issue_id);
+        try {
+          await forgejo.updatePullRequest(repo, pr.number, { body: repaired });
+          recordTaskEvent(
+            task.id,
+            'pr_issue_link_repaired',
+            `Restored \`Closes #${task.issue_id}\` link on PR #${pr.number}`
+          );
+          log.warn(
+            { event: 'pr_issue_link_missing', task_id: task.id, pr_number: pr.number },
+            'PR body missing issue link after create — repaired'
+          );
+        } catch (err) {
+          log.error(
+            { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
+            'Failed to repair missing PR↔issue link'
+          );
+        }
+      }
     } else {
+      // Rework path: ensure the existing PR still links to the issue even if
+      // a human (or future automation) edited the body. Read it back, and if
+      // the link is missing, re-apply via PATCH; otherwise leave untouched.
+      try {
+        const existing = await forgejo.getPullRequest(repo, task.pr_number);
+        if (!hasIssueLink(existing.body, task.issue_id)) {
+          const repaired = ensureIssueLink(existing.body, task.issue_id);
+          await forgejo.updatePullRequest(repo, task.pr_number, {
+            body: repaired,
+          });
+          recordTaskEvent(
+            task.id,
+            'pr_issue_link_repaired',
+            `Restored \`Closes #${task.issue_id}\` link on PR #${task.pr_number}`
+          );
+        }
+      } catch (err) {
+        log.warn(
+          { event: 'pr_link_check_failed', task_id: task.id, err },
+          'Could not verify existing PR body — skipping link check'
+        );
+      }
+
       try {
         await forgejo.commentOnPr(
           repo,

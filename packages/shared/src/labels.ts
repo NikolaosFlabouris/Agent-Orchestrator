@@ -22,6 +22,24 @@ export const OVERRIDE_LABELS = {
   HUMAN_REVIEW: 'human-review',
 } as const;
 
+/**
+ * Labels the orchestrator *reads* from Forgejo to drive behaviour (vs
+ * `status/*` which the orchestrator writes). Any label not in this set is
+ * ignored by status derivation so arbitrary user tags can't accidentally
+ * steer the scheduler. Extending the set is a one-line change plus a
+ * derivation rule in `status-derivation.ts`.
+ */
+export const DRIVER_LABELS = {
+  HUMAN_MERGE: 'human-merge',
+  HUMAN_REVIEW: 'human-review',
+} as const;
+
+export type DriverLabel = (typeof DRIVER_LABELS)[keyof typeof DRIVER_LABELS];
+
+export const DRIVER_LABEL_SET: ReadonlySet<string> = new Set(
+  Object.values(DRIVER_LABELS)
+);
+
 /** Terminal statuses — these free the active slot. */
 export const TERMINAL_STATUSES = new Set([
   'merged',

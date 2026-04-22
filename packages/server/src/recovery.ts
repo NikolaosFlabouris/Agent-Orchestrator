@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import type { Task } from '@orchestrator/shared';
 import { getTasks, getRepo, updateTask, insertTaskEvent } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
+import { buildPullRequestBody } from './forgejo-linking.js';
 import {
   listContainers,
   getContainer,
@@ -226,7 +227,10 @@ async function recoverTask(
           }
           const pr = await forgejo.createPullRequest(repo, {
             title: issueTitle,
-            body: `Automated PR for #${task.issue_id}\n\nCloses #${task.issue_id}`,
+            body: buildPullRequestBody({
+              issue_id: task.issue_id,
+              attempt: task.attempt,
+            }),
             head: task.branch_name,
             base: repo.base_branch,
           });

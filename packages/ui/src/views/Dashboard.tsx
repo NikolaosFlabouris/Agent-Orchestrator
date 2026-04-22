@@ -33,6 +33,20 @@ export function Dashboard() {
     refresh();
     const timer = window.setInterval(refresh, 5_000);
 
+    // Pull the task list through the REST API as well. The dashboard WS
+    // snapshot returns raw `tasks.status` (runtime state), whereas the REST
+    // response overlays the Forgejo-derived status so closed-issue/merged-PR
+    // reality overrides stale local `failed` rows. Refresh on mount and
+    // every 30 s so driver-label / issue-closure changes reach the UI even
+    // if a webhook was dropped.
+    const refreshTasks = () => {
+      api.getTasks().then((res) => {
+        for (const task of res.tasks) store.updateTask(task);
+      }).catch(() => {});
+    };
+    refreshTasks();
+    const tasksTimer = window.setInterval(refreshTasks, 30_000);
+
     // Connect WebSocket
     const handler = (event: DashboardWsEvent) => {
       switch (event.type) {
@@ -58,6 +72,7 @@ export function Dashboard() {
     return () => {
       disconnect();
       window.clearInterval(timer);
+      window.clearInterval(tasksTimer);
     };
   }, []);
 

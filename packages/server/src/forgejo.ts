@@ -329,6 +329,22 @@ export class ForgejoClient {
     );
   }
 
+  /**
+   * Edit a PR's body (and optionally title). Used to repair a missing
+   * closing-keyword link post-hoc, or to update the description on rework.
+   */
+  async updatePullRequest(
+    repo: Repo,
+    prNumber: number,
+    data: { title?: string; body?: string }
+  ): Promise<ForgejoPullRequest> {
+    return this.request<ForgejoPullRequest>(
+      'PATCH',
+      `${this.repoPath(repo)}/pulls/${prNumber}`,
+      data
+    );
+  }
+
   async mergePullRequest(
     repo: Repo,
     prNumber: number,

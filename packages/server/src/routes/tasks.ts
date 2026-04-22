@@ -10,13 +10,15 @@ import {
   updateTask,
 } from '../db.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
-import type { Task } from '@orchestrator/shared';
+import type { Task, TaskStatus } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { cancelTask, resetTask } from '../actions.js';
 import { updateTaskWithSync, notifyTaskCreated } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
+import { getSnapshot } from '../forgejo-snapshot.js';
+import { deriveStatus } from '../status-derivation.js';
 
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 
@@ -51,7 +53,9 @@ export function createTaskRoutes(
         query.status ? { status: query.status as any } : undefined
       );
 
-      const enriched = allTasks.map(enrichTask);
+      const enriched = await Promise.all(
+        allTasks.map((t) => enrichTaskWithDerivation(t, forgejo))
+      );
 
       if (!query.status) {
         const active: typeof enriched = [];
@@ -78,7 +82,7 @@ export function createTaskRoutes(
         const task = getTask(id);
         if (!task) return reply.status(404).send({ error: 'Task not found' });
 
-        const enriched = enrichTask(task);
+        const enriched = await enrichTaskWithDerivation(task, forgejo);
         const attempts = getAttempts(task.id);
         const repo = getRepo(task.repo_id);
 
@@ -363,5 +367,30 @@ function enrichTask(task: Task) {
     repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name } : null,
     total_cost_usd: Math.round(totalCost * 100) / 100,
     blocked_by: [] as number[],
+    runtime_status: task.status as TaskStatus,
   };
+}
+
+/**
+ * Enrich a task and overlay the Forgejo-derived status.
+ *
+ * The response's `status` field is the derived value (what the UI should
+ * show); `runtime_status` preserves the stored orchestrator state for
+ * debugging. Snapshot fetch failures fall back to the stored status — the
+ * API stays responsive if Forgejo is briefly unreachable.
+ */
+async function enrichTaskWithDerivation(
+  task: Task,
+  forgejo: ForgejoClient
+): Promise<ReturnType<typeof enrichTask>> {
+  const base = enrichTask(task);
+
+  let snapshot = null;
+  try {
+    snapshot = await getSnapshot(task, forgejo);
+  } catch {
+    // Best effort — derivation falls back to stored status.
+  }
+  const derived = deriveStatus(task, snapshot);
+  return { ...base, status: derived.status };
 }

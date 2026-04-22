@@ -51,6 +51,7 @@ import {
   handleReviewFailure,
 } from './agents/review.js';
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
+import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 // ---------------------------------------------------------------------------
@@ -358,6 +359,35 @@ export class Scheduler {
           this.log
         );
         if (!depsMet) continue;
+      }
+
+      // Respect Forgejo-side closure: if the human closed the issue since
+      // the task was queued (or while it's been sitting), don't start work.
+      // Mark the task cancelled so it leaves the queue — derivation would
+      // show it as cancelled on read anyway, but we need to release the
+      // slot and stop re-picking it up here. Best-effort — a snapshot
+      // fetch failure falls through and the task launches normally.
+      try {
+        const snapshot = await getSnapshot(task, this.forgejo);
+        if (snapshot && snapshot.issue.state === 'closed' && !snapshot.pr?.merged) {
+          updateTaskWithSync(task.id, {
+            status: 'cancelled',
+            completed_at: new Date().toISOString(),
+          });
+          recordTaskEvent(
+            task.id,
+            'skipped_issue_closed',
+            `Skipped: issue #${task.issue_id} closed on Forgejo before task launch`
+          );
+          invalidateSnapshot(task.id);
+          this.log.info(
+            { event: 'scheduler_skip_closed', task_id: task.id },
+            'Skipping task — Forgejo issue is closed'
+          );
+          continue;
+        }
+      } catch {
+        // Snapshot fetch failed — proceed with launch.
       }
 
       // Launch appropriate container

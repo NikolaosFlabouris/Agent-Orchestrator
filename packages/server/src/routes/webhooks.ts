@@ -24,6 +24,7 @@ import {
 } from '../db.js';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
+import { invalidateSnapshot } from '../forgejo-snapshot.js';
 
 const WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET ?? '';
 
@@ -137,6 +138,11 @@ async function handleIssueEvent(
     // Issue is from an untracked repo
     return;
   }
+
+  // Any issue event may have changed state or labels that derivation reads.
+  // Invalidate any cached snapshot so the next read pulls fresh data.
+  const trackedForInvalidate = getTaskByIssue(issue.number);
+  if (trackedForInvalidate) invalidateSnapshot(trackedForInvalidate.id);
 
   if (payload.action === 'opened' || payload.action === 'label_updated') {
     // Check if the issue has the status/queued label
@@ -255,6 +261,22 @@ async function handlePullRequestEvent(
 ): Promise<void> {
   const pr = payload.pull_request;
   if (!pr) return;
+
+  // Invalidate any snapshot cached for the task that owns this PR so the
+  // next derivation sees the fresh PR state (merged, closed, draft change).
+  const repoData = payload.repository;
+  if (repoData) {
+    const invRepo = getRepoByOwnerName(
+      repoData.owner?.login ?? '',
+      repoData.name
+    );
+    if (invRepo) {
+      const invTask = getTasks({ repo_id: invRepo.id }).find(
+        (t) => t.pr_number === pr.number
+      );
+      if (invTask) invalidateSnapshot(invTask.id);
+    }
+  }
 
   // PR merged externally
   if (payload.action === 'closed' && pr.merged) {
