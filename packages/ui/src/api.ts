@@ -107,6 +107,14 @@ export interface TaskResponse {
   created_at: string;
   total_cost_usd: number;
   blocked_by: number[];
+  /** Runtime health derived from container state. 'orphaned' means the
+   *  task looks active but its container has vanished; the orchestrator
+   *  will attempt recovery on the next sweep. Optional: POST/PATCH
+   *  responses omit it. */
+  health?: 'healthy' | 'orphaned' | 'idle';
+  /** Human-readable container name if one is currently running.
+   *  Only populated on the single-task detail endpoint. */
+  container_name?: string | null;
 }
 
 export interface TaskEventResponse {

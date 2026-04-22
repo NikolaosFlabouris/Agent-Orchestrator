@@ -10,7 +10,7 @@ import {
   updateTask,
 } from '../db.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
-import type { Task, TaskStatus } from '@orchestrator/shared';
+import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { cancelTask, resetTask } from '../actions.js';
@@ -19,6 +19,11 @@ import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
 import { getSnapshot } from '../forgejo-snapshot.js';
 import { deriveStatus } from '../status-derivation.js';
+import {
+  computeTaskHealth,
+  getContainerDisplayName,
+} from '../orphan-recovery.js';
+import { listContainers } from '../docker.js';
 
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 
@@ -53,8 +58,16 @@ export function createTaskRoutes(
         query.status ? { status: query.status as any } : undefined
       );
 
+      // One Docker call for the whole list — per-task lookup would scale
+      // linearly with task count and N round-trips to the Docker socket on
+      // every dashboard refresh. Best-effort: on failure, health degrades
+      // gracefully to 'healthy' (we'd rather mislabel than block the UI).
+      const managedIds = await loadManagedContainerIds(log);
+
       const enriched = await Promise.all(
-        allTasks.map((t) => enrichTaskWithDerivation(t, forgejo))
+        allTasks.map((t) =>
+          enrichTaskWithDerivation(t, forgejo, { managedIds })
+        )
       );
 
       if (!query.status) {
@@ -82,7 +95,15 @@ export function createTaskRoutes(
         const task = getTask(id);
         if (!task) return reply.status(404).send({ error: 'Task not found' });
 
-        const enriched = await enrichTaskWithDerivation(task, forgejo);
+        const managedIds = await loadManagedContainerIds(log);
+        const containerName = await getContainerDisplayName(
+          task.container_id,
+          log
+        );
+        const enriched = await enrichTaskWithDerivation(task, forgejo, {
+          managedIds,
+          containerName,
+        });
         const attempts = getAttempts(task.id);
         const repo = getRepo(task.repo_id);
 
@@ -356,10 +377,25 @@ export function createTaskRoutes(
   };
 }
 
-function enrichTask(task: Task) {
+interface EnrichContext {
+  /** Ids of all orchestrator-managed containers, for health derivation.
+   *  If undefined, health computation skips the Docker cross-check and
+   *  returns 'healthy' for active tasks with a non-null container_id. */
+  managedIds?: Set<string>;
+  /** Pre-resolved container display name. Only set for single-task lookups
+   *  that warrant a targeted inspect call. */
+  containerName?: string | null;
+}
+
+function enrichTask(task: Task, ctx: EnrichContext = {}) {
   const repo = getRepo(task.repo_id);
   const attempts = getAttempts(task.id);
   const totalCost = attempts.reduce((sum, a) => sum + (a.cost_usd ?? 0), 0);
+
+  const runningAttempt = findRunningAttempt(attempts);
+  const health = ctx.managedIds
+    ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
+    : deriveHealthWithoutDocker(task, runningAttempt);
 
   return {
     ...task,
@@ -368,6 +404,8 @@ function enrichTask(task: Task) {
     total_cost_usd: Math.round(totalCost * 100) / 100,
     blocked_by: [] as number[],
     runtime_status: task.status as TaskStatus,
+    health,
+    container_name: ctx.containerName ?? null,
   };
 }
 
@@ -381,9 +419,10 @@ function enrichTask(task: Task) {
  */
 async function enrichTaskWithDerivation(
   task: Task,
-  forgejo: ForgejoClient
+  forgejo: ForgejoClient,
+  ctx: EnrichContext = {}
 ): Promise<ReturnType<typeof enrichTask>> {
-  const base = enrichTask(task);
+  const base = enrichTask(task, ctx);
 
   let snapshot = null;
   try {
@@ -393,4 +432,45 @@ async function enrichTaskWithDerivation(
   }
   const derived = deriveStatus(task, snapshot);
   return { ...base, status: derived.status };
+}
+
+function findRunningAttempt(attempts: Attempt[]): Attempt | undefined {
+  for (let i = attempts.length - 1; i >= 0; i--) {
+    if (attempts[i].status === 'running') return attempts[i];
+  }
+  return undefined;
+}
+
+function deriveHealthWithoutDocker(
+  task: Task,
+  runningAttempt: Attempt | undefined
+): 'healthy' | 'orphaned' | 'idle' {
+  // Fallback used when the caller didn't pass managedIds (e.g. POST
+  // handlers where fetching the Docker list is overkill). Only catches
+  // the "container_id is null with a running attempt" orphan shape —
+  // missing_container requires Docker state we don't have here.
+  const active = new Set(['in-progress', 'in-review', 'changes-needed']);
+  if (!active.has(task.status)) return 'idle';
+  if (!runningAttempt) return 'healthy';
+  if (task.container_id === null) return 'orphaned';
+  return 'healthy';
+}
+
+async function loadManagedContainerIds(
+  log: Parameters<typeof getContainerDisplayName>[1]
+): Promise<Set<string> | undefined> {
+  // Returns undefined on Docker failure so callers propagate the "unknown"
+  // signal down to enrichTask, which will fall back to the Docker-less
+  // health derivation. Returning an empty Set here would incorrectly
+  // flag every containerised task as orphaned.
+  try {
+    const containers = await listContainers();
+    return new Set(containers.map((c) => c.Id));
+  } catch (err) {
+    log.warn(
+      { event: 'tasks_route_docker_unavailable', err },
+      'Could not list containers — task health will degrade to partial'
+    );
+    return undefined;
+  }
 }
