@@ -1,11 +1,8 @@
-import fs from 'node:fs';
 import { getTasks, getSettingInt, getActiveTaskCount, getQueuedTasks } from './db.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
+import { ensureDiskCache, getDiskCache } from './disk-usage.js';
 import type { FastifyBaseLogger } from 'fastify';
-
-const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
-const CACHES_ROOT = process.env.CACHES_ROOT ?? '/caches';
 
 interface Alert {
   level: 'info' | 'warning' | 'error';
@@ -16,7 +13,7 @@ interface Alert {
  * Check all alert conditions and broadcast any active alerts.
  * Called periodically (e.g., every 60 seconds from the poller interval).
  */
-export function checkAlerts(log: FastifyBaseLogger): Alert[] {
+export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   const alerts: Alert[] = [];
 
   // 1. Task failed after max attempts
@@ -63,17 +60,24 @@ export function checkAlerts(log: FastifyBaseLogger): Alert[] {
     });
   }
 
-  // 4. Disk usage exceeds threshold
+  // 4. Disk usage exceeds threshold — served from the shared stale-while-
+  // revalidate cache in disk-usage.ts so the scan never blocks the event loop.
+  // On the very first tick after boot the cache may not be populated yet; in
+  // that case we skip the disk alert for this cycle rather than blocking.
   const thresholdBytes = getSettingInt('disk_threshold_bytes');
   if (thresholdBytes > 0) {
-    const totalBytes = getDirSize(WORKSPACES_ROOT) + getDirSize(CACHES_ROOT);
-    if (totalBytes > thresholdBytes) {
-      const totalGb = (totalBytes / (1024 * 1024 * 1024)).toFixed(1);
-      const thresholdGb = (thresholdBytes / (1024 * 1024 * 1024)).toFixed(1);
-      alerts.push({
-        level: 'warning',
-        message: `Disk usage (${totalGb} GB) exceeds threshold (${thresholdGb} GB)`,
-      });
+    ensureDiskCache();
+    const disk = getDiskCache();
+    if (disk) {
+      const totalBytes = disk.workspaces + disk.caches;
+      if (totalBytes > thresholdBytes) {
+        const totalGb = (totalBytes / (1024 * 1024 * 1024)).toFixed(1);
+        const thresholdGb = (thresholdBytes / (1024 * 1024 * 1024)).toFixed(1);
+        alerts.push({
+          level: 'warning',
+          message: `Disk usage (${totalGb} GB) exceeds threshold (${thresholdGb} GB)`,
+        });
+      }
     }
   }
 
@@ -95,23 +99,4 @@ export function checkAlerts(log: FastifyBaseLogger): Alert[] {
   }
 
   return alerts;
-}
-
-function getDirSize(dirPath: string): number {
-  try {
-    if (!fs.existsSync(dirPath)) return 0;
-    let total = 0;
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = `${dirPath}/${entry.name}`;
-      if (entry.isFile()) {
-        try { total += fs.statSync(fullPath).size; } catch { /* skip */ }
-      } else if (entry.isDirectory()) {
-        total += getDirSize(fullPath);
-      }
-    }
-    return total;
-  } catch {
-    return 0;
-  }
 }

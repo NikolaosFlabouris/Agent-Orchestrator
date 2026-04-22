@@ -107,9 +107,20 @@ export class Poller {
       this.scheduler.triggerTick();
     }
 
-    // Check alert conditions and run cleanup on each poll cycle
-    checkAlerts(this.log);
-    cleanupOldWorkspaces(this.log);
+    // Check alert conditions and run cleanup on each poll cycle. Both are
+    // now async and yield to the event loop so they don't stall incoming
+    // HTTP requests. Independent try/catch so a failure in one doesn't skip
+    // the other.
+    try {
+      await checkAlerts(this.log);
+    } catch (err) {
+      this.log.warn({ event: 'check_alerts_failed', err }, 'checkAlerts threw');
+    }
+    try {
+      await cleanupOldWorkspaces(this.log);
+    } catch (err) {
+      this.log.warn({ event: 'cleanup_failed', err }, 'cleanupOldWorkspaces threw');
+    }
   }
 
   /**
