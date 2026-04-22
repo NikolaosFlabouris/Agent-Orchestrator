@@ -243,16 +243,25 @@ function ActiveTaskCard({ task }: { task: import('../api.js').TaskResponse }) {
       className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
     >
       <div className="flex items-center justify-between">
-        <div>
-          <span className="text-blue-400 font-mono text-sm">
-            #{task.issue_id}
-          </span>{' '}
-          <span className="font-medium">{task.issue_title}</span>
-          {task.repo && (
-            <span className="text-gray-500 text-sm ml-2">
-              {task.repo.owner}/{task.repo.name}
-            </span>
+        <div className="flex items-center gap-2">
+          {task.health === 'orphaned' && (
+            <span
+              className="inline-block w-2 h-2 rounded-full bg-orange-400"
+              title="Orphaned — container has disappeared. Orchestrator will attempt recovery."
+              aria-label="Orphaned"
+            />
           )}
+          <div>
+            <span className="text-blue-400 font-mono text-sm">
+              #{task.issue_id}
+            </span>{' '}
+            <span className="font-medium">{task.issue_title}</span>
+            {task.repo && (
+              <span className="text-gray-500 text-sm ml-2">
+                {task.repo.owner}/{task.repo.name}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-4 text-sm">
           <StatusBadge status={task.status} label={phaseLabel[task.status]} />

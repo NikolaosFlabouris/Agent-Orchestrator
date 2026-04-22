@@ -52,6 +52,7 @@ import {
 } from './agents/review.js';
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
+import { runOrphanSweep } from './orphan-recovery.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 // ---------------------------------------------------------------------------
@@ -106,6 +107,10 @@ export class Scheduler {
   private paused = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  // tick() can fire concurrently from the 60s timer, webhook triggers, and
+  // container-wait callbacks. The orphan sweep must not re-enter itself —
+  // a second sweep could double-finalise attempts. This flag serialises it.
+  private orphanSweepInFlight = false;
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -194,11 +199,32 @@ export class Scheduler {
   async tick(): Promise<void> {
     if (this.paused) return;
 
+    // Step 0: Reconcile orphaned tasks (container disappeared or
+    // container_id got nulled without finalising the attempt row).
+    // Runs before checkCompletedContainers so a just-nulled container_id
+    // from the previous tick gets caught on the same pass.
+    await this.reconcileOrphans();
+
     // Step 1: Check for completed containers
     await this.checkCompletedContainers();
 
     // Step 2: Fill empty slots
     await this.fillSlots();
+  }
+
+  private async reconcileOrphans(): Promise<void> {
+    if (this.orphanSweepInFlight) return;
+    this.orphanSweepInFlight = true;
+    try {
+      await runOrphanSweep(this.forgejo, this.log);
+    } catch (err) {
+      this.log.error(
+        { event: 'orphan_sweep_error', err },
+        'Orphan sweep failed'
+      );
+    } finally {
+      this.orphanSweepInFlight = false;
+    }
   }
 
   // ---- Step 1: Check completed containers ----

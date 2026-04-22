@@ -125,9 +125,18 @@ export function TaskDetail() {
                 </span>
               )}
             </div>
+            {(task.container_name || task.container_id) && (
+              <div className="text-xs text-gray-500 mt-1 font-mono">
+                container:{' '}
+                {task.container_name ?? task.container_id?.slice(0, 12)}
+              </div>
+            )}
           </div>
           <div className="text-right">
-            <StatusBadge status={task.status} />
+            <div className="flex items-center gap-2 justify-end">
+              <StatusBadge status={task.status} />
+              {task.health === 'orphaned' && <HealthBadge health={task.health} />}
+            </div>
             <div className="text-sm text-gray-400 mt-1">
               Attempt {task.attempt}/{task.max_attempts}
             </div>
@@ -356,6 +365,18 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
         </div>
       )}
     </div>
+  );
+}
+
+function HealthBadge({ health }: { health: 'healthy' | 'orphaned' | 'idle' }) {
+  if (health === 'healthy' || health === 'idle') return null;
+  return (
+    <span
+      className="px-2 py-1 rounded text-xs font-medium bg-orange-900 text-orange-200 border border-orange-700"
+      title="The task's container has disappeared. The orchestrator will attempt recovery on the next sweep."
+    >
+      orphaned
+    </span>
   );
 }
 

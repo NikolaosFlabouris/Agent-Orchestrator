@@ -19,6 +19,7 @@ import {
   detectChanges,
 } from './workspace.js';
 import type { Scheduler } from './scheduler.js';
+import { runOrphanSweep } from './orphan-recovery.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 interface AgentResult {
@@ -155,7 +156,22 @@ export async function onStartup(
     }
   }
 
-  // 5. Start scheduler
+  // 5. Sweep for orphans that survived step 3's reconciliation. In
+  // particular, tasks that were previously left with status='in-review'
+  // and container_id=NULL but whose running attempt row was never
+  // finalised — those are the stuck-reviewing case the orphan sweep is
+  // built for. Tasks reconciled in step 3 are already consistent, so
+  // the sweep is a no-op for them.
+  try {
+    await runOrphanSweep(forgejo, log);
+  } catch (err) {
+    log.error(
+      { event: 'recovery_orphan_sweep_error', err },
+      'Startup orphan sweep failed'
+    );
+  }
+
+  // 6. Start scheduler
   log.info({ event: 'recovery_complete' }, 'Startup recovery complete');
 }
 
