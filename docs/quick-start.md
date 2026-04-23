@@ -21,13 +21,13 @@ On your Forgejo instance:
 5. Create the scoped labels the orchestrator uses: `status/queued`, `status/in-progress`, `status/in-review`, `status/changes-needed`, `status/failed`, `status/cancelled`, `human-merge`, `human-review`. See [01 - Forgejo Setup](./01-forgejo-setup.md) for the exact label configuration and branch protection.
 
 ## 2. Configure `.env`
-
+ 
 ```bash
 cp .env.example .env
 ```
-
+ 
 Fill in at minimum:
-
+ 
 - `FORGEJO_URL` — e.g. `http://192.168.1.10:3000` (must be reachable from inside agent containers, so prefer a LAN IP or hostname that resolves, not `localhost`)
 - `FORGEJO_ORCHESTRATOR_TOKEN`
 - `FORGEJO_AGENT_TOKEN`
@@ -36,6 +36,14 @@ Fill in at minimum:
 - `ORCHESTRATOR_URL` — e.g. `http://<host>:8081`
 - `ANTHROPIC_API_KEY` — only if you'll use Claude-based tools
 - `COOKIE_SECRET` — random 32+ byte hex string for production
+ 
+**One-shot install:** Alternatively, after creating your `.env` file, you can run the following command to build everything, seed tools, and start the system in one go:
+ 
+```bash
+./scripts/install.sh --seed-tools --up
+```
+ 
+For transparency, the detailed step-by-step sequence follows:
 
 ## 3. Build the agent container images
 
