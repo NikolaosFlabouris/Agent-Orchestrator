@@ -241,7 +241,6 @@ PATCH  /api/settings               → update configuration (partial update, sam
 GET    /api/repos                  → configured repositories (see response schema below)
 POST   /api/repos                  → add repository (see request schema below)
 PATCH  /api/repos/:id              → update repository config (partial update, same shape as POST)
-POST   /api/repos/:id/rebuild      → trigger dev image rebuild (no request body)
 GET    /api/repos/:id/issues       → open Forgejo issues available for queuing
 
 GET    /api/tools                  → configured agent tools (see response schema below)
@@ -274,8 +273,7 @@ POST   /webhooks/forgejo            → Forgejo webhook receiver (payload define
       "max_turns": null,
       "timeout_minutes": null,
       "container_memory_mb": null,
-      "container_cpu_cores": null,
-      "last_image_build": "2025-03-10T14:00:00Z"
+      "container_cpu_cores": null
     }
   ]
 }

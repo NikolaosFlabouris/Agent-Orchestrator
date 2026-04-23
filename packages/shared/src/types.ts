@@ -65,7 +65,7 @@ export interface Repo {
   max_turns: number | null;
   timeout_minutes: number | null;
   container_memory_mb: number | null;
-   container_cpu_cores: number | null;
+  container_cpu_cores: number | null;
  }
 
 export interface AgentTool {

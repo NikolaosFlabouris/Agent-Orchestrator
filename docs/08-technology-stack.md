@@ -321,7 +321,6 @@ CREATE TABLE repos (
   timeout_minutes INTEGER,       -- per-repo override; NULL = use global agent_timeout_minutes
   container_memory_mb INTEGER,   -- per-repo override; NULL = use global default_container_memory_mb
   container_cpu_cores INTEGER,   -- per-repo override; NULL = use global default_container_cpu_cores
-  last_image_build TEXT,
   UNIQUE(owner, name)     -- one config per repo
 );
 
