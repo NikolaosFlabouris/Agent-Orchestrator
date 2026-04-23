@@ -68,9 +68,8 @@ function createTables(db: Database.Database): void {
       max_turns INTEGER,
       timeout_minutes INTEGER,
       container_memory_mb INTEGER,
-      container_cpu_cores INTEGER,
-      last_image_build TEXT,
-      UNIQUE(owner, name)
+       container_cpu_cores INTEGER,
+       UNIQUE(owner, name)
     );
 
     CREATE TABLE IF NOT EXISTS tasks (
