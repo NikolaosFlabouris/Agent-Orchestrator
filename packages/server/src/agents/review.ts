@@ -36,7 +36,8 @@ export async function attemptMerge(
     const pr = await forgejo.getPullRequest(repo, freshTask.pr_number!);
     if (pr.mergeable === false) {
       const newAttempt = freshTask.attempt + 1;
-      if (newAttempt > freshTask.max_attempts) {
+      const maxAttempts = freshTask.max_attempts ?? 3;
+      if (newAttempt > maxAttempts) {
         updateTaskWithSync(task.id, {
           status: 'failed',
           attempt: newAttempt,
@@ -46,7 +47,7 @@ export async function attemptMerge(
           await forgejo.commentOnIssue(
             repo,
             task.issue_id,
-            `PR not mergeable after ${freshTask.max_attempts} attempts.`
+            `PR not mergeable after ${maxAttempts} attempts.`
           );
         } catch { /* best effort */ }
         log.error(
@@ -153,8 +154,9 @@ export async function attemptMerge(
     if (isConflict) {
       // Merge conflict — rework
       const newAttempt = freshTask.attempt + 1;
+      const maxAttempts = freshTask.max_attempts ?? 3;
 
-      if (newAttempt > freshTask.max_attempts) {
+      if (newAttempt > maxAttempts) {
         updateTaskWithSync(task.id, {
           status: 'failed',
           attempt: newAttempt,
@@ -164,7 +166,7 @@ export async function attemptMerge(
           await forgejo.commentOnIssue(
             repo,
             task.issue_id,
-            `Merge conflict after ${freshTask.max_attempts} attempts.`
+            `Merge conflict after ${maxAttempts} attempts.`
           );
         } catch { /* best effort */ }
         log.error(
@@ -290,6 +292,7 @@ export async function processReviewVerdict(
     }
   } else if (review.verdict === 'changes_needed') {
     const newAttempt = freshTask.attempt + 1;
+    const maxAttempts = freshTask.max_attempts ?? 3;
     const feedbackStr =
       typeof review.feedback === 'string'
         ? review.feedback
@@ -311,7 +314,7 @@ export async function processReviewVerdict(
       );
     } catch { /* best effort */ }
 
-    if (newAttempt > freshTask.max_attempts) {
+    if (newAttempt > maxAttempts) {
       updateTaskWithSync(task.id, {
         status: 'failed',
         attempt: newAttempt,
@@ -321,7 +324,7 @@ export async function processReviewVerdict(
         await forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Failed after ${freshTask.max_attempts} attempts.`
+          `Failed after ${maxAttempts} attempts.`
         );
       } catch { /* best effort */ }
       log.error(

@@ -19,13 +19,14 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   // 1. Task failed after max attempts
   const failedTasks = getTasks({ status: 'failed' });
   for (const task of failedTasks) {
-    if (task.attempt >= task.max_attempts && task.completed_at) {
+    const maxAttempts = task.max_attempts ?? 3;
+    if (task.attempt >= maxAttempts && task.completed_at) {
       // Only alert for recently failed tasks (last hour)
       const completedAt = new Date(task.completed_at).getTime();
       if (Date.now() - completedAt < 60 * 60 * 1000) {
         alerts.push({
           level: 'error',
-          message: `Task #${task.issue_id} failed after ${task.max_attempts} attempts`,
+          message: `Task #${task.issue_id} failed after ${maxAttempts} attempts`,
         });
       }
     }

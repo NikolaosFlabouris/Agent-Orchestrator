@@ -199,21 +199,62 @@ export class Poller {
    * - Issue closed externally → cancel
    * - PR merged manually → mark as merged
    * - Label changed externally → sync state
+   *
+   * Scope: runs on every task that is not already in a FINAL status (i.e.
+   * not `merged` or `cancelled`). In particular, `failed`, `reset`, and the
+   * `awaiting-human-*` states ARE re-checked so that a PR merged manually on
+   * Forgejo after the orchestrator gave up will still heal the task to
+   * `merged` rather than leaving it stuck. Issue-closed and external-cancel
+   * are still scoped to non-terminal tasks so a prior `failed` outcome isn't
+   * silently overwritten when the issue is later closed as "won't fix".
    */
   private async detectExternalStateChanges(
     repo: import('@orchestrator/shared').Repo
   ): Promise<void> {
-    // Check active tasks for this repo
-    const activeTasks = getTasks({ repo_id: repo.id }).filter(
-      (t) => !TERMINAL_STATUSES.has(t.status)
+    // Only skip tasks that are already fully finalised — a merged task can't
+    // be unmerged, a cancelled task has already been cleaned up. Everything
+    // else (including `failed`) is eligible for reconciliation in case the
+    // user took action on Forgejo after the orchestrator stopped tracking.
+    const candidateTasks = getTasks({ repo_id: repo.id }).filter(
+      (t) => t.status !== 'merged' && t.status !== 'cancelled'
     );
 
-    for (const task of activeTasks) {
+    for (const task of candidateTasks) {
       try {
         // Check issue state
         const issue = await this.forgejo.getIssue(repo, task.issue_id);
 
-        // Issue closed externally
+        // PR merged externally → mark merged. Runs first so it wins over an
+        // issue-closed signal: merging a PR usually auto-closes its issue, and
+        // "merged" is the more informative outcome of the two.
+        if (task.pr_number) {
+          try {
+            const pr = await this.forgejo.getPullRequest(repo, task.pr_number);
+            if (pr.merged) {
+              const previousStatus = task.status;
+              updateTask(task.id, {
+                status: 'merged',
+                completed_at: new Date().toISOString(),
+              });
+              this.log.info(
+                {
+                  event: 'poll_pr_merged',
+                  task_id: task.id,
+                  pr_number: task.pr_number,
+                  previous_status: previousStatus,
+                },
+                `Task marked merged — PR merged externally (was ${previousStatus})`
+              );
+              continue;
+            }
+          } catch {
+            // PR may not exist
+          }
+        }
+
+        // Issue closed externally → cancel. Skip tasks already in a terminal
+        // state so a prior `failed` outcome isn't overwritten by a later
+        // "won't fix" issue closure.
         if (issue.state === 'closed' && !TERMINAL_STATUSES.has(task.status)) {
           updateTask(task.id, {
             status: 'cancelled',
@@ -224,25 +265,6 @@ export class Poller {
             'Task cancelled — issue closed externally (detected by poll)'
           );
           continue;
-        }
-
-        // Check if PR was merged externally
-        if (task.pr_number && !TERMINAL_STATUSES.has(task.status)) {
-          try {
-            const pr = await this.forgejo.getPullRequest(repo, task.pr_number);
-            if (pr.merged) {
-              updateTask(task.id, {
-                status: 'merged',
-                completed_at: new Date().toISOString(),
-              });
-              this.log.info(
-                { event: 'poll_pr_merged', task_id: task.id, pr_number: task.pr_number },
-                'Task marked as merged — PR merged externally (detected by poll)'
-              );
-            }
-          } catch {
-            // PR may not exist
-          }
         }
 
         // Check for external label changes (e.g., someone manually added status/cancelled)

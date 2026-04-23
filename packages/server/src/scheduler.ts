@@ -197,7 +197,12 @@ export class Scheduler {
   // ---- Main tick ----
 
   async tick(): Promise<void> {
-    if (this.paused) return;
+    // `paused` only gates NEW task launches (fillSlots). Reconciliation,
+    // completed-container processing, and the external poller (separate
+    // class) continue so the DB stays in sync with Forgejo/Docker state.
+    // A paused orchestrator should still notice that an issue was closed
+    // on Forgejo or that an agent container finished — it just won't
+    // start the next thing.
 
     // Step 0: Reconcile orphaned tasks (container disappeared or
     // container_id got nulled without finalising the attempt row).
@@ -325,6 +330,8 @@ export class Scheduler {
   // ---- Step 2: Fill slots ----
 
   private async fillSlots(): Promise<void> {
+    if (this.paused) return;
+
     let available = getAvailableSlots();
     if (available <= 0) return;
 

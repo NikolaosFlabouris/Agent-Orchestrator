@@ -80,7 +80,8 @@ export async function checkHumanMergeConflict(
     return false;
   }
 
-  const action = decideConflictAction(mergeable, fresh.attempt, fresh.max_attempts);
+  const maxAttempts = fresh.max_attempts ?? 3;
+  const action = decideConflictAction(mergeable, fresh.attempt, maxAttempts);
   if (action === 'none') return false;
 
   const newAttempt = fresh.attempt + 1;
@@ -100,7 +101,7 @@ export async function checkHumanMergeConflict(
       await forgejo.commentOnIssue(
         repo,
         task.issue_id,
-        `PR #${task.pr_number} is no longer mergeable after a sibling task's merge, and this task has already used its ${fresh.max_attempts} attempts. Rebase manually or Reset the task to try again.`
+        `PR #${task.pr_number} is no longer mergeable after a sibling task's merge, and this task has already used its ${maxAttempts} attempts. Rebase manually or Reset the task to try again.`
       );
     } catch {
       /* best effort */

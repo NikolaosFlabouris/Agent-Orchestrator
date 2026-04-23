@@ -170,10 +170,11 @@ export async function recoverReviewOrphan(
   }
 
   const nextAttempt = task.attempt + 1;
-  if (nextAttempt > task.max_attempts) {
+  const maxAttempts = task.max_attempts ?? 3;
+  if (nextAttempt > maxAttempts) {
     await markExhausted(
       task,
-      `Exhausted ${task.max_attempts} attempts during orphan recovery`,
+      `Exhausted ${maxAttempts} attempts during orphan recovery`,
       forgejo,
       log
     );
@@ -190,7 +191,7 @@ export async function recoverReviewOrphan(
   recordTaskEvent(
     task.id,
     'orphan_recovery_triggered',
-    `Review orphan recovered — relaunching review (attempt ${nextAttempt}/${task.max_attempts})`
+    `Review orphan recovered — relaunching review (attempt ${nextAttempt}/${maxAttempts})`
   );
   log.info(
     {
@@ -236,10 +237,11 @@ export async function recoverDevOrphan(
   }
 
   const nextAttempt = task.attempt + 1;
-  if (nextAttempt > task.max_attempts) {
+  const maxAttempts = task.max_attempts ?? 3;
+  if (nextAttempt > maxAttempts) {
     await markExhausted(
       task,
-      `Exhausted ${task.max_attempts} attempts during orphan recovery`,
+      `Exhausted ${maxAttempts} attempts during orphan recovery`,
       forgejo,
       log
     );
@@ -251,7 +253,7 @@ export async function recoverDevOrphan(
   // into the FIFO queue instead of the terminal `reset` state so the
   // scheduler picks it up on the next tick without human intervention.
   await resetTask(task, forgejo, scheduler, log, {
-    reason: `Dev orphan recovery (attempt ${nextAttempt}/${task.max_attempts})`,
+    reason: `Dev orphan recovery (attempt ${nextAttempt}/${maxAttempts})`,
     incrementAttempt: true,
     requeue: true,
   });
@@ -259,7 +261,7 @@ export async function recoverDevOrphan(
   recordTaskEvent(
     task.id,
     'orphan_recovery_triggered',
-    `Dev orphan recovered — requeued (attempt ${nextAttempt}/${task.max_attempts})`
+    `Dev orphan recovered — requeued (attempt ${nextAttempt}/${maxAttempts})`
   );
   log.info(
     {

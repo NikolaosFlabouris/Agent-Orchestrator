@@ -323,8 +323,9 @@ export async function handleDevFailure(
   const freshTask = getTask(task.id)!;
   const repo = getRepo(task.repo_id);
   const newAttempt = freshTask.attempt + 1;
+  const maxAttempts = freshTask.max_attempts ?? 3;
 
-  if (newAttempt > freshTask.max_attempts) {
+  if (newAttempt > maxAttempts) {
     // Max attempts exhausted
     updateTaskWithSync(task.id, {
       status: 'failed',
@@ -336,7 +337,7 @@ export async function handleDevFailure(
         await forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Task failed after ${freshTask.max_attempts} attempts. Last error: ${errorDetail}. Use the Reset action to retry from scratch.`
+          `Task failed after ${maxAttempts} attempts. Last error: ${errorDetail}. Use the Reset action to retry from scratch.`
         );
       }
     } catch { /* best effort */ }
@@ -344,7 +345,7 @@ export async function handleDevFailure(
       {
         event: 'attempts_exhausted',
         task_id: task.id,
-        attempts: freshTask.max_attempts,
+        attempts: maxAttempts,
       },
       'Max attempts exhausted'
     );
@@ -356,7 +357,7 @@ export async function handleDevFailure(
         await forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Dev agent failed (attempt ${newAttempt}/${freshTask.max_attempts}): ${errorDetail}. Retrying.`
+          `Dev agent failed (attempt ${newAttempt}/${maxAttempts}): ${errorDetail}. Retrying.`
         );
       }
     } catch { /* best effort */ }
