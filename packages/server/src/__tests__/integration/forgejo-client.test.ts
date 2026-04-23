@@ -46,7 +46,6 @@ describe.skipIf(SKIP)("ForgejoClient integration", () => {
       timeout_minutes: null,
       container_memory_mb: null,
       container_cpu_cores: null,
-      last_image_build: null,
     };
   });
 

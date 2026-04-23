@@ -69,7 +69,6 @@ function createTables(db: Database.Database): void {
       timeout_minutes INTEGER,
       container_memory_mb INTEGER,
       container_cpu_cores INTEGER,
-      last_image_build TEXT,
       UNIQUE(owner, name)
     );
 
