@@ -12,6 +12,7 @@ const ACTIVE_STATUSES = new Set([
 const RESETTABLE_STATUSES = new Set([
   'failed', 'cancelled', 'awaiting-human-merge', 'awaiting-human-review', 'needs-human-review',
 ]);
+const REQUEUEABLE_STATUSES = new Set(['reset', 'cancelled']);
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
@@ -37,6 +38,8 @@ export function TaskDetail() {
       if (!confirm('This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?')) return;
     } else if (action.action === 'force_fail') {
       if (!confirm('Force-fail this task?')) return;
+    } else if (action.action === 'requeue') {
+      if (!confirm('Requeue this task? It will be placed at the end of the queue.')) return;
     }
 
     setActionPending(true);
@@ -174,16 +177,26 @@ export function TaskDetail() {
               Force Fail
             </button>
           )}
-          {RESETTABLE_STATUSES.has(task.status) && (
-            <button
-              onClick={() => handleAction({ action: 'reset' })}
-              disabled={actionPending}
-              className="text-sm px-3 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
-            >
-              Reset
-            </button>
-          )}
-        </div>
+           {RESETTABLE_STATUSES.has(task.status) && (
+             <button
+               onClick={() => handleAction({ action: 'reset' })}
+               disabled={actionPending}
+               className="text-sm px-3 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+             >
+               Reset
+             </button>
+           )}
+           {REQUEUEABLE_STATUSES.has(task.status) && (
+             <button
+               onClick={() => handleAction({ action: 'requeue' })}
+               disabled={actionPending}
+               className="text-sm px-3 py-1.5 rounded border border-blue-800 text-blue-400 hover:bg-blue-950 disabled:opacity-50"
+             >
+               Requeue
+             </button>
+           )}
+         </div>
+
       </div>
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">

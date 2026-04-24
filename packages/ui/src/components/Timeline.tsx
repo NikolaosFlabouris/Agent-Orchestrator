@@ -12,6 +12,7 @@ const EVENT_ICONS: Record<string, string> = {
   review_verdict: 'check',
   task_cancelled: 'x',
   task_reset: 'refresh',
+  task_requeued: 'play',
   recovery: 'alert',
 };
 
@@ -22,6 +23,7 @@ const EVENT_COLORS: Record<string, string> = {
   pr_merged: 'bg-green-500',
   task_cancelled: 'bg-red-500',
   task_reset: 'bg-yellow-500',
+  task_requeued: 'bg-blue-500',
   recovery: 'bg-orange-500',
   container_started: 'bg-blue-500',
   container_exited: 'bg-blue-400',

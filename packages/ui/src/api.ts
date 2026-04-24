@@ -190,7 +190,8 @@ export type TaskAction =
   | { action: 'cancel'; reason?: string }
   | { action: 'force_approve' }
   | { action: 'force_fail'; reason?: string }
-  | { action: 'reset' };
+  | { action: 'reset' }
+  | { action: 'requeue' };
 
 export interface RepoResponse {
   id: number;
