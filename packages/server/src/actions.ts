@@ -224,6 +224,59 @@ export async function resetTask(
     'Task reset'
   );
 
-  // 7. Trigger fill to use freed slot
+// 7. Trigger fill to use freed slot
+  scheduler.triggerTick();
+}
+
+/**
+ * Requeue a task — set status to queued, assign next queue position,
+ * clear timing, post comment and record event.
+ */
+export async function requeueTask(
+  task: Task,
+  forgejo: ForgejoClient,
+  scheduler: Scheduler,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  const repo = getRepo(task.repo_id);
+
+  // 1. Record event
+  recordTaskEvent(task.id, 'task_requeued', 'Task requeued by user');
+
+  // 2. Update Forgejo issue
+  if (repo) {
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        'Task has been requeued and is waiting for a slot.'
+      );
+    } catch {
+      // Best effort
+    }
+  }
+
+  // 3. Calculate next queue position
+  const queuePosition =
+    ((
+      getDb()
+        .prepare('SELECT MAX(queue_position) as max_pos FROM tasks')
+        .get() as { max_pos: number | null }
+    ).max_pos ?? 0) + 1;
+
+  // 4. Update DB with sync (handles label sync)
+  updateTaskWithSync(task.id, {
+    status: 'queued',
+    queue_position: queuePosition,
+    started_at: null,
+    completed_at: null,
+  });
+
+  log.info(
+    { event: 'task_requeued', task_id: task.id },
+    'Task requeued'
+  );
+
+  // 5. Trigger scheduler
   scheduler.triggerTick();
 }

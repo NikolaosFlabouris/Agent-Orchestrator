@@ -13,7 +13,7 @@ import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
-import { cancelTask, resetTask } from '../actions.js';
+import { cancelTask, resetTask, requeueTask } from '../actions.js';
 import { updateTaskWithSync, notifyTaskCreated } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
@@ -40,6 +40,11 @@ const RESETTABLE_STATUSES = new Set([
   'awaiting-human-merge',
   'awaiting-human-review',
   'needs-human-review',
+]);
+
+const REQUEUEABLE_STATUSES = new Set([
+  'reset',
+  'cancelled',
 ]);
 
 export function createTaskRoutes(
@@ -284,9 +289,20 @@ export function createTaskRoutes(
             updateTaskWithSync(task.id, { queue_position: targetPos });
             break;
           }
-
+ 
+          case 'requeue': {
+            if (!REQUEUEABLE_STATUSES.has(task.status)) {
+              return reply.status(400).send({
+                error: `Cannot requeue task in state '${task.status}'. Valid states: ${[...REQUEUEABLE_STATUSES].join(', ')}`,
+              });
+            }
+            await requeueTask(task, forgejo, scheduler, log);
+            break;
+          }
+ 
           case 'cancel': {
             if (TERMINAL_STATUSES.has(task.status)) {
+
               return reply
                 .status(400)
                 .send({ error: 'Cannot cancel a task in terminal state' });
