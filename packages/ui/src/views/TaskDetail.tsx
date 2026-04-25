@@ -82,7 +82,7 @@ export function TaskDetail() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-900 px-6 py-4">
+      <header className="sticky top-0 z-10 border-b border-gray-800 bg-gray-900 px-6 py-4">
         <div className="flex items-center justify-between">
           <div>
             <div className="flex items-center gap-4">
