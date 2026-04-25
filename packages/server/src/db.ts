@@ -75,6 +75,7 @@ function createTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS tasks (
       id INTEGER PRIMARY KEY,
       issue_id INTEGER NOT NULL,
+      issue_title TEXT,
       repo_id INTEGER NOT NULL REFERENCES repos(id),
       branch_name TEXT,
       pr_number INTEGER,
@@ -320,6 +321,7 @@ export function getActiveTaskCount(): number {
 
 export function insertTask(task: {
   issue_id: number;
+  issue_title?: string | null;
   repo_id: number;
   status: TaskStatus;
   queue_position?: number;
@@ -337,11 +339,12 @@ export function insertTask(task: {
 
   const result = getDb()
     .prepare(
-      `INSERT INTO tasks (issue_id, repo_id, status, queue_position, max_attempts, agent_tool, model)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (issue_id, issue_title, repo_id, status, queue_position, max_attempts, agent_tool, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.issue_id,
+      task.issue_title ?? null,
       task.repo_id,
       task.status,
       queuePos,

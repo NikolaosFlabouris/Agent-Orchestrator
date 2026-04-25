@@ -7,6 +7,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 1,
     issue_id: 6,
+    issue_title: 'Test issue title',
     repo_id: 1,
     branch_name: null,
     pr_number: null,

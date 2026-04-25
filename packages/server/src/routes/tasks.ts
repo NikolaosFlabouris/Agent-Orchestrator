@@ -196,6 +196,7 @@ export function createTaskRoutes(
       // Insert task in DB
       const task = insertTask({
         issue_id: issue.number,
+        issue_title: issue.title,
         repo_id: repoId,
         status: 'queued',
         max_attempts: (body.max_attempts as number) ?? undefined,
@@ -223,6 +224,15 @@ export function createTaskRoutes(
 
       const issueId = body.issue_id as number;
 
+      // Fetch the issue title from Forgejo
+      let issueTitle: string | null = null;
+      try {
+        const issue = await forgejo.getIssue(repo, issueId);
+        issueTitle = issue.title;
+      } catch {
+        // Best effort — will fall back to "Issue #N" in enrichTask
+      }
+
       // Apply labels
       try {
         const labelNames = ['status/queued'];
@@ -235,6 +245,7 @@ export function createTaskRoutes(
 
       const task = insertTask({
         issue_id: issueId,
+        issue_title: issueTitle,
         repo_id: repoId,
         status: 'queued',
         max_attempts: (body.max_attempts as number) ?? undefined,
@@ -415,7 +426,7 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
 
   return {
     ...task,
-    issue_title: `Issue #${task.issue_id}`,
+    issue_title: task.issue_title ?? `Issue #${task.issue_id}`,
     repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name } : null,
     total_cost_usd: Math.round(totalCost * 100) / 100,
     blocked_by: [] as number[],
