@@ -3,6 +3,7 @@
 export interface Task {
   id: number;
   issue_id: number;
+  issue_title: string | null;
   repo_id: number;
   branch_name: string | null;
   pr_number: number | null;

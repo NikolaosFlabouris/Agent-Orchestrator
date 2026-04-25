@@ -5,6 +5,7 @@ import type { Task, Repo } from '@orchestrator/shared';
 const mockTask: Task = {
   id: 1,
   issue_id: 42,
+  issue_title: 'Add login validation',
   repo_id: 1,
   branch_name: 'agent/issue-42-add-login',
   pr_number: null,
