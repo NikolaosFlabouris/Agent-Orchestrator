@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "test": "vitest run"
   },
   "dependencies": {
     "@orchestrator/shared": "*",
@@ -23,6 +24,7 @@
     "tailwindcss": "^4.0.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0"
+    "@types/react-dom": "^19.0.0",
+    "vitest": "^3.0.0"
   }
 }
