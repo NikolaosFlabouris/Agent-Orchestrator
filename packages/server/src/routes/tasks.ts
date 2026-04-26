@@ -8,13 +8,14 @@ import {
   getTaskEvents,
   insertTask,
   updateTask,
+  getAgentTool,
 } from '../db.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { cancelTask, resetTask, requeueTask } from '../actions.js';
-import { updateTaskWithSync, notifyTaskCreated } from '../state-sync.js';
+import { updateTaskWithSync, notifyTaskCreated, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
 import { getSnapshot } from '../forgejo-snapshot.js';
@@ -267,6 +268,51 @@ export function createTaskRoutes(
         if (!task) return reply.status(404).send({ error: 'Task not found' });
 
         const body = request.body as Record<string, unknown>;
+
+        // Direct field update: agent_tool (no action required).
+        // null clears the override and reverts to the repo default.
+        if ('agent_tool' in body) {
+          const rawTool = body.agent_tool;
+          if (rawTool !== null && typeof rawTool !== 'string') {
+            return reply.status(400).send({ error: 'agent_tool must be a string or null' });
+          }
+          const newTool = rawTool as string | null;
+
+          const validation = validateAgentTool(newTool, getAgentTool);
+          if (!validation.valid) {
+            return reply.status(400).send({ error: validation.error });
+          }
+
+          const oldTool = task.agent_tool;
+          updateTaskWithSync(task.id, { agent_tool: newTool });
+
+          const fromLabel = oldTool ?? '(repo default)';
+          const toLabel = newTool ?? '(repo default)';
+          recordTaskEvent(
+            task.id,
+            'agent_tool_changed',
+            `Agent tool changed from ${fromLabel} to ${toLabel}`
+          );
+
+          if (ACTIVE_STATUSES.has(task.status)) {
+            const repo = getRepo(task.repo_id);
+            if (repo) {
+              try {
+                await forgejo.commentOnIssue(
+                  repo,
+                  task.issue_id,
+                  `Agent tool changed to \`${newTool ?? 'repo default'}\` — takes effect on next attempt.`
+                );
+              } catch {
+                // Best effort
+              }
+            }
+          }
+
+          const updated = getTask(id)!;
+          return enrichTask(updated);
+        }
+
         const action = body?.action as string;
 
         switch (action) {
@@ -414,6 +460,38 @@ interface EnrichContext {
   containerName?: string | null;
 }
 
+/**
+ * Validate an agent_tool value for the PATCH handler.
+ * null is always valid (clears the override). A string must exist in the
+ * agent_tools table. Exported so the unit tests exercise the same logic as
+ * the route handler.
+ */
+export function validateAgentTool(
+  toolId: string | null,
+  getAgentToolFn: (id: string) => { id: string } | undefined
+): { valid: true } | { valid: false; error: string } {
+  if (toolId === null) return { valid: true };
+  const tool = getAgentToolFn(toolId);
+  if (!tool) return { valid: false, error: `Unknown agent_tool: ${toolId}` };
+  return { valid: true };
+}
+
+/**
+ * Resolve the effective agent tool id and its source.
+ * task.agent_tool (per-task override) takes precedence over repo.agent_tool
+ * (repository default). Exported for unit tests — the authoritative
+ * launch-time resolution lives in scheduler.resolveTool().
+ */
+export function resolveEffectiveAgentTool(
+  taskAgentTool: string | null,
+  repoAgentTool: string | null
+): { effective_agent_tool_id: string | null; agent_tool_source: 'task' | 'repo' } {
+  if (taskAgentTool !== null) {
+    return { effective_agent_tool_id: taskAgentTool, agent_tool_source: 'task' };
+  }
+  return { effective_agent_tool_id: repoAgentTool, agent_tool_source: 'repo' };
+}
+
 function enrichTask(task: Task, ctx: EnrichContext = {}) {
   const repo = getRepo(task.repo_id);
   const attempts = getAttempts(task.id);
@@ -424,6 +502,18 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
     : deriveHealthWithoutDocker(task, runningAttempt);
 
+  // Preferred enrichment: surface effective tool and its source so the UI can
+  // display and distinguish task-level overrides from repo defaults without a
+  // second round-trip. task.agent_tool wins; falls back to repo.agent_tool.
+  // repo_agent_tool is always included separately so the UI can show the repo
+  // default name in the "Use repo default" select option even when an override
+  // is active (agent_tool_source === 'task').
+  const repoAgentTool = repo?.agent_tool ?? null;
+  const { effective_agent_tool_id, agent_tool_source } = resolveEffectiveAgentTool(
+    task.agent_tool,
+    repoAgentTool
+  );
+
   return {
     ...task,
     issue_title: task.issue_title ?? `Issue #${task.issue_id}`,
@@ -433,6 +523,9 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     runtime_status: task.status as TaskStatus,
     health,
     container_name: ctx.containerName ?? null,
+    effective_agent_tool_id,
+    agent_tool_source,
+    repo_agent_tool: repoAgentTool,
   };
 }
 

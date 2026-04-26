@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
-import type { StatusResponse } from '../api.js';
+import type { StatusResponse, TaskResponse } from '../api.js';
 import { connectDashboardWs } from '../ws.js';
 import type { DashboardWsEvent } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
@@ -69,6 +69,12 @@ export function Dashboard() {
     };
 
     const disconnect = connectDashboardWs(handler);
+
+    // Fetch tools once for display in task rows (cached in store)
+    if (store.tools.length === 0) {
+      api.getTools().then((res) => store.setTools(res.tools)).catch(() => {});
+    }
+
     return () => {
       disconnect();
       window.clearInterval(timer);
@@ -229,7 +235,28 @@ export function Dashboard() {
   );
 }
 
-function ActiveTaskCard({ task }: { task: import('../api.js').TaskResponse }) {
+function ToolChip({ task }: { task: TaskResponse }) {
+  const tools = useStore((s) => s.tools);
+  const toolId = task.effective_agent_tool_id;
+  if (!toolId) return null;
+
+  const found = tools.find((t) => t.id === toolId);
+  const name = found?.display_name ?? toolId;
+  const truncated = name.length > 25 ? name.slice(0, 24) + '…' : name;
+  const isOverride = task.agent_tool_source === 'task';
+
+  return (
+    <span
+      className={`text-xs font-mono truncate ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
+      title={`${name}${isOverride ? ' (task override)' : ' (repo default)'}`}
+    >
+      {isOverride && <span className="mr-0.5">•</span>}
+      {truncated}
+    </span>
+  );
+}
+
+function ActiveTaskCard({ task }: { task: TaskResponse }) {
   const phaseLabel: Record<string, string> = {
     preparing: 'Preparing',
     'in-progress': 'Implementing',
@@ -264,6 +291,7 @@ function ActiveTaskCard({ task }: { task: import('../api.js').TaskResponse }) {
           </div>
         </div>
         <div className="flex items-center gap-4 text-sm">
+          <ToolChip task={task} />
           <StatusBadge status={task.status} label={phaseLabel[task.status]} />
           <span className="text-gray-400">
             Attempt {task.attempt}/{task.max_attempts}
@@ -279,7 +307,7 @@ function ActiveTaskCard({ task }: { task: import('../api.js').TaskResponse }) {
   );
 }
 
-function CompletedItem({ task }: { task: import('../api.js').TaskResponse }) {
+function CompletedItem({ task }: { task: TaskResponse }) {
   return (
     <Link
       to={`/tasks/${task.id}`}
@@ -292,6 +320,7 @@ function CompletedItem({ task }: { task: import('../api.js').TaskResponse }) {
         <span>{task.issue_title}</span>
       </div>
       <div className="flex items-center gap-3 text-sm">
+        <ToolChip task={task} />
         <StatusBadge status={task.status} />
         <span className="text-gray-500">
           {task.attempt} attempt{task.attempt !== 1 ? 's' : ''}
