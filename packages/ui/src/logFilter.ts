@@ -43,6 +43,99 @@ function compactToolInput(name: string, input: Record<string, unknown>): string 
 
 type JsonObj = Record<string, unknown>;
 
+function classifyPiLine(obj: JsonObj, raw: string): { show: boolean; content: string } {
+  const type = obj.type as string | undefined;
+
+  // Session header — first line pi emits
+  if (type === 'session') {
+    const cwd = String(obj.cwd ?? '');
+    return { show: true, content: `[pi:session] cwd=${cwd}` };
+  }
+
+  if (type === 'agent_start') {
+    return { show: true, content: '[pi] agent_start' };
+  }
+
+  if (type === 'agent_end') {
+    const msgs = Array.isArray(obj.messages) ? obj.messages.length : '?';
+    return { show: true, content: `[pi] agent_end messages=${msgs}` };
+  }
+
+  if (type === 'turn_start') {
+    return { show: true, content: '[pi] turn_start' };
+  }
+
+  if (type === 'turn_end') {
+    return { show: true, content: '[pi] turn_end' };
+  }
+
+  // message_start / message_update are streaming noise — hide them
+  if (type === 'message_start' || type === 'message_update') {
+    return { show: false, content: raw };
+  }
+
+  if (type === 'message_end') {
+    const msg = obj.message as JsonObj | undefined;
+    const role = String(msg?.role ?? 'unknown');
+    return { show: true, content: `[pi] message_end role=${role}` };
+  }
+
+  if (type === 'tool_execution_start') {
+    const toolName = String(obj.toolName ?? 'unknown');
+    const args = (obj.args as JsonObj | undefined) ?? {};
+    return { show: true, content: `[pi] tool_start: ${compactToolInput(toolName, args)}` };
+  }
+
+  // tool_execution_update is streaming — hide
+  if (type === 'tool_execution_update') {
+    return { show: false, content: raw };
+  }
+
+  if (type === 'tool_execution_end') {
+    const toolName = String(obj.toolName ?? 'unknown');
+    const bytes = JSON.stringify(obj.result ?? '').length;
+    const errFlag = obj.isError ? ' [error]' : '';
+    return { show: true, content: `[pi] tool_end: ${toolName}(bytes=${bytes})${errFlag}` };
+  }
+
+  if (type === 'compaction_start') {
+    const reason = String(obj.reason ?? '');
+    return { show: true, content: `[pi] compaction_start reason=${reason}` };
+  }
+
+  if (type === 'compaction_end') {
+    const reason = String(obj.reason ?? '');
+    const aborted = obj.aborted ? ' aborted' : '';
+    return { show: true, content: `[pi] compaction_end reason=${reason}${aborted}` };
+  }
+
+  if (type === 'queue_update') {
+    return { show: true, content: '[pi] queue_update' };
+  }
+
+  if (type === 'auto_retry_start') {
+    const attempt = obj.attempt ?? '?';
+    const max = obj.maxAttempts ?? '?';
+    return { show: true, content: `[pi] auto_retry attempt=${attempt}/${max}` };
+  }
+
+  if (type === 'auto_retry_end') {
+    const success = String(obj.success ?? '?');
+    return { show: true, content: `[pi] auto_retry_end success=${success}` };
+  }
+
+  // Unknown pi type — fall through to show raw
+  return { show: true, content: raw };
+}
+
+const PI_TYPES = new Set([
+  'session', 'agent_start', 'agent_end', 'turn_start', 'turn_end',
+  'message_start', 'message_update', 'message_end',
+  'tool_execution_start', 'tool_execution_update', 'tool_execution_end',
+  'compaction_start', 'compaction_end', 'queue_update',
+  'auto_retry_start', 'auto_retry_end',
+]);
+
 function classifyJsonLine(obj: JsonObj, raw: string): { show: boolean; content: string } {
   const type = obj.type as string | undefined;
 
@@ -102,16 +195,25 @@ function classifyJsonLine(obj: JsonObj, raw: string): { show: boolean; content: 
     return { show: true, content: `[result] turns=${turns} cost=$${cost} input=${input} output=${output}` };
   }
 
+  // Pi event types
+  if (type !== undefined && PI_TYPES.has(type)) {
+    return classifyPiLine(obj, raw);
+  }
+
   // Unrecognised type — show raw (unknown signal is still signal)
   return { show: true, content: raw };
 }
 
-// Module-level cache: same line content always produces the same result
+// Bounded module-level cache. Each unique line content always produces the same
+// classification result. We cap at MAX_CACHE entries to avoid unbounded growth
+// from long-running tasks with many structurally unique lines (e.g. OpenCode
+// lines with per-line timestamps).
+const MAX_CACHE = 1000;
 const cache = new Map<string, { show: boolean; content: string }>();
 
 function doClassify(line: string): { show: boolean; content: string } {
   // Rule 1: always show error signal
-  if (line.includes('ERROR') || line.includes('"type":"error"')) {
+  if (line.includes('ERROR') || /"type"\s*:\s*"error"/.test(line)) {
     return { show: true, content: line };
   }
 
@@ -141,6 +243,10 @@ export function classifyLogLine(line: string): { show: boolean; content: string 
   const cached = cache.get(line);
   if (cached) return cached;
   const result = doClassify(line);
+  if (cache.size >= MAX_CACHE) {
+    // Evict oldest entry (Map preserves insertion order)
+    cache.delete(cache.keys().next().value as string);
+  }
   cache.set(line, result);
   return result;
 }

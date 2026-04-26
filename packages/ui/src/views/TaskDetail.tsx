@@ -306,7 +306,7 @@ function AgentOutput({
   }, [lines, verbose]);
 
   const displayLines = useMemo(
-    () => lines.map((line) => ({ ...filterLogLine(line, verbose), raw: line })),
+    () => lines.map((line) => filterLogLine(line, verbose)),
     [lines, verbose],
   );
 
@@ -345,9 +345,9 @@ function AgentOutput({
             {isRunning ? 'Waiting for output...' : 'No output available'}
           </span>
         ) : (
-          displayLines
-            .filter((l) => l.show)
-            .map((l, i) => <div key={i}>{l.content}</div>)
+          displayLines.map((l, origIdx) =>
+            l.show ? <div key={origIdx}>{l.content}</div> : null
+          )
         )}
         <div ref={bottomRef} />
       </div>

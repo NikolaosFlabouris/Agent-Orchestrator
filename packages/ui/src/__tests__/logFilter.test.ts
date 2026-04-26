@@ -239,6 +239,109 @@ describe('Unrecognised JSON type', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pi --mode json compaction
+// ---------------------------------------------------------------------------
+describe('Pi --mode json compaction', () => {
+  it('compacts pi session header', () => {
+    const line = JSON.stringify({ type: 'session', version: 3, id: 'uuid', cwd: '/repo' });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi:session] cwd=/repo');
+  });
+
+  it('compacts agent_start', () => {
+    const line = JSON.stringify({ type: 'agent_start' });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] agent_start');
+  });
+
+  it('compacts agent_end with message count', () => {
+    const line = JSON.stringify({ type: 'agent_end', messages: [{}, {}, {}] });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] agent_end messages=3');
+  });
+
+  it('compacts turn_start and turn_end', () => {
+    expect(classifyLogLine(JSON.stringify({ type: 'turn_start' })).content).toBe('[pi] turn_start');
+    expect(classifyLogLine(JSON.stringify({ type: 'turn_end', message: {}, toolResults: [] })).content).toBe('[pi] turn_end');
+  });
+
+  it('hides message_start (streaming noise)', () => {
+    const line = JSON.stringify({ type: 'message_start', message: { role: 'assistant', content: [] } });
+    expect(classifyLogLine(line).show).toBe(false);
+  });
+
+  it('hides message_update (streaming noise)', () => {
+    const line = JSON.stringify({ type: 'message_update', message: {}, assistantMessageEvent: { type: 'text_delta', delta: 'hi' } });
+    expect(classifyLogLine(line).show).toBe(false);
+  });
+
+  it('compacts message_end with role', () => {
+    const line = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [] } });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] message_end role=assistant');
+  });
+
+  it('compacts tool_execution_start to one-liner', () => {
+    const line = JSON.stringify({ type: 'tool_execution_start', toolCallId: 'id1', toolName: 'Read', args: { file_path: '/repo/foo.ts' } });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] tool_start: Read(/repo/foo.ts)');
+  });
+
+  it('hides tool_execution_update (streaming noise)', () => {
+    const line = JSON.stringify({ type: 'tool_execution_update', toolCallId: 'id1', toolName: 'Read', args: {}, partialResult: 'partial' });
+    expect(classifyLogLine(line).show).toBe(false);
+  });
+
+  it('compacts tool_execution_end to bytes indicator', () => {
+    const result_data = 'x'.repeat(500);
+    const line = JSON.stringify({ type: 'tool_execution_end', toolCallId: 'id1', toolName: 'Read', result: result_data, isError: false });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toMatch(/^\[pi\] tool_end: Read\(bytes=\d+\)$/);
+  });
+
+  it('flags tool_execution_end errors', () => {
+    const line = JSON.stringify({ type: 'tool_execution_end', toolCallId: 'id1', toolName: 'Bash', result: 'command not found', isError: true });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toContain('[error]');
+  });
+
+  it('compacts compaction_start', () => {
+    const line = JSON.stringify({ type: 'compaction_start', reason: 'threshold' });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] compaction_start reason=threshold');
+  });
+
+  it('compacts compaction_end', () => {
+    const line = JSON.stringify({ type: 'compaction_end', reason: 'threshold', aborted: false });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] compaction_end reason=threshold');
+  });
+
+  it('compacts auto_retry_start', () => {
+    const line = JSON.stringify({ type: 'auto_retry_start', attempt: 2, maxAttempts: 3, delayMs: 1000, errorMessage: 'timeout' });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] auto_retry attempt=2/3');
+  });
+
+  it('compacts auto_retry_end', () => {
+    const line = JSON.stringify({ type: 'auto_retry_end', success: true, attempt: 2 });
+    const result = classifyLogLine(line);
+    expect(result.show).toBe(true);
+    expect(result.content).toBe('[pi] auto_retry_end success=true');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Verbose mode — every line unchanged
 // ---------------------------------------------------------------------------
 describe('filterLogLine verbose mode', () => {
