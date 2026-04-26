@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type { TaskDetailResponse, AttemptResponse, TaskAction, ToolResponse } from '../api.js';
@@ -352,7 +352,9 @@ function AgentOutput({
   const [lines, setLines] = useState<string[]>([]);
   const [complete, setComplete] = useState(!isRunning);
   const [verbose, setVerbose] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  // True until the user scrolls up; keeps the panel following new output.
+  const atBottomRef = useRef(true);
 
   useEffect(() => {
     const handler = (event: OutputWsEvent) => {
@@ -376,10 +378,20 @@ function AgentOutput({
     return disconnect;
   }, [taskId]);
 
-  // Scroll to bottom when new lines arrive or after toggling mode
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Sticky-bottom: scroll the panel (never the window) after new lines render,
+  // but only when the user is already near the bottom.
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container || !atBottomRef.current) return;
+    container.scrollTop = container.scrollHeight;
   }, [lines, verbose]);
+
+  function handleScroll() {
+    const container = containerRef.current;
+    if (!container) return;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    atBottomRef.current = scrollHeight - (scrollTop + clientHeight) < 32;
+  }
 
   const displayLines = useMemo(
     () => lines.map((line) => filterLogLine(line, verbose)),
@@ -415,7 +427,11 @@ function AgentOutput({
           )}
         </div>
       </div>
-      <div className="max-h-96 overflow-y-auto p-4 font-mono text-xs text-gray-300 whitespace-pre-wrap">
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="max-h-96 overflow-y-auto p-4 font-mono text-xs text-gray-300 whitespace-pre-wrap"
+      >
         {lines.length === 0 ? (
           <span className="text-gray-500">
             {isRunning ? 'Waiting for output...' : 'No output available'}
@@ -425,7 +441,6 @@ function AgentOutput({
             l.show ? <div key={origIdx}>{l.content}</div> : null
           )
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );
