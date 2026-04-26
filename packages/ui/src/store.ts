@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TaskResponse } from './api.js';
+import type { TaskResponse, ToolResponse } from './api.js';
 
 interface Alert {
   level: 'info' | 'warning' | 'error';
@@ -8,6 +8,7 @@ interface Alert {
 
 interface DashboardState {
   tasks: TaskResponse[];
+  tools: ToolResponse[];
   activeCount: number;
   maxConcurrency: number;
   queueDepth: number;
@@ -36,10 +37,12 @@ interface DashboardState {
   setDailyCompletions: (count: number) => void;
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
+  setTools: (tools: ToolResponse[]) => void;
 }
 
 export const useStore = create<DashboardState>((set) => ({
   tasks: [],
+  tools: [],
   activeCount: 0,
   maxConcurrency: 5,
   queueDepth: 0,
@@ -86,4 +89,6 @@ export const useStore = create<DashboardState>((set) => ({
     set((state) => ({ alerts: [...state.alerts, alert] })),
 
   clearAlerts: () => set({ alerts: [] }),
+
+  setTools: (tools) => set({ tools }),
 }));

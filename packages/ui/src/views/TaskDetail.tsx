@@ -1,11 +1,12 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
-import type { TaskDetailResponse, AttemptResponse, TaskAction } from '../api.js';
+import type { TaskDetailResponse, AttemptResponse, TaskAction, ToolResponse } from '../api.js';
 import { connectOutputWs } from '../ws.js';
 import type { OutputWsEvent } from '../ws.js';
 import { Timeline } from '../components/Timeline.js';
 import { filterLogLine } from '../logFilter.js';
+import { useStore } from '../store.js';
 
 const ACTIVE_STATUSES = new Set([
   'preparing', 'in-progress', 'in-review', 'changes-needed',
@@ -21,6 +22,8 @@ export function TaskDetail() {
   const [task, setTask] = useState<TaskDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [agentToolError, setAgentToolError] = useState<string | null>(null);
+  const store = useStore();
 
   useEffect(() => {
     if (!id) return;
@@ -29,6 +32,13 @@ export function TaskDetail() {
       .then(setTask)
       .catch((err) => setError(err.message));
   }, [id]);
+
+  // Load tools into store if not already cached
+  useEffect(() => {
+    if (store.tools.length === 0) {
+      api.getTools().then((res) => store.setTools(res.tools)).catch(() => {});
+    }
+  }, []);
 
   async function handleAction(action: TaskAction) {
     if (!task || actionPending) return;
@@ -53,6 +63,25 @@ export function TaskDetail() {
       setError(err instanceof Error ? err.message : 'Action failed');
     } finally {
       setActionPending(false);
+    }
+  }
+
+  async function handleAgentToolChange(newToolId: string) {
+    if (!task) return;
+    const newTool = newToolId || null; // empty string → null (repo default)
+    const prevTool = task.agent_tool;
+
+    // Optimistic update
+    setTask((prev) => prev ? { ...prev, agent_tool: newTool } : prev);
+    setAgentToolError(null);
+
+    try {
+      await api.patchTask(task.id, { agent_tool: newTool });
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+    } catch (err) {
+      setTask((prev) => prev ? { ...prev, agent_tool: prevTool } : prev);
+      setAgentToolError(err instanceof Error ? err.message : 'Failed to update agent tool');
     }
   }
 
@@ -135,6 +164,32 @@ export function TaskDetail() {
                 {task.container_name ?? task.container_id?.slice(0, 12)}
               </div>
             )}
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <label className="text-xs text-gray-500">Agent tool:</label>
+              <select
+                value={task.agent_tool ?? ''}
+                onChange={(e) => handleAgentToolChange(e.target.value)}
+                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+              >
+                <option value="">
+                  Use repo default
+                  {task.agent_tool_source === 'repo' && task.effective_agent_tool_id
+                    ? ` (${store.tools.find((t) => t.id === task.effective_agent_tool_id)?.display_name ?? task.effective_agent_tool_id})`
+                    : ''}
+                </option>
+                {store.tools.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.display_name}
+                  </option>
+                ))}
+              </select>
+              {ACTIVE_STATUSES.has(task.status) && (
+                <span className="text-xs text-gray-500 italic">Takes effect on next attempt</span>
+              )}
+              {agentToolError && (
+                <span className="text-xs text-red-400">{agentToolError}</span>
+              )}
+            </div>
           </div>
           <div className="text-right">
             <div className="flex items-center gap-2 justify-end">

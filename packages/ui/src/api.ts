@@ -115,6 +115,10 @@ export interface TaskResponse {
   /** Human-readable container name if one is currently running.
    *  Only populated on the single-task detail endpoint. */
   container_name?: string | null;
+  /** Computed effective tool: task.agent_tool if set, else repo.agent_tool. */
+  effective_agent_tool_id: string | null;
+  /** Whether the effective tool comes from the task override or the repo default. */
+  agent_tool_source: 'task' | 'repo';
 }
 
 export interface TaskEventResponse {
@@ -191,7 +195,8 @@ export type TaskAction =
   | { action: 'force_approve' }
   | { action: 'force_fail'; reason?: string }
   | { action: 'reset' }
-  | { action: 'requeue' };
+  | { action: 'requeue' }
+  | { agent_tool: string | null };
 
 export interface RepoResponse {
   id: number;
