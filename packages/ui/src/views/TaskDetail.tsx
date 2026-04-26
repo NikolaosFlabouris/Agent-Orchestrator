@@ -1,10 +1,11 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type { TaskDetailResponse, AttemptResponse, TaskAction } from '../api.js';
 import { connectOutputWs } from '../ws.js';
 import type { OutputWsEvent } from '../ws.js';
 import { Timeline } from '../components/Timeline.js';
+import { filterLogLine } from '../logFilter.js';
 
 const ACTIVE_STATUSES = new Set([
   'preparing', 'in-progress', 'in-review', 'changes-needed',
@@ -274,6 +275,7 @@ function AgentOutput({
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [complete, setComplete] = useState(!isRunning);
+  const [verbose, setVerbose] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -298,17 +300,44 @@ function AgentOutput({
     return disconnect;
   }, [taskId]);
 
+  // Scroll to bottom when new lines arrive or after toggling mode
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [lines]);
+  }, [lines, verbose]);
+
+  const displayLines = useMemo(
+    () => lines.map((line) => ({ ...filterLogLine(line, verbose), raw: line })),
+    [lines, verbose],
+  );
+
+  const hiddenCount = verbose ? 0 : displayLines.filter((l) => !l.show).length;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800 text-sm">
-        <span className="text-gray-400">progress.log</span>
-        {!complete && (
-          <span className="text-green-400 animate-pulse">Live</span>
-        )}
+        <div className="flex items-center gap-3">
+          <span className="text-gray-400">progress.log</span>
+          {hiddenCount > 0 && (
+            <span className="text-gray-500 text-xs italic">
+              {hiddenCount} verbose lines hidden
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setVerbose((v) => !v)}
+            className={`text-xs px-2 py-1 rounded border transition-colors ${
+              verbose
+                ? 'border-blue-700 text-blue-400 bg-blue-950/50'
+                : 'border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+            }`}
+          >
+            {verbose ? 'Verbose' : 'Terse'}
+          </button>
+          {!complete && (
+            <span className="text-green-400 animate-pulse">Live</span>
+          )}
+        </div>
       </div>
       <div className="max-h-96 overflow-y-auto p-4 font-mono text-xs text-gray-300 whitespace-pre-wrap">
         {lines.length === 0 ? (
@@ -316,7 +345,9 @@ function AgentOutput({
             {isRunning ? 'Waiting for output...' : 'No output available'}
           </span>
         ) : (
-          lines.map((line, i) => <div key={i}>{line}</div>)
+          displayLines
+            .filter((l) => l.show)
+            .map((l, i) => <div key={i}>{l.content}</div>)
         )}
         <div ref={bottomRef} />
       </div>
