@@ -89,7 +89,12 @@ export function TaskDetail() {
       await api.patchTask(task.id, { agent_tool: newTool });
     } catch (err) {
       // Roll back only when the PATCH itself failed (server hasn't persisted the change).
-      setTask((prev) => prev ? { ...prev, agent_tool: prevTool } : prev);
+      setTask((prev) => prev ? {
+        ...prev,
+        agent_tool: prevTool,
+        effective_agent_tool_id: prevTool ?? prev.repo_agent_tool,
+        agent_tool_source: prevTool !== null ? 'task' : 'repo',
+      } : prev);
       setAgentToolError(err instanceof Error ? err.message : 'Failed to update agent tool');
       return;
     }
