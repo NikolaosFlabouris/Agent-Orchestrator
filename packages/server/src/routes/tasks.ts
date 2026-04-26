@@ -272,13 +272,15 @@ export function createTaskRoutes(
         // Direct field update: agent_tool (no action required).
         // null clears the override and reverts to the repo default.
         if ('agent_tool' in body) {
-          const newTool = body.agent_tool as string | null;
+          const rawTool = body.agent_tool;
+          if (rawTool !== null && typeof rawTool !== 'string') {
+            return reply.status(400).send({ error: 'agent_tool must be a string or null' });
+          }
+          const newTool = rawTool as string | null;
 
-          if (newTool !== null) {
-            const tool = getAgentTool(newTool);
-            if (!tool) {
-              return reply.status(400).send({ error: `Unknown agent_tool: ${newTool}` });
-            }
+          const validation = validateAgentTool(newTool, getAgentTool);
+          if (!validation.valid) {
+            return reply.status(400).send({ error: validation.error });
           }
 
           const oldTool = task.agent_tool;
@@ -459,6 +461,22 @@ interface EnrichContext {
 }
 
 /**
+ * Validate an agent_tool value for the PATCH handler.
+ * null is always valid (clears the override). A string must exist in the
+ * agent_tools table. Exported so the unit tests exercise the same logic as
+ * the route handler.
+ */
+export function validateAgentTool(
+  toolId: string | null,
+  getAgentToolFn: (id: string) => { id: string } | undefined
+): { valid: true } | { valid: false; error: string } {
+  if (toolId === null) return { valid: true };
+  const tool = getAgentToolFn(toolId);
+  if (!tool) return { valid: false, error: `Unknown agent_tool: ${toolId}` };
+  return { valid: true };
+}
+
+/**
  * Resolve the effective agent tool id and its source.
  * task.agent_tool (per-task override) takes precedence over repo.agent_tool
  * (repository default). Exported for unit tests — the authoritative
@@ -489,7 +507,10 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
   // second round-trip. task.agent_tool wins; falls back to repo.agent_tool.
   const { effective_agent_tool_id, agent_tool_source } = repo
     ? resolveEffectiveAgentTool(task.agent_tool, repo.agent_tool)
-    : { effective_agent_tool_id: task.agent_tool, agent_tool_source: 'task' as const };
+    : {
+        effective_agent_tool_id: task.agent_tool,
+        agent_tool_source: (task.agent_tool !== null ? 'task' : 'repo') as 'task' | 'repo',
+      };
 
   return {
     ...task,

@@ -77,11 +77,17 @@ export function TaskDetail() {
 
     try {
       await api.patchTask(task.id, { agent_tool: newTool });
-      const updated = await api.getTask(task.id);
-      setTask(updated);
     } catch (err) {
+      // Roll back only when the PATCH itself failed (server hasn't persisted the change).
       setTask((prev) => prev ? { ...prev, agent_tool: prevTool } : prev);
       setAgentToolError(err instanceof Error ? err.message : 'Failed to update agent tool');
+      return;
+    }
+    try {
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+    } catch {
+      // PATCH was confirmed; leave optimistic state — WS push will correct it.
     }
   }
 

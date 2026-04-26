@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveEffectiveAgentTool } from '../../routes/tasks.js';
+import { resolveEffectiveAgentTool, validateAgentTool } from '../../routes/tasks.js';
 
 describe('resolveEffectiveAgentTool', () => {
   it('returns the task override when set', () => {
@@ -32,21 +32,10 @@ describe('resolveEffectiveAgentTool', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Validation logic — tests for accepting/rejecting/clearing agent_tool values
+// Validation logic — tests for the exported validateAgentTool used by PATCH
 // ---------------------------------------------------------------------------
 
-/** Mirrors the inline validation in the PATCH handler. */
-function validateAgentToolId(
-  toolId: string | null,
-  getAgentTool: (id: string) => { id: string } | undefined
-): { valid: true } | { valid: false; error: string } {
-  if (toolId === null) return { valid: true }; // null always accepted (clear override)
-  const tool = getAgentTool(toolId);
-  if (!tool) return { valid: false, error: `Unknown agent_tool: ${toolId}` };
-  return { valid: true };
-}
-
-describe('PATCH agent_tool validation', () => {
+describe('validateAgentTool (PATCH handler validation)', () => {
   const knownTools: Record<string, { id: string }> = {
     'claude-code': { id: 'claude-code' },
     'ollama-local': { id: 'ollama-local' },
@@ -55,15 +44,15 @@ describe('PATCH agent_tool validation', () => {
   const getAgentTool = (id: string) => knownTools[id];
 
   it('accepts a valid existing tool id', () => {
-    expect(validateAgentToolId('claude-code', getAgentTool)).toEqual({ valid: true });
+    expect(validateAgentTool('claude-code', getAgentTool)).toEqual({ valid: true });
   });
 
   it('accepts another valid existing tool id', () => {
-    expect(validateAgentToolId('ollama-local', getAgentTool)).toEqual({ valid: true });
+    expect(validateAgentTool('ollama-local', getAgentTool)).toEqual({ valid: true });
   });
 
   it('rejects an unknown tool id with an error message', () => {
-    const result = validateAgentToolId('nonexistent-tool', getAgentTool);
+    const result = validateAgentTool('nonexistent-tool', getAgentTool);
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.error).toContain('nonexistent-tool');
@@ -71,6 +60,6 @@ describe('PATCH agent_tool validation', () => {
   });
 
   it('accepts null (clears the override)', () => {
-    expect(validateAgentToolId(null, getAgentTool)).toEqual({ valid: true });
+    expect(validateAgentTool(null, getAgentTool)).toEqual({ valid: true });
   });
 });
