@@ -484,8 +484,8 @@ export function validateAgentTool(
  */
 export function resolveEffectiveAgentTool(
   taskAgentTool: string | null,
-  repoAgentTool: string
-): { effective_agent_tool_id: string; agent_tool_source: 'task' | 'repo' } {
+  repoAgentTool: string | null
+): { effective_agent_tool_id: string | null; agent_tool_source: 'task' | 'repo' } {
   if (taskAgentTool !== null) {
     return { effective_agent_tool_id: taskAgentTool, agent_tool_source: 'task' };
   }
@@ -505,12 +505,14 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
   // Preferred enrichment: surface effective tool and its source so the UI can
   // display and distinguish task-level overrides from repo defaults without a
   // second round-trip. task.agent_tool wins; falls back to repo.agent_tool.
-  const { effective_agent_tool_id, agent_tool_source } = repo
-    ? resolveEffectiveAgentTool(task.agent_tool, repo.agent_tool)
-    : {
-        effective_agent_tool_id: task.agent_tool,
-        agent_tool_source: (task.agent_tool !== null ? 'task' : 'repo') as 'task' | 'repo',
-      };
+  // repo_agent_tool is always included separately so the UI can show the repo
+  // default name in the "Use repo default" select option even when an override
+  // is active (agent_tool_source === 'task').
+  const repoAgentTool = repo?.agent_tool ?? null;
+  const { effective_agent_tool_id, agent_tool_source } = resolveEffectiveAgentTool(
+    task.agent_tool,
+    repoAgentTool
+  );
 
   return {
     ...task,
@@ -523,6 +525,7 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     container_name: ctx.containerName ?? null,
     effective_agent_tool_id,
     agent_tool_source,
+    repo_agent_tool: repoAgentTool,
   };
 }
 

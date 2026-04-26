@@ -119,6 +119,10 @@ export interface TaskResponse {
   effective_agent_tool_id: string | null;
   /** Whether the effective tool comes from the task override or the repo default. */
   agent_tool_source: 'task' | 'repo';
+  /** The repo's configured baseline tool, regardless of any task-level override.
+   *  Always present so the UI can label "Use repo default (<name>)" even when
+   *  agent_tool_source === 'task'. */
+  repo_agent_tool: string | null;
 }
 
 export interface TaskEventResponse {

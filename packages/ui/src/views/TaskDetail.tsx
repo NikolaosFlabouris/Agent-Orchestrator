@@ -23,7 +23,8 @@ export function TaskDetail() {
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [agentToolError, setAgentToolError] = useState<string | null>(null);
-  const store = useStore();
+  const tools = useStore((s) => s.tools);
+  const setTools = useStore((s) => s.setTools);
 
   useEffect(() => {
     if (!id) return;
@@ -35,10 +36,10 @@ export function TaskDetail() {
 
   // Load tools into store if not already cached
   useEffect(() => {
-    if (store.tools.length === 0) {
-      api.getTools().then((res) => store.setTools(res.tools)).catch(() => {});
+    if (tools.length === 0) {
+      api.getTools().then((res) => setTools(res.tools)).catch(() => {});
     }
-  }, []);
+  }, [tools.length, setTools]);
 
   async function handleAction(action: TaskAction) {
     if (!task || actionPending) return;
@@ -71,8 +72,17 @@ export function TaskDetail() {
     const newTool = newToolId || null; // empty string → null (repo default)
     const prevTool = task.agent_tool;
 
-    // Optimistic update
-    setTask((prev) => prev ? { ...prev, agent_tool: newTool } : prev);
+    // Optimistic update — also sync derived fields so the select label stays
+    // consistent before the getTask refetch resolves.
+    setTask((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        agent_tool: newTool,
+        effective_agent_tool_id: newTool ?? prev.repo_agent_tool,
+        agent_tool_source: newTool !== null ? 'task' : 'repo',
+      };
+    });
     setAgentToolError(null);
 
     try {
@@ -179,11 +189,11 @@ export function TaskDetail() {
               >
                 <option value="">
                   Use repo default
-                  {task.agent_tool_source === 'repo' && task.effective_agent_tool_id
-                    ? ` (${store.tools.find((t) => t.id === task.effective_agent_tool_id)?.display_name ?? task.effective_agent_tool_id})`
+                  {task.repo_agent_tool
+                    ? ` (${tools.find((t) => t.id === task.repo_agent_tool)?.display_name ?? task.repo_agent_tool})`
                     : ''}
                 </option>
-                {store.tools.map((t) => (
+                {tools.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.display_name}
                   </option>

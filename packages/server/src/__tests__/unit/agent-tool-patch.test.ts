@@ -29,6 +29,14 @@ describe('resolveEffectiveAgentTool', () => {
     expect(result.effective_agent_tool_id).toBe('some-custom-tool');
     expect(result.agent_tool_source).toBe('task');
   });
+
+  it('returns null effective_agent_tool_id when repo has no tool and task has no override', () => {
+    // Covers the enrichTask fallback branch where repo is null (or repo.agent_tool
+    // is absent), so repoAgentTool passed in is null.
+    const result = resolveEffectiveAgentTool(null, null);
+    expect(result.effective_agent_tool_id).toBe(null);
+    expect(result.agent_tool_source).toBe('repo');
+  });
 });
 
 // ---------------------------------------------------------------------------
