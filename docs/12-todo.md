@@ -62,11 +62,9 @@ A task that spans multiple repositories (e.g., frontend + backend changes for on
 
 ## Known Limitations to Address
 
-### CLI harness prompt injection (mitigated)
+### CLI harness prompt injection (resolved)
 
-The CLI harness now supports a `{{PROMPT_FILE}}` placeholder in `command_template` that substitutes the literal path `/task/prompt.md` — the agent tool reads the file itself, so prompt content never touches the shell. All default tool definitions seeded by `scripts/seed-agent-tools.ts` use this placeholder.
-
-The legacy `${TASK_PROMPT}` placeholder (inline substitution via `envsubst` + `bash -c`) is still honored for backward compatibility, but any custom tool definition using it is vulnerable to shell metacharacters in user-authored issue bodies. Migrate by switching the placeholder in **Settings > Agent Tools**. See [04 - Agent Harness](./04-agent-harness.md#prompt-substitution-in-cli-command-templates).
+The CLI harness accepts only the `{{PROMPT_FILE}}` placeholder in `command_template` — substituted with the literal path `/task/prompt.md` before `bash -c`, so the agent tool reads the file itself and prompt content never reaches the shell as code. All default tool definitions seeded by `scripts/seed-agent-tools.ts` use this placeholder, and the schema v5 migration rewrites any legacy `"${TASK_PROMPT}"` templates on startup. See [04 - Agent Harness](./04-agent-harness.md#prompt-substitution-in-cli-command-templates).
 
 ### Verify OpenCode CLI flags against installed version
 

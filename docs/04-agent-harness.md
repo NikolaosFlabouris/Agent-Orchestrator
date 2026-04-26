@@ -36,14 +36,19 @@ The `agent_tool` field determines which harness path runs. The `agent_command` f
 
 ### Prompt substitution in CLI command templates
 
-CLI tools receive the task prompt through `agent_command` via one of two placeholders:
+CLI tools receive the task prompt through `agent_command` via the `{{PROMPT_FILE}}` placeholder. The harness substitutes it with the literal path `/task/prompt.md`; the tool reads the file itself, so prompt content never reaches the shell as code and is immune to metacharacters (backticks, `$()`, unbalanced quotes) in issue bodies. Two common shapes:
 
-- **`{{PROMPT_FILE}}` (preferred).** The harness substitutes the literal path `/task/prompt.md`. The tool reads the file itself, so prompt content never touches the shell and is immune to metacharacters (backticks, `$()`, unbalanced quotes) in issue bodies.
-  ```
-  opencode run "$(cat {{PROMPT_FILE}})"
-  claude --print --dangerously-skip-permissions < {{PROMPT_FILE}}
-  ```
-- **`${TASK_PROMPT}` (legacy).** The harness reads `prompt.md`, exports it as an env var, and `envsubst`s it into the command before `bash -c`. Shell metacharacters in the prompt can corrupt the command or execute as shell; kept for backwards compatibility only. New tool definitions should use `{{PROMPT_FILE}}`.
+```
+# Pass the file path as an argument — the tool opens it:
+claude --print --dangerously-skip-permissions < {{PROMPT_FILE}}
+pi -p --no-session @{{PROMPT_FILE}}
+
+# Read the file inside double quotes so the content becomes a single literal
+# argument (safe: $(cat ...) is substituted before the tool sees it):
+opencode run "$(cat {{PROMPT_FILE}})"
+```
+
+An earlier `${TASK_PROMPT}` placeholder (inlined via `envsubst` into `bash -c`) existed for backwards compatibility; it was removed in schema v5 because user-authored issue bodies containing shell metacharacters would break out of the command. A migration rewrites legacy `"${TASK_PROMPT}"` templates on startup.
 
 ### Outputs (written by harness)
 
@@ -163,7 +168,7 @@ Key SDK capabilities used:
   "id": "claude-code-cli",
   "display_name": "Claude Code CLI",
   "type": "cli",
-  "command_template": "claude --bare --dangerously-skip-permissions --print --output-format stream-json -p \"${TASK_PROMPT}\"",
+  "command_template": "claude --bare --dangerously-skip-permissions --print --output-format stream-json -p \"$(cat {{PROMPT_FILE}})\"",
   "env_vars": {},
   "auth_type": "api-key",
   "auth_config": {
@@ -439,10 +444,10 @@ fi
 # The orchestrator assembles the full prompt before the container starts.
 PROMPT="$TASK_DIR/prompt.md"
 
-# Substitute prompt into command template
-TASK_PROMPT=$(cat "$PROMPT")
-export TASK_PROMPT
-RESOLVED_COMMAND=$(envsubst '${TASK_PROMPT}' <<< "$AGENT_COMMAND")
+# Substitute prompt file path into command template. The prompt content
+# itself never reaches the shell — see "Prompt substitution in CLI command
+# templates" above for details.
+RESOLVED_COMMAND="${AGENT_COMMAND//\{\{PROMPT_FILE\}\}/$PROMPT}"
 
 # Run agent with timeout
 AGENT_EXIT=0

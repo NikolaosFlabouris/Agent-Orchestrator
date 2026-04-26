@@ -317,7 +317,7 @@ Nullable fields (`model`, `max_turns`, `timeout_minutes`, `container_memory_mb`,
       "id": "opencode-local",
       "display_name": "OpenCode (Local LLM)",
       "type": "cli",
-      "command_template": "opencode run --non-interactive --prompt \"${TASK_PROMPT}\"",
+      "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\" --non-interactive",
       "env_vars": {
         "OPENCODE_PROVIDER": "openai-compatible",
         "OPENCODE_MODEL": "codestral-latest",
@@ -340,7 +340,7 @@ The `auth_status` field is computed at response time (not stored): `"configured"
   "id": "opencode-anthropic",
   "display_name": "OpenCode (Anthropic API)",
   "type": "cli",
-  "command_template": "opencode run --non-interactive --prompt \"${TASK_PROMPT}\"",
+  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\" --non-interactive",
   "env_vars": {
     "OPENCODE_PROVIDER": "anthropic",
     "OPENCODE_MODEL": "claude-sonnet-4-20250514"

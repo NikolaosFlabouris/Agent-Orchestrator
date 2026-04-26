@@ -257,20 +257,23 @@ function AgentToolsSection() {
 
       <SubHeading>command_template</SubHeading>
       <p className="text-sm text-gray-300">
-        A shell command with one of two placeholders for the task prompt:
+        A shell command that uses the <Code>{'{{PROMPT_FILE}}'}</Code> placeholder
+        to reference the task prompt. The harness replaces{' '}
+        <Code>{'{{PROMPT_FILE}}'}</Code> with the absolute path to a file
+        containing the prompt before running the command. Two common shapes:
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
-          <Code>{'{{PROMPT_FILE}}'}</Code> — replaced with the absolute path to a
-          file containing the prompt. Use this when the CLI takes a prompt via a
-          file flag. Example:
+          <strong>File flag</strong> — when the CLI takes the prompt via a file
+          argument:
           <CodeBlock>{`claude --prompt-file {{PROMPT_FILE}} --max-turns 40`}</CodeBlock>
         </li>
         <li>
-          <Code>${'{TASK_PROMPT}'}</Code> — a shell variable that expands to the
-          prompt text at runtime. Use this when the CLI takes the prompt as a
-          string argument. Always quote it:
-          <CodeBlock>{`opencode run --non-interactive --prompt "\${TASK_PROMPT}"`}</CodeBlock>
+          <strong>Inline string</strong> — when the CLI takes the prompt as a
+          string argument, read the file via <Code>{'$(cat ...)'}</Code> inside
+          double quotes so the content is passed as a single argument and shell
+          metacharacters in the prompt stay inert:
+          <CodeBlock>{`opencode run "$(cat {{PROMPT_FILE}})" --non-interactive`}</CodeBlock>
         </li>
       </ul>
       <p className="text-sm text-gray-300 mt-2">

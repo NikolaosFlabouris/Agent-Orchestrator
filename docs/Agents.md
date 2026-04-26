@@ -7,7 +7,7 @@ Agent tools are the LLM-powered programs that the orchestrator runs inside Docke
 An **agent tool** is a named configuration with:
 
 - **Type** — `cli` (command-line tool like OpenCode) or `sdk` (programmatic like Claude Agent SDK)
-- **Command template** — the shell command that runs inside the container (CLI tools only). Prefer the `{{PROMPT_FILE}}` placeholder (replaced with `/task/prompt.md`) so the prompt content never touches the shell — the legacy `${TASK_PROMPT}` placeholder inlines the prompt via `envsubst` and is vulnerable to shell metacharacters in user-authored issue bodies.
+- **Command template** — the shell command that runs inside the container (CLI tools only). Use the `{{PROMPT_FILE}}` placeholder (replaced with the literal path `/task/prompt.md`) so the prompt content never reaches the shell as code and is immune to metacharacters in user-authored issue bodies.
 - **Environment variables** — non-secret config passed to the container (provider, model, base URL)
 - **Auth config** — which secret env var to inject from the orchestrator's `.env` file (e.g., `ANTHROPIC_API_KEY`)
 

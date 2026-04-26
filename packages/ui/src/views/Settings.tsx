@@ -645,7 +645,7 @@ function ToolSettings() {
                    setEditing({ ...editing, command_template: e.target.value });
                    if (errors.command_template) setErrors({ ...errors, command_template: '' });
                  }}
-                 placeholder='e.g. opencode run --non-interactive --prompt "${TASK_PROMPT}"'
+                 placeholder='e.g. opencode run "$(cat {{PROMPT_FILE}})" --non-interactive'
                  className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono ${
                    errors.command_template ? 'border-red-500' : 'border-gray-700'
                  }`}

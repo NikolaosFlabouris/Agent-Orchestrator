@@ -95,7 +95,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 
 1. **Agent harnesses** (`harness/`)
    - SDK harness (`harness-sdk.ts`): read prompt, flock pre-agent script, invoke Agent SDK `query()`, accumulate usage, write result.json with usage and error_message
-   - CLI harness (`harness-cli.sh`): read prompt, flock pre-agent script, envsubst command template, run with timeout, parse usage from stream-json, write result.json
+   - CLI harness (`harness-cli.sh`): read prompt, flock pre-agent script, substitute `{{PROMPT_FILE}}` in the command template with the prompt file path, run with timeout, parse usage from stream-json, write result.json
    - Both: handle timeout, failure, review.json verification for review role
 
 2. **Agent base image** (`images/base/Dockerfile`)

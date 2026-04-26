@@ -226,6 +226,33 @@ function runMigrations(db: Database.Database): void {
     }
     db.prepare("UPDATE settings SET value = '4' WHERE key = 'schema_version'").run();
   }
+
+  if (version < 5) {
+    // Rewrite legacy agent_tools command_templates that inlined the prompt
+    // via "${TASK_PROMPT}" to the safe "$(cat {{PROMPT_FILE}})" form. The
+    // legacy form exposed shell metacharacters in user-authored issue bodies
+    // to bash -c, causing non-trivial prompts to be parsed as commands and
+    // the agent to never start. harness-cli.sh no longer honours the legacy
+    // placeholder, so this rewrite is required for pre-v5 installs to keep
+    // working after the harness images are rebuilt.
+    const legacyRows = db
+      .prepare(
+        "SELECT id, command_template FROM agent_tools WHERE command_template LIKE '%${TASK_PROMPT}%'"
+      )
+      .all() as Array<{ id: string; command_template: string }>;
+    const updateTpl = db.prepare(
+      'UPDATE agent_tools SET command_template = ? WHERE id = ?'
+    );
+    for (const row of legacyRows) {
+      const migrated = row.command_template
+        .replace(/"\$\{TASK_PROMPT\}"/g, '"$(cat {{PROMPT_FILE}})"')
+        .replace(/'\$\{TASK_PROMPT\}'/g, "'$(cat {{PROMPT_FILE}})'");
+      if (migrated !== row.command_template) {
+        updateTpl.run(migrated, row.id);
+      }
+    }
+    db.prepare("UPDATE settings SET value = '5' WHERE key = 'schema_version'").run();
+  }
 }
 
 function seedDefaultSettings(db: Database.Database): void {

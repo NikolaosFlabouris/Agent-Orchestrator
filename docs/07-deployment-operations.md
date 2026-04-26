@@ -269,11 +269,11 @@ Key operational points:
 
 ## Known Limitations
 
-### CLI harness prompt injection (Issue 11)
+### CLI harness prompt injection (Issue 11 — resolved)
 
-The CLI harness substitutes the task prompt (which includes the Forgejo issue body — user-provided text) into the command template via `envsubst`, then executes it via `bash -c`. If the issue body contains shell metacharacters (backticks, `$()`, semicolons), they could be interpreted as shell commands within the agent container.
+Early versions of the CLI harness inlined the task prompt (which includes the Forgejo issue body — user-provided text) into the command template via `envsubst` and then ran it through `bash -c`. Shell metacharacters in the prompt (backticks, `$()`, semicolons, unbalanced quotes) could be interpreted as shell commands inside the agent container, and in practice would cause the agent to never start when the issue body described code.
 
-This is mitigated by: (1) issue bodies are written by trusted users with Forgejo access, not external attackers; (2) the agent container already has access to the same API keys via environment variables; (3) the container is ephemeral with limited privileges (non-root user). However, for defense in depth, CLI tools that support file-based prompt input (e.g., `--prompt-file /task/prompt.md`) should use that instead of inline substitution. The SDK harness is not affected — it passes the prompt as a function argument, not a shell string.
+This is no longer possible. The harness now accepts only the `{{PROMPT_FILE}}` placeholder, which is substituted with the literal path `/task/prompt.md` before `bash -c`. The tool reads the file itself, so prompt content is never parsed as shell code. Existing tool definitions that used the legacy `${TASK_PROMPT}` placeholder are rewritten to the safe form by the schema v5 migration on startup. The SDK harness is unaffected — it passes the prompt as a function argument.
 
 ### Docker Compose stop_grace_period coupling (Issue 12)
 
