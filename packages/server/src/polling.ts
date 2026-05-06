@@ -183,6 +183,7 @@ export class Poller {
       // New task from Forgejo
       insertTask({
         issue_id: issue.number,
+        issue_title: issue.title,
         repo_id: repo.id,
         status: 'queued',
       });

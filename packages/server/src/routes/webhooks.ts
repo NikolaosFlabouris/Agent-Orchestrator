@@ -194,8 +194,19 @@ async function handleIssueEvent(
       }
 
       // Insert new task
+      let issueTitle: string | null = issue.title ?? null;
+      if (!issueTitle) {
+        try {
+          const fullIssue = await forgejo.getIssue(repo, issue.number);
+          issueTitle = fullIssue.title;
+        } catch {
+          // Best effort
+        }
+      }
+
       insertTask({
         issue_id: issue.number,
+        issue_title: issueTitle,
         repo_id: repo.id,
         status: 'queued',
       });
