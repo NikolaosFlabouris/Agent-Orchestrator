@@ -48,7 +48,6 @@ export async function cancelTask(
   // 3. Close PR if opened
   if (task.pr_number && repo) {
     try {
-      await forgejo.commentOnPr(repo, task.pr_number, `Task cancelled: ${reason}`);
       await forgejo.closePullRequest(repo, task.pr_number);
     } catch {
       // Best effort
@@ -148,7 +147,6 @@ export async function resetTask(
   // 3. Close PR if opened
   if (task.pr_number && repo) {
     try {
-      await forgejo.commentOnPr(repo, task.pr_number, `Task reset: ${reason}`);
       await forgejo.closePullRequest(repo, task.pr_number);
     } catch {
       // Best effort

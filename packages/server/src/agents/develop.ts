@@ -281,10 +281,10 @@ export async function postDevAgent(
       }
 
       try {
-        await forgejo.commentOnPr(
+        await forgejo.commentOnIssue(
           repo,
-          task.pr_number,
-          `Branch updated with rework changes (attempt ${task.attempt})`
+          task.issue_id,
+          `Branch updated with rework changes (attempt ${task.attempt}).`
         );
       } catch { /* best effort */ }
     }

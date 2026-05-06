@@ -357,6 +357,7 @@ export class ForgejoClient {
     );
   }
 
+  // Reserved for posting review-content comments (review agent's verdict feedback). Orchestration narration must use commentOnIssue.
   async commentOnPr(
     repo: Repo,
     prNumber: number,
