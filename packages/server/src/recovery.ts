@@ -5,6 +5,7 @@ import type { Task } from '@orchestrator/shared';
 import { getTasks, getRepo, updateTask, insertTaskEvent } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import { buildPullRequestBody } from './forgejo-linking.js';
+import { getStep } from './checkpoints.js';
 import {
   listContainers,
   getContainer,
@@ -197,6 +198,139 @@ async function recoverTask(
     resetToQueued(task, 'No branch name assigned.', forgejo, log);
     return;
   }
+
+  // ── Checkpoint-fast-path ────────────────────────────────────────────────
+  // Consult step checkpoints written by postDevAgent for this attempt.  If
+  // they exist, we know what postDevAgent already completed and can skip the
+  // expensive branch/workspace derivation.
+
+  const verifiedCheckpoint = getStep<{
+    branch_exists: boolean;
+    branch_sha: string | null;
+    base_sha: string;
+  }>(task.id, task.attempt, 'verify-push');
+
+  const createdCheckpoint = getStep<{ pr_number: number; created: boolean }>(
+    task.id,
+    task.attempt,
+    'create-pr'
+  );
+
+  if (createdCheckpoint) {
+    // Both verify-push and create-pr completed — PR already exists.
+    // Ensure the task has the PR number and transition straight to in-review.
+    log.info(
+      { event: 'recovery_checkpoint_pr_exists', task_id: task.id, pr_number: createdCheckpoint.pr_number },
+      'Checkpoint: PR was already created. Transitioning to in-review.'
+    );
+
+    insertTaskEvent(
+      task.id,
+      'recovery',
+      `Orchestrator recovered: PR #${createdCheckpoint.pr_number} already created (checkpoint). Transitioning to in-review.`
+    );
+
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        'Orchestrator recovered after restart. PR already created. Continuing to review.'
+      );
+    } catch { /* best effort */ }
+
+    // Merge pr_number (if missing) and status transition into one atomic update.
+    updateTask(task.id, {
+      ...(task.pr_number ? {} : { pr_number: createdCheckpoint.pr_number }),
+      status: 'in-review',
+      container_id: null,
+    });
+    return;
+  }
+
+  if (verifiedCheckpoint) {
+    // verify-push completed but create-pr did not — crash between push
+    // verification and PR creation.
+
+    if (!verifiedCheckpoint.branch_exists) {
+      // The verify-push step recorded that the branch did NOT exist on the
+      // remote when it ran (e.g. the salvage-local step also hadn't run yet).
+      // We cannot create a PR against a branch that doesn't exist — fall
+      // through to the existing derivation logic which will salvage local work
+      // or re-queue the task.
+      log.info(
+        { event: 'recovery_checkpoint_branch_not_pushed', task_id: task.id },
+        'Checkpoint: branch was not pushed yet. Falling through to derivation logic.'
+      );
+      // Fall through — do NOT return here.
+    } else {
+      // Branch exists on remote.  Skip branch derivation and go straight
+      // to creating the PR.
+      log.info(
+        { event: 'recovery_checkpoint_verified_no_pr', task_id: task.id },
+        'Checkpoint: branch verified but PR not yet created. Creating PR.'
+      );
+
+      let prNumber = task.pr_number ?? null;
+      if ((task.status === 'in-progress' || task.status === 'preparing') && !task.pr_number) {
+        try {
+          let issueTitle: string;
+          try {
+            const issue = await forgejo.getIssue(repo, task.issue_id);
+            issueTitle = issue.title;
+          } catch {
+            issueTitle = `Issue #${task.issue_id}`;
+          }
+          const pr = await forgejo.createPullRequest(repo, {
+            title: issueTitle,
+            body: buildPullRequestBody({
+              issue_id: task.issue_id,
+              attempt: task.attempt,
+            }),
+            head: task.branch_name,
+            base: repo.base_branch,
+          });
+          prNumber = pr.number;
+        } catch (err) {
+          log.error(
+            { event: 'recovery_pr_creation_failed', task_id: task.id, err },
+            'Failed to create PR during recovery (checkpoint path)'
+          );
+        }
+      }
+
+      if (prNumber) {
+        insertTaskEvent(
+          task.id,
+          'recovery',
+          `Orchestrator recovered: branch verified (checkpoint), PR #${prNumber} created/found. Transitioning to in-review.`
+        );
+
+        try {
+          await forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            'Orchestrator recovered after restart. Agent work found on branch. Continuing to review.'
+          );
+        } catch { /* best effort */ }
+
+        // Merge pr_number persistence and status transition into one atomic update.
+        updateTask(task.id, {
+          ...(task.pr_number ? {} : { pr_number: prNumber }),
+          status: 'in-review',
+          container_id: null,
+        });
+        return;
+      }
+
+      // PR creation failed — fall through to re-queue
+      resetToQueued(task, 'PR creation failed during recovery.', forgejo, log);
+      return;
+    }
+  }
+
+  // ── Fallback: existing derivation logic ────────────────────────────────
+  // No checkpoints present — inspect Docker, Forgejo, and workspace from
+  // scratch as before.
 
   // Check if the agent pushed its branch to Forgejo
   let branchExists = false;
