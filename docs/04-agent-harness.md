@@ -168,7 +168,7 @@ Key SDK capabilities used:
   "id": "claude-code-cli",
   "display_name": "Claude Code CLI",
   "type": "cli",
-  "command_template": "claude --bare --dangerously-skip-permissions --print --output-format stream-json -p \"$(cat {{PROMPT_FILE}})\"",
+  "command_template": "claude --bare --dangerously-skip-permissions --print --verbose --output-format stream-json -p \"$(cat {{PROMPT_FILE}})\"",
   "env_vars": {},
   "auth_type": "api-key",
   "auth_config": {

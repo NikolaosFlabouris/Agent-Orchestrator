@@ -58,8 +58,30 @@ if [ "$AGENT_EXIT" -eq 124 ]; then
   ERROR_MSG="\"Agent exceeded timeout of ${MAX_MINUTES} minutes\""
 elif [ "$AGENT_EXIT" -ne 0 ]; then
   STATUS="failure"
-  # Capture last 5 lines of agent output as error context
-  ERROR_MSG=$(tail -5 "$AGENT_LOG" 2>/dev/null | jq -Rs '.' || echo '"Agent exited with code '$AGENT_EXIT'"')
+  # Prefer a structured error from the agent's output, when available.
+  # Claude Code's stream-json mode emits a final {"type":"result", ...}
+  # event whose ".result" field carries a human-readable error (e.g. an
+  # API 404 with the offending model id). Surfacing that is far more
+  # actionable than tail -5 of a multi-KB JSON blob, where the long init
+  # line crowds out the actual failure.
+  RESULT_LINE=$(grep -a '^{"type":"result"' "$AGENT_LOG" 2>/dev/null | tail -1 || true)
+  if [ -n "$RESULT_LINE" ] \
+     && [ "$(echo "$RESULT_LINE" | jq -r '.is_error // false' 2>/dev/null)" = "true" ]; then
+    RESULT_TEXT=$(echo "$RESULT_LINE" | jq -r '.result // empty' 2>/dev/null)
+    API_STATUS=$(echo "$RESULT_LINE" | jq -r '.api_error_status // empty' 2>/dev/null)
+    if [ -n "$RESULT_TEXT" ]; then
+      if [ -n "$API_STATUS" ]; then
+        ERROR_MSG=$(printf '[API %s] %s' "$API_STATUS" "$RESULT_TEXT" | jq -Rs '.')
+      else
+        ERROR_MSG=$(printf '%s' "$RESULT_TEXT" | jq -Rs '.')
+      fi
+    fi
+  fi
+  # Fallback: last 5 lines of raw agent output (covers tools that don't
+  # emit stream-json, like OpenCode's text logs, and pre-init failures).
+  if [ "$ERROR_MSG" = "null" ]; then
+    ERROR_MSG=$(tail -5 "$AGENT_LOG" 2>/dev/null | jq -Rs '.' || echo '"Agent exited with code '$AGENT_EXIT'"')
+  fi
 else
   STATUS="success"
 fi

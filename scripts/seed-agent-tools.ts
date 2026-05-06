@@ -49,10 +49,12 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     type: 'cli',
     // Claude Code reads the prompt from stdin in --print (non-interactive) mode.
     // --output-format stream-json yields per-message JSON the harness uses for
-    // token-usage extraction. --dangerously-skip-permissions bypasses approval
+    // token-usage extraction. --verbose is required by the CLI when combining
+    // --print with --output-format=stream-json (Claude Code rejects the
+    // combination otherwise). --dangerously-skip-permissions bypasses approval
     // prompts (safe inside the ephemeral non-root container).
     command_template:
-      'claude --print --dangerously-skip-permissions --output-format stream-json --max-turns 100 < {{PROMPT_FILE}}',
+      'claude --print --verbose --dangerously-skip-permissions --output-format stream-json --max-turns 100 < {{PROMPT_FILE}}',
     env_vars: {},
     auth_type: 'api-key',
     auth_config: { env_var: 'ANTHROPIC_API_KEY', required: true },
