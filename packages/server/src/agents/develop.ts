@@ -252,10 +252,12 @@ export async function postDevAgent(
       return false;
     }
 
-    // Only record the side-effect event when this run freshly executed the
-    // salvage step (not on replay of a cached checkpoint) AND a commit was
-    // actually needed.
-    if (!alreadySalvaged && salvageResult.reason === 'salvaged') {
+    // Record the side-effect event when this run freshly executed the salvage
+    // step (not on replay of a cached checkpoint) AND the push succeeded.
+    // Using pushed===true (rather than reason==='salvaged') matches the
+    // original behaviour: we want observability for both the "new commit made"
+    // case and the "local commits existed but were never pushed" case.
+    if (!alreadySalvaged && salvageResult.pushed === true) {
       recordTaskEvent(task.id, 'work_salvaged', 'Local work salvaged and pushed to remote');
       log.info(
         { event: 'work_salvaged', task_id: task.id },
@@ -296,10 +298,16 @@ export async function postDevAgent(
         }
       );
 
-      // Only record side-effects when this run freshly executed the create
-      // step (not on replay of a cached checkpoint).
-      if (!alreadyCreated) {
+      // Always persist pr_number when the task row doesn't have it yet — this
+      // covers the case where a previous run wrote the checkpoint but crashed
+      // before updateTask completed.
+      if (!task.pr_number) {
         updateTask(task.id, { pr_number: createResult.pr_number });
+      }
+
+      // Record side-effect events only when this run freshly executed the
+      // create step (not on replay of a cached checkpoint).
+      if (!alreadyCreated) {
         recordTaskEvent(task.id, 'pr_created', `Pull request #${createResult.pr_number} created`);
         log.info(
           { event: 'pr_created', task_id: task.id, pr_number: createResult.pr_number },

@@ -246,14 +246,11 @@ describe('recoverTask — verify-push checkpoint with branch_exists: false, no c
     const createPullRequest = vi.fn().mockResolvedValue({ number: 42, body: 'Closes #10' });
 
     // The fallback derivation will inspect the branch on Forgejo and the
-    // local workspace.  Return no branch and no local changes so the task
-    // falls through to resetToQueued.
+    // local workspace.  Return no branch so the task falls through to
+    // resetToQueued.  Note: detectChanges is NOT called — the recovery path
+    // gates the workspace check behind `fs.existsSync(workdir/.git)`, which
+    // returns false for the fake workdir path used in this test.
     const getBranch = vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }));
-    mocks.detectChanges.mockReturnValue({
-      hasUncommitted: false,
-      hasUntracked: false,
-      hasLocalCommits: false,
-    });
 
     const forgejo = {
       getCurrentUser: vi.fn().mockResolvedValue({ login: 'bot' }),

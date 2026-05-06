@@ -168,7 +168,8 @@ describe('postDevAgent — verify-push idempotency', () => {
     await postDevAgent(task, forgejo, silentLog);
 
     const callsAfterFirstRun = getBranch.mock.calls.length;
-    expect(callsAfterFirstRun).toBeGreaterThan(0);
+    // Exactly 2 getBranch calls: one for the agent branch, one for the base branch.
+    expect(callsAfterFirstRun).toBe(2);
 
     // Second run with the same (task_id, attempt) — verify-push is cached;
     // getBranch should NOT be called again

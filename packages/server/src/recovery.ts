@@ -224,9 +224,11 @@ async function recoverTask(
       'Checkpoint: PR was already created. Transitioning to in-review.'
     );
 
-    if (!task.pr_number) {
-      updateTask(task.id, { pr_number: createdCheckpoint.pr_number });
-    }
+    insertTaskEvent(
+      task.id,
+      'recovery',
+      `Orchestrator recovered: PR #${createdCheckpoint.pr_number} already created (checkpoint). Transitioning to in-review.`
+    );
 
     try {
       await forgejo.commentOnIssue(
@@ -236,7 +238,12 @@ async function recoverTask(
       );
     } catch { /* best effort */ }
 
-    updateTask(task.id, { status: 'in-review', container_id: null });
+    // Merge pr_number (if missing) and status transition into one atomic update.
+    updateTask(task.id, {
+      ...(task.pr_number ? {} : { pr_number: createdCheckpoint.pr_number }),
+      status: 'in-review',
+      container_id: null,
+    });
     return;
   }
 
@@ -263,7 +270,7 @@ async function recoverTask(
         'Checkpoint: branch verified but PR not yet created. Creating PR.'
       );
 
-      let prCreated = false;
+      let prNumber = task.pr_number ?? null;
       if ((task.status === 'in-progress' || task.status === 'preparing') && !task.pr_number) {
         try {
           let issueTitle: string;
@@ -282,20 +289,22 @@ async function recoverTask(
             head: task.branch_name,
             base: repo.base_branch,
           });
-          updateTask(task.id, { pr_number: pr.number });
-          prCreated = true;
+          prNumber = pr.number;
         } catch (err) {
           log.error(
             { event: 'recovery_pr_creation_failed', task_id: task.id, err },
             'Failed to create PR during recovery (checkpoint path)'
           );
         }
-      } else if (task.pr_number) {
-        // PR number already set on the task — already created.
-        prCreated = true;
       }
 
-      if (prCreated || task.pr_number) {
+      if (prNumber) {
+        insertTaskEvent(
+          task.id,
+          'recovery',
+          `Orchestrator recovered: branch verified (checkpoint), PR #${prNumber} created/found. Transitioning to in-review.`
+        );
+
         try {
           await forgejo.commentOnIssue(
             repo,
@@ -304,7 +313,12 @@ async function recoverTask(
           );
         } catch { /* best effort */ }
 
-        updateTask(task.id, { status: 'in-review', container_id: null });
+        // Merge pr_number persistence and status transition into one atomic update.
+        updateTask(task.id, {
+          ...(task.pr_number ? {} : { pr_number: prNumber }),
+          status: 'in-review',
+          container_id: null,
+        });
         return;
       }
 
