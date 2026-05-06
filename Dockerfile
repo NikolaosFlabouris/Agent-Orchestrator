@@ -32,6 +32,10 @@ RUN npm run build -w packages/ui
 COPY packages/server ./packages/server
 RUN npm run build -w packages/server
 
+# Ship the seed script alongside the server so `npm run seed:tools` (which
+# `docker exec`s into this container) can find it at /app/scripts.
+COPY scripts ./scripts
+
 ENV UI_STATIC_PATH=/app/packages/ui/dist
 ENV DATA_DIR=/data
 

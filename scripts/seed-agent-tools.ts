@@ -11,12 +11,17 @@
  * tools share another).
  *
  * Usage:
- *   npm run seed:tools                  (inside orchestrator container or local node env)
- *   docker compose exec orchestrator node /app/scripts/seed-agent-tools.js --force
+ *   npm run seed:tools                                                  (host wrapper that docker-execs into the container)
+ *   npm run seed:tools -- --force                                       (upsert all rows)
+ *   docker exec orchestrator npx tsx scripts/seed-agent-tools.ts        (equivalent direct invocation)
  *
- * The script writes to the same SQLite file the server reads from
- * (DATA_DIR / DB_PATH). Run after the server has started at least once so
- * the schema is initialized.
+ * The script writes to /data/orchestrator.db inside the container (the
+ * orchestrator-data named volume). Run after the server has started at least
+ * once so the schema is initialized — the script verifies the providers and
+ * agent_tools tables exist and exits with a clear error otherwise.
+ *
+ * For non-Docker dev (running `npm run dev` locally against a host SQLite
+ * file), invoke directly: `npx tsx scripts/seed-agent-tools.ts`.
  */
 import Database from 'better-sqlite3';
 import path from 'node:path';
