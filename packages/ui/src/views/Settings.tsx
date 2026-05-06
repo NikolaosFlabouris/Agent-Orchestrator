@@ -23,7 +23,7 @@ export function Settings() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      <header className="sticky top-0 z-10 border-b border-gray-800 bg-gray-900 px-6 py-4">
+      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
         <div className="flex items-center justify-between">
           <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
             &larr; Dashboard

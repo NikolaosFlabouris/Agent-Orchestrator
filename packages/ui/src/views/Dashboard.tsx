@@ -93,7 +93,7 @@ export function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-gray-800 bg-gray-900 px-6 py-4">
+      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">Agent Orchestrator</h1>
           <div className="flex items-center gap-6 text-sm">
