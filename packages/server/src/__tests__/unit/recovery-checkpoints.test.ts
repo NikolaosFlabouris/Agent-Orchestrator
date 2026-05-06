@@ -228,3 +228,62 @@ describe('recoverTask — both verify-push and create-pr checkpoints exist', () 
     );
   });
 });
+
+describe('recoverTask — verify-push checkpoint with branch_exists: false, no create-pr checkpoint', () => {
+  it('does not call createPullRequest and does not transition to in-review', async () => {
+    const task = mkTask({ status: 'in-progress', container_id: null });
+
+    // Plant a verify-push checkpoint indicating the branch was NOT pushed.
+    // This means the crash happened before salvage-local ran.
+    recordStep(task.id, task.attempt, 'verify-push', {
+      branch_exists: false,
+      branch_sha: null,
+      base_sha: 'base000',
+    });
+
+    // No create-pr checkpoint.
+
+    const createPullRequest = vi.fn().mockResolvedValue({ number: 42, body: 'Closes #10' });
+
+    // The fallback derivation will inspect the branch on Forgejo and the
+    // local workspace.  Return no branch and no local changes so the task
+    // falls through to resetToQueued.
+    const getBranch = vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }));
+    mocks.detectChanges.mockReturnValue({
+      hasUncommitted: false,
+      hasUntracked: false,
+      hasLocalCommits: false,
+    });
+
+    const forgejo = {
+      getCurrentUser: vi.fn().mockResolvedValue({ login: 'bot' }),
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch,
+      createPullRequest,
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const scheduler = {
+      pause: vi.fn(),
+      processCompletedTask: vi.fn(),
+    } as any;
+
+    mocks.getTasks.mockImplementation(({ status }: { status: string }) =>
+      status === 'in-progress' ? [task] : []
+    );
+
+    await onStartup(forgejo, scheduler, silentLog);
+
+    // PR must NOT be created — the branch doesn't exist on the remote yet.
+    expect(createPullRequest).not.toHaveBeenCalled();
+
+    // Task must NOT be moved to in-review without a valid branch/PR.
+    const inReviewCall = mocks.updateTask.mock.calls.find(
+      (call: unknown[]) =>
+        typeof call[1] === 'object' &&
+        call[1] !== null &&
+        (call[1] as Record<string, unknown>).status === 'in-review'
+    );
+    expect(inReviewCall).toBeUndefined();
+  });
+});

@@ -242,50 +242,76 @@ async function recoverTask(
 
   if (verifiedCheckpoint) {
     // verify-push completed but create-pr did not — crash between push
-    // verification and PR creation.  Skip branch derivation and go straight
-    // to creating the PR.
-    log.info(
-      { event: 'recovery_checkpoint_verified_no_pr', task_id: task.id },
-      'Checkpoint: branch verified but PR not yet created. Creating PR.'
-    );
+    // verification and PR creation.
 
-    if (task.status === 'in-progress' && !task.pr_number) {
-      try {
-        let issueTitle: string;
-        try {
-          const issue = await forgejo.getIssue(repo, task.issue_id);
-          issueTitle = issue.title;
-        } catch {
-          issueTitle = `Issue #${task.issue_id}`;
-        }
-        const pr = await forgejo.createPullRequest(repo, {
-          title: issueTitle,
-          body: buildPullRequestBody({
-            issue_id: task.issue_id,
-            attempt: task.attempt,
-          }),
-          head: task.branch_name,
-          base: repo.base_branch,
-        });
-        updateTask(task.id, { pr_number: pr.number });
-      } catch (err) {
-        log.error(
-          { event: 'recovery_pr_creation_failed', task_id: task.id, err },
-          'Failed to create PR during recovery (checkpoint path)'
-        );
-      }
-    }
-
-    try {
-      await forgejo.commentOnIssue(
-        repo,
-        task.issue_id,
-        'Orchestrator recovered after restart. Agent work found on branch. Continuing to review.'
+    if (!verifiedCheckpoint.branch_exists) {
+      // The verify-push step recorded that the branch did NOT exist on the
+      // remote when it ran (e.g. the salvage-local step also hadn't run yet).
+      // We cannot create a PR against a branch that doesn't exist — fall
+      // through to the existing derivation logic which will salvage local work
+      // or re-queue the task.
+      log.info(
+        { event: 'recovery_checkpoint_branch_not_pushed', task_id: task.id },
+        'Checkpoint: branch was not pushed yet. Falling through to derivation logic.'
       );
-    } catch { /* best effort */ }
+      // Fall through — do NOT return here.
+    } else {
+      // Branch exists on remote.  Skip branch derivation and go straight
+      // to creating the PR.
+      log.info(
+        { event: 'recovery_checkpoint_verified_no_pr', task_id: task.id },
+        'Checkpoint: branch verified but PR not yet created. Creating PR.'
+      );
 
-    updateTask(task.id, { status: 'in-review', container_id: null });
-    return;
+      let prCreated = false;
+      if (task.status === 'in-progress' && !task.pr_number) {
+        try {
+          let issueTitle: string;
+          try {
+            const issue = await forgejo.getIssue(repo, task.issue_id);
+            issueTitle = issue.title;
+          } catch {
+            issueTitle = `Issue #${task.issue_id}`;
+          }
+          const pr = await forgejo.createPullRequest(repo, {
+            title: issueTitle,
+            body: buildPullRequestBody({
+              issue_id: task.issue_id,
+              attempt: task.attempt,
+            }),
+            head: task.branch_name,
+            base: repo.base_branch,
+          });
+          updateTask(task.id, { pr_number: pr.number });
+          prCreated = true;
+        } catch (err) {
+          log.error(
+            { event: 'recovery_pr_creation_failed', task_id: task.id, err },
+            'Failed to create PR during recovery (checkpoint path)'
+          );
+        }
+      } else if (task.pr_number) {
+        // PR number already set on the task — already created.
+        prCreated = true;
+      }
+
+      if (prCreated || task.pr_number) {
+        try {
+          await forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            'Orchestrator recovered after restart. Agent work found on branch. Continuing to review.'
+          );
+        } catch { /* best effort */ }
+
+        updateTask(task.id, { status: 'in-review', container_id: null });
+        return;
+      }
+
+      // PR creation failed — fall through to re-queue
+      resetToQueued(task, 'PR creation failed during recovery.', forgejo, log);
+      return;
+    }
   }
 
   // ── Fallback: existing derivation logic ────────────────────────────────

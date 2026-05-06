@@ -149,9 +149,9 @@ export async function postDevAgent(
     // Commit any uncommitted/untracked work and force-push.  Idempotent: if
     // the push already completed in a previous run the step is skipped via
     // the checkpoint cache.
-    let salvageResult: { pushed: boolean; reason: 'salvaged' | 'no_work' };
+    let salvageResult: { pushed: true; reason: 'salvaged' };
     try {
-      salvageResult = await runStep<{ pushed: boolean; reason: 'salvaged' | 'no_work' }>(
+      salvageResult = await runStep<{ pushed: true; reason: 'salvaged' }>(
         task.id,
         task.attempt,
         'salvage-local',
