@@ -264,7 +264,7 @@ async function recoverTask(
       );
 
       let prCreated = false;
-      if (task.status === 'in-progress' && !task.pr_number) {
+      if ((task.status === 'in-progress' || task.status === 'preparing') && !task.pr_number) {
         try {
           let issueTitle: string;
           try {

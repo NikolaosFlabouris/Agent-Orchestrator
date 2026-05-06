@@ -208,8 +208,20 @@ describe('postDevAgent — create-pr idempotency', () => {
     await postDevAgent(task, forgejo, silentLog);
     expect(createPullRequest).toHaveBeenCalledTimes(1);
 
+    // Count 'pr_created' events after first run — should be exactly 1
+    const prCreatedCallsAfterFirst = mocks.recordTaskEvent.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'pr_created'
+    ).length;
+    expect(prCreatedCallsAfterFirst).toBe(1);
+
     // Second run — PR creation is checkpointed; should NOT be called again
     await postDevAgent(task, forgejo, silentLog);
     expect(createPullRequest).toHaveBeenCalledTimes(1);
+
+    // 'pr_created' must still have been recorded only once total across both runs
+    const prCreatedCallsAfterSecond = mocks.recordTaskEvent.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'pr_created'
+    ).length;
+    expect(prCreatedCallsAfterSecond).toBe(1);
   });
 });

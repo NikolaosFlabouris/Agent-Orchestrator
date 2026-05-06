@@ -13,7 +13,7 @@ import {
   getWorkdir,
   detectChanges,
 } from '../workspace.js';
-import { runStep } from '../checkpoints.js';
+import { runStep, getStep } from '../checkpoints.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -149,9 +149,17 @@ export async function postDevAgent(
     // Commit any uncommitted/untracked work and force-push.  Idempotent: if
     // the push already completed in a previous run the step is skipped via
     // the checkpoint cache.
-    let salvageResult: { pushed: true; reason: 'salvaged' };
+    //
+    // reason='salvaged' means a commit was actually needed; 'no_work' means
+    // commits already existed locally and we just force-pushed them.
+    let salvageResult: { pushed: boolean; reason: 'salvaged' | 'no_work' };
+    const alreadySalvaged = getStep<{ pushed: boolean; reason: 'salvaged' | 'no_work' }>(
+      task.id,
+      task.attempt,
+      'salvage-local'
+    );
     try {
-      salvageResult = await runStep<{ pushed: true; reason: 'salvaged' }>(
+      salvageResult = await runStep<{ pushed: boolean; reason: 'salvaged' | 'no_work' }>(
         task.id,
         task.attempt,
         'salvage-local',
@@ -160,7 +168,9 @@ export async function postDevAgent(
           // still does the right thing.
           const innerChanges = detectChanges(task, repo.base_branch, log);
 
+          let committedNewWork = false;
           if (innerChanges.hasUncommitted || innerChanges.hasUntracked) {
+            committedNewWork = true;
             try {
               execFileSync('git', ['add', '-A'], {
                 cwd: workdir,
@@ -220,7 +230,7 @@ export async function postDevAgent(
             throw new Error('Salvage push failed after retries');
           }
 
-          return { pushed: true, reason: 'salvaged' as const };
+          return { pushed: true, reason: committedNewWork ? 'salvaged' as const : 'no_work' as const };
         }
       );
     } catch (err) {
@@ -242,7 +252,10 @@ export async function postDevAgent(
       return false;
     }
 
-    if (salvageResult.pushed) {
+    // Only record the side-effect event when this run freshly executed the
+    // salvage step (not on replay of a cached checkpoint) AND a commit was
+    // actually needed.
+    if (!alreadySalvaged && salvageResult.reason === 'salvaged') {
       recordTaskEvent(task.id, 'work_salvaged', 'Local work salvaged and pushed to remote');
       log.info(
         { event: 'work_salvaged', task_id: task.id },
@@ -258,6 +271,13 @@ export async function postDevAgent(
   // straight to creating the PR.
   try {
     if (task.pr_number === null || task.pr_number === undefined) {
+      // Pre-check before runStep so we can skip side-effects on replay.
+      const alreadyCreated = getStep<{ pr_number: number; created: boolean }>(
+        task.id,
+        task.attempt,
+        'create-pr'
+      );
+
       const createResult = await runStep<{ pr_number: number; created: boolean }>(
         task.id,
         task.attempt,
@@ -276,43 +296,46 @@ export async function postDevAgent(
         }
       );
 
-      if (createResult.created) {
+      // Only record side-effects when this run freshly executed the create
+      // step (not on replay of a cached checkpoint).
+      if (!alreadyCreated) {
         updateTask(task.id, { pr_number: createResult.pr_number });
         recordTaskEvent(task.id, 'pr_created', `Pull request #${createResult.pr_number} created`);
         log.info(
           { event: 'pr_created', task_id: task.id, pr_number: createResult.pr_number },
           'Pull request created'
         );
-      }
 
-      // Verify the closing-keyword link made it into the PR body. A correctly
-      // behaved Forgejo returns the body verbatim, so this should always be
-      // true — but if a server-side filter or a future code path stripped it,
-      // we repair before relying on the link downstream.
-      try {
-        const pr = await forgejo.getPullRequest(repo, createResult.pr_number);
-        if (!hasIssueLink(pr.body, task.issue_id)) {
-          const repaired = ensureIssueLink(pr.body, task.issue_id);
-          try {
-            await forgejo.updatePullRequest(repo, pr.number, { body: repaired });
-            recordTaskEvent(
-              task.id,
-              'pr_issue_link_repaired',
-              `Restored \`Closes #${task.issue_id}\` link on PR #${pr.number}`
-            );
-            log.warn(
-              { event: 'pr_issue_link_missing', task_id: task.id, pr_number: pr.number },
-              'PR body missing issue link after create — repaired'
-            );
-          } catch (err) {
-            log.error(
-              { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
-              'Failed to repair missing PR↔issue link'
-            );
+        // Verify the closing-keyword link made it into the PR body. A correctly
+        // behaved Forgejo returns the body verbatim, so this should always be
+        // true — but if a server-side filter or a future code path stripped it,
+        // we repair before relying on the link downstream.
+        // This check is only relevant immediately after creation (not on replay).
+        try {
+          const pr = await forgejo.getPullRequest(repo, createResult.pr_number);
+          if (!hasIssueLink(pr.body, task.issue_id)) {
+            const repaired = ensureIssueLink(pr.body, task.issue_id);
+            try {
+              await forgejo.updatePullRequest(repo, pr.number, { body: repaired });
+              recordTaskEvent(
+                task.id,
+                'pr_issue_link_repaired',
+                `Restored \`Closes #${task.issue_id}\` link on PR #${pr.number}`
+              );
+              log.warn(
+                { event: 'pr_issue_link_missing', task_id: task.id, pr_number: pr.number },
+                'PR body missing issue link after create — repaired'
+              );
+            } catch (err) {
+              log.error(
+                { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
+                'Failed to repair missing PR↔issue link'
+              );
+            }
           }
+        } catch {
+          // Best effort — link check failure is non-fatal
         }
-      } catch {
-        // Best effort — link check failure is non-fatal
       }
     } else {
       // Rework path: ensure the existing PR still links to the issue even if
