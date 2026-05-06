@@ -129,3 +129,12 @@ export interface TaskEvent {
   message: string;
   created_at: string;
 }
+
+export interface TaskStep {
+  id: number;
+  task_id: number;
+  attempt_number: number;
+  step_name: string;
+  result: unknown;
+  completed_at: string;
+}

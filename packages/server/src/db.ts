@@ -12,7 +12,7 @@ import type {
   SettingsKey,
 } from '@orchestrator/shared';
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 6;
 
 let _db: Database.Database;
 
@@ -151,6 +151,19 @@ function createTables(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
+
+    CREATE TABLE IF NOT EXISTS task_steps (
+      id INTEGER PRIMARY KEY,
+      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      attempt_number INTEGER NOT NULL,
+      step_name TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(task_id, attempt_number, step_name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_steps_task_attempt
+      ON task_steps(task_id, attempt_number);
   `);
 }
 
@@ -252,6 +265,27 @@ function runMigrations(db: Database.Database): void {
       }
     }
     db.prepare("UPDATE settings SET value = '5' WHERE key = 'schema_version'").run();
+  }
+
+  if (version < 6) {
+    // Step-checkpoint table for idempotent orchestrator operations.
+    // Both new installs (via createTables) and existing databases go through
+    // this path — CREATE TABLE IF NOT EXISTS makes it safe to run twice.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS task_steps (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER NOT NULL REFERENCES tasks(id),
+        attempt_number INTEGER NOT NULL,
+        step_name TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(task_id, attempt_number, step_name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_task_steps_task_attempt
+        ON task_steps(task_id, attempt_number);
+    `);
+    db.prepare("UPDATE settings SET value = '6' WHERE key = 'schema_version'").run();
   }
 }
 
