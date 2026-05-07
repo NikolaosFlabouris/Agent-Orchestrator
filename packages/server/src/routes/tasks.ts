@@ -18,7 +18,7 @@ import { cancelTask, resetTask, requeueTask, extendTask } from '../actions.js';
 import { updateTaskWithSync, notifyTaskCreated, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
-import { getSnapshot } from '../forgejo-snapshot.js';
+import { getSnapshot, warmRepoSnapshots } from '../forgejo-snapshot.js';
 import { deriveStatus } from '../status-derivation.js';
 import {
   computeTaskHealth,
@@ -71,6 +71,24 @@ export function createTaskRoutes(
       // every dashboard refresh. Best-effort: on failure, health degrades
       // gracefully to 'healthy' (we'd rather mislabel than block the UI).
       const managedIds = await loadManagedContainerIds(log);
+
+      // Batch-warm the Forgejo snapshot cache one repo at a time. Without
+      // this, enrichTaskWithDerivation below would issue 1–2 Forgejo HTTP
+      // calls per task (getIssue + optional getPullRequest). With it, we do
+      // at most 2 paginated list calls per repo regardless of task count,
+      // and the per-task `getSnapshot` calls hit warm cache.
+      const tasksByRepo = new Map<number, typeof allTasks>();
+      for (const t of allTasks) {
+        const arr = tasksByRepo.get(t.repo_id);
+        if (arr) arr.push(t);
+        else tasksByRepo.set(t.repo_id, [t]);
+      }
+      await Promise.all(
+        Array.from(tasksByRepo.entries()).map(async ([repoId, tasks]) => {
+          const repo = getRepo(repoId);
+          if (repo) await warmRepoSnapshots(repo, tasks, forgejo, log);
+        })
+      );
 
       const enriched = await Promise.all(
         allTasks.map((t) =>

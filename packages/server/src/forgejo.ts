@@ -162,11 +162,18 @@ export class ForgejoClient {
 
   async listIssues(
     repo: Repo,
-    params?: { state?: 'open' | 'closed'; labels?: string }
+    params?: {
+      state?: 'open' | 'closed' | 'all';
+      labels?: string;
+      page?: number;
+      limit?: number;
+    }
   ): Promise<ForgejoIssue[]> {
     const qs = new URLSearchParams({ type: 'issues' });
     if (params?.state) qs.set('state', params.state);
     if (params?.labels) qs.set('labels', params.labels);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.limit !== undefined) qs.set('limit', String(params.limit));
     return this.request<ForgejoIssue[]>(
       'GET',
       `${this.repoPath(repo)}/issues?${qs.toString()}`
@@ -335,6 +342,25 @@ export class ForgejoClient {
     return this.request<ForgejoPullRequest>(
       'GET',
       `${this.repoPath(repo)}/pulls/${prNumber}`
+    );
+  }
+
+  async listPullRequests(
+    repo: Repo,
+    params?: {
+      state?: 'open' | 'closed' | 'all';
+      page?: number;
+      limit?: number;
+    }
+  ): Promise<ForgejoPullRequest[]> {
+    const qs = new URLSearchParams();
+    if (params?.state) qs.set('state', params.state);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+    const query = qs.toString();
+    return this.request<ForgejoPullRequest[]>(
+      'GET',
+      `${this.repoPath(repo)}/pulls${query ? `?${query}` : ''}`
     );
   }
 
