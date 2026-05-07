@@ -544,6 +544,19 @@ export class Scheduler {
       status: 'in-progress',
     });
 
+    try {
+      const repo = getRepo(task.repo_id);
+      if (repo) {
+        await this.forgejo.commentOnIssue(
+          repo,
+          task.issue_id,
+          `Dev agent starting (attempt ${task.attempt}/${task.max_attempts ?? 3}).`
+        );
+      }
+    } catch {
+      /* best effort */
+    }
+
     // Record attempt
     const attempt = insertAttempt({
       task_id: task.id,
@@ -627,6 +640,19 @@ export class Scheduler {
       container_id: container.id,
       status: 'in-review',
     });
+
+    try {
+      const repo = getRepo(task.repo_id);
+      if (repo) {
+        await this.forgejo.commentOnIssue(
+          repo,
+          task.issue_id,
+          `Review agent starting (attempt ${task.attempt}/${task.max_attempts ?? 3}).`
+        );
+      }
+    } catch {
+      /* best effort */
+    }
 
     // Record attempt
     const attempt = insertAttempt({

@@ -271,6 +271,15 @@ export async function postDevAgent(
     // case and the "local commits existed but were never pushed" case.
     if (!alreadySalvaged && salvageResult.pushed === true) {
       recordTaskEvent(task.id, 'work_salvaged', 'Local work salvaged and pushed to remote');
+      try {
+        await forgejo.commentOnIssue(
+          repo,
+          task.issue_id,
+          `Orchestrator salvaged uncommitted local work and pushed to branch \`${task.branch_name}\`.`
+        );
+      } catch {
+        /* best effort */
+      }
       log.info(
         { event: 'work_salvaged', task_id: task.id },
         'Local work salvaged and pushed'
@@ -321,6 +330,15 @@ export async function postDevAgent(
       // create step (not on replay of a cached checkpoint).
       if (!alreadyCreated) {
         recordTaskEvent(task.id, 'pr_created', `Pull request #${createResult.pr_number} created`);
+        try {
+          await forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            `Pull request #${createResult.pr_number} opened.`
+          );
+        } catch {
+          /* best effort */
+        }
         log.info(
           { event: 'pr_created', task_id: task.id, pr_number: createResult.pr_number },
           'Pull request created'
@@ -372,50 +390,68 @@ export async function postDevAgent(
         // true — but if a server-side filter or a future code path stripped it,
         // we repair before relying on the link downstream.
         // This check is only relevant immediately after creation (not on replay).
-        if (createdPr && !hasIssueLink(createdPr.body, task.issue_id)) {
-          const repaired = ensureIssueLink(createdPr.body, task.issue_id);
-          try {
-            await forgejo.updatePullRequest(repo, createdPr.number, { body: repaired });
-            recordTaskEvent(
-              task.id,
-              'pr_issue_link_repaired',
-              `Restored \`Closes #${task.issue_id}\` link on PR #${createdPr.number}`
-            );
-            log.warn(
-              { event: 'pr_issue_link_missing', task_id: task.id, pr_number: createdPr.number },
-              'PR body missing issue link after create — repaired'
-            );
-          } catch (err) {
-            log.error(
-              { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
-              'Failed to repair missing PR↔issue link'
-            );
-          }
-        }
+         if (createdPr && !hasIssueLink(createdPr.body, task.issue_id)) {
+           const repaired = ensureIssueLink(createdPr.body, task.issue_id);
+           try {
+             await forgejo.updatePullRequest(repo, createdPr.number, { body: repaired });
+             recordTaskEvent(
+               task.id,
+               'pr_issue_link_repaired',
+               `Restored \`Closes #${task.issue_id}\` link on PR #${createdPr.number}`
+             );
+             try {
+               await forgejo.commentOnIssue(
+                 repo,
+                 task.issue_id,
+                 `Restored closing-keyword link to this issue on PR #${createdPr.number} (it was missing from the agent-authored PR body).`
+               );
+             } catch {
+               /* best effort */
+             }
+             log.warn(
+               { event: 'pr_issue_link_missing', task_id: task.id, pr_number: createdPr.number },
+               'PR body missing issue link after create — repaired'
+             );
+           } catch (err) {
+             log.error(
+               { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
+               'Failed to repair missing PR↔issue link'
+             );
+           }
+         }
       }
     } else {
       // Rework path: ensure the existing PR still links to the issue even if
       // a human (or future automation) edited the body. Read it back, and if
       // the link is missing, re-apply via PATCH; otherwise leave untouched.
-      try {
-        const existing = await forgejo.getPullRequest(repo, task.pr_number);
-        if (!hasIssueLink(existing.body, task.issue_id)) {
-          const repaired = ensureIssueLink(existing.body, task.issue_id);
-          await forgejo.updatePullRequest(repo, task.pr_number, {
-            body: repaired,
-          });
-          recordTaskEvent(
-            task.id,
-            'pr_issue_link_repaired',
-            `Restored \`Closes #${task.issue_id}\` link on PR #${task.pr_number}`
-          );
-        }
-      } catch (err) {
-        log.warn(
-          { event: 'pr_link_check_failed', task_id: task.id, err },
-          'Could not verify existing PR body — skipping link check'
-        );
-      }
+       try {
+         const existing = await forgejo.getPullRequest(repo, task.pr_number);
+         if (!hasIssueLink(existing.body, task.issue_id)) {
+           const repaired = ensureIssueLink(existing.body, task.issue_id);
+           await forgejo.updatePullRequest(repo, task.pr_number, {
+             body: repaired,
+           });
+           recordTaskEvent(
+             task.id,
+             'pr_issue_link_repaired',
+             `Restored \`Closes #${task.issue_id}\` link on PR #${task.pr_number}`
+           );
+           try {
+             await forgejo.commentOnIssue(
+               repo,
+               task.issue_id,
+               `Restored closing-keyword link to this issue on PR #${task.pr_number} (it was missing from the agent-authored PR body).`
+             );
+           } catch {
+             /* best effort */
+           }
+         }
+       } catch (err) {
+         log.warn(
+           { event: 'pr_link_check_failed', task_id: task.id, err },
+           'Could not verify existing PR body — skipping link check'
+         );
+       }
 
       try {
         await forgejo.commentOnIssue(

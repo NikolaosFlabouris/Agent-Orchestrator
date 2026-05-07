@@ -181,18 +181,32 @@ export async function recoverReviewOrphan(
     return;
   }
 
-  updateTaskWithSync(task.id, {
-    attempt: nextAttempt,
-    container_id: null,
-    // status stays 'in-review' — fillSlots (queue.ts:26) already prioritises
-    // in-review tasks without a container.
-  });
+    updateTaskWithSync(task.id, {
+      attempt: nextAttempt,
+      container_id: null,
+      // status stays 'in-review' — fillSlots (queue.ts:26) already prioritises
+      // in-review tasks without a container.
+    });
 
-  recordTaskEvent(
-    task.id,
-    'orphan_recovery_triggered',
-    `Review orphan recovered — relaunching review (attempt ${nextAttempt}/${maxAttempts})`
-  );
+    try {
+      const repo = getRepo(task.repo_id);
+      if (repo) {
+        await forgejo.commentOnIssue(
+          repo,
+          task.issue_id,
+          `Orphan recovery: review container disappeared. Relaunching review agent (attempt ${nextAttempt}/${maxAttempts}).`
+        );
+      }
+    } catch {
+      /* best effort */
+    }
+
+    recordTaskEvent(
+      task.id,
+      'orphan_recovery_triggered',
+      `Review orphan recovered — relaunching review (attempt ${nextAttempt}/${maxAttempts})`
+    );
+
   log.info(
     {
       event: 'orphan_recovered_review',
@@ -257,6 +271,19 @@ export async function recoverDevOrphan(
     incrementAttempt: true,
     requeue: true,
   });
+
+  try {
+    const repo = getRepo(task.repo_id);
+    if (repo) {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Orphan recovery: dev container disappeared. Relaunching dev agent (attempt ${nextAttempt}/${maxAttempts}).`
+      );
+    }
+  } catch {
+    /* best effort */
+  }
 
   recordTaskEvent(
     task.id,

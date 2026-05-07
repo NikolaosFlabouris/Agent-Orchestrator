@@ -303,34 +303,33 @@ export function createTaskRoutes(
             return reply.status(400).send({ error: validation.error });
           }
 
-          const oldTool = task.agent_tool;
-          updateTaskWithSync(task.id, { agent_tool: newTool });
+           const oldTool = task.agent_tool;
+           updateTaskWithSync(task.id, { agent_tool: newTool });
+ 
+           const fromLabel = oldTool ?? '(repo default)';
+           const toLabel = newTool ?? '(repo default)';
+           recordTaskEvent(
+             task.id,
+             'agent_tool_changed',
+             `Agent tool changed from ${fromLabel} to ${toLabel}`
+           );
+ 
+           const repo = getRepo(task.repo_id);
+           if (repo) {
+             try {
+               await forgejo.commentOnIssue(
+                 repo,
+                 task.issue_id,
+                 `Agent tool changed to \`${newTool ?? 'repo default'}\` — takes effect on next attempt.`
+               );
+             } catch {
+               // Best effort
+             }
+           }
+ 
+           const updated = getTask(id)!;
+           return enrichTask(updated);
 
-          const fromLabel = oldTool ?? '(repo default)';
-          const toLabel = newTool ?? '(repo default)';
-          recordTaskEvent(
-            task.id,
-            'agent_tool_changed',
-            `Agent tool changed from ${fromLabel} to ${toLabel}`
-          );
-
-          if (ACTIVE_STATUSES.has(task.status)) {
-            const repo = getRepo(task.repo_id);
-            if (repo) {
-              try {
-                await forgejo.commentOnIssue(
-                  repo,
-                  task.issue_id,
-                  `Agent tool changed to \`${newTool ?? 'repo default'}\` — takes effect on next attempt.`
-                );
-              } catch {
-                // Best effort
-              }
-            }
-          }
-
-          const updated = getTask(id)!;
-          return enrichTask(updated);
         }
 
         const action = body?.action as string;
