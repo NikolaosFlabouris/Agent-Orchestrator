@@ -14,7 +14,7 @@ import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
-import { cancelTask, resetTask, requeueTask } from '../actions.js';
+import { cancelTask, resetTask, requeueTask, extendTask } from '../actions.js';
 import { updateTaskWithSync, notifyTaskCreated, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
@@ -47,6 +47,8 @@ const REQUEUEABLE_STATUSES = new Set([
   'reset',
   'cancelled',
 ]);
+
+const EXTENDABLE_STATUSES = new Set(['failed']);
 
 export function createTaskRoutes(
   forgejo: ForgejoClient,
@@ -356,7 +358,28 @@ export function createTaskRoutes(
             await requeueTask(task, forgejo, scheduler, log);
             break;
           }
- 
+
+          case 'extend': {
+            if (!EXTENDABLE_STATUSES.has(task.status)) {
+              return reply.status(400).send({
+                error: `Cannot extend task in state '${task.status}'. Valid states: ${[...EXTENDABLE_STATUSES].join(', ')}`,
+              });
+            }
+            const additional = body.additional_attempts;
+            if (
+              typeof additional !== 'number' ||
+              !Number.isInteger(additional) ||
+              additional < 1 ||
+              additional > 10
+            ) {
+              return reply.status(400).send({
+                error: 'additional_attempts must be an integer between 1 and 10',
+              });
+            }
+            await extendTask(task, forgejo, scheduler, log, additional);
+            break;
+          }
+
           case 'cancel': {
             if (TERMINAL_STATUSES.has(task.status)) {
 
