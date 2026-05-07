@@ -26,6 +26,7 @@ export function TaskDetail() {
   const [agentToolError, setAgentToolError] = useState<string | null>(null);
   const [extendModalOpen, setExtendModalOpen] = useState(false);
   const [extendAmount, setExtendAmount] = useState(1);
+  const [extendError, setExtendError] = useState<string | null>(null);
   const tools = useStore((s) => s.tools);
   const setTools = useStore((s) => s.setTools);
 
@@ -73,13 +74,14 @@ export function TaskDetail() {
   async function handleExtend() {
     if (!task || actionPending) return;
     setActionPending(true);
+    setExtendError(null);
     try {
       await api.patchTask(task.id, { action: 'extend', additional_attempts: extendAmount });
       const updated = await api.getTask(task.id);
       setTask(updated);
       setExtendModalOpen(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Extend failed');
+      setExtendError(err instanceof Error ? err.message : 'Extend failed');
     } finally {
       setActionPending(false);
     }
@@ -283,7 +285,7 @@ export function TaskDetail() {
            )}
            {EXTENDABLE_STATUSES.has(task.status) && (
              <button
-               onClick={() => { setExtendAmount(1); setExtendModalOpen(true); }}
+               onClick={() => { setExtendAmount(1); setExtendError(null); setExtendModalOpen(true); }}
                disabled={actionPending}
                className="text-sm px-3 py-1.5 rounded border border-orange-800 text-orange-400 hover:bg-orange-950 disabled:opacity-50"
              >
@@ -343,9 +345,12 @@ export function TaskDetail() {
             <p className="text-xs text-gray-500 mb-5">
               New max_attempts will be: <span className="text-gray-200 font-mono">{task.max_attempts + extendAmount}</span>
             </p>
+            {extendError && (
+              <p className="text-xs text-red-400 mb-3">{extendError}</p>
+            )}
             <div className="flex gap-3 justify-end">
               <button
-                onClick={() => setExtendModalOpen(false)}
+                onClick={() => { setExtendModalOpen(false); setExtendError(null); }}
                 disabled={actionPending}
                 className="text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
               >
