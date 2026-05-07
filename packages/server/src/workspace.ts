@@ -1,11 +1,15 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Task, AgentTool } from '@orchestrator/shared';
 import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 import { insertTaskEvent } from './db.js';
+
+const execFileP = promisify(execFile);
 
 const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
@@ -18,28 +22,33 @@ const AGENT_TOKEN = process.env.FORGEJO_AGENT_TOKEN ?? '';
 const AGENT_UID = 1000;
 const AGENT_GID = 1000;
 
-/** chown a directory tree to the agent user. No-op on non-Linux (chown is a
- *  Windows no-op in Node anyway). Safe to call on every prepare since chown is
- *  idempotent and cheap. */
-function chownRecursive(dir: string): void {
-  if (!fs.existsSync(dir)) return;
+/** chown a directory tree to the agent user. No-op on non-Linux platforms —
+ *  fs.chown is a no-op on Windows and the agent user mapping doesn't apply
+ *  there either. Async + parallel so a deep tree doesn't block the event loop.
+ *  Safe to call on every prepare since chown is idempotent and cheap. */
+async function chownRecursive(dir: string): Promise<void> {
+  if (process.platform !== 'linux') return;
+  let entries: fs.Dirent[];
   try {
-    fs.chownSync(dir, AGENT_UID, AGENT_GID);
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    await fsp.chown(dir, AGENT_UID, AGENT_GID);
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return; /* best effort — dir may not exist */
+  }
+  await Promise.all(
+    entries.map(async (entry) => {
       const child = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        chownRecursive(child);
+        await chownRecursive(child);
       } else {
         try {
-          fs.chownSync(child, AGENT_UID, AGENT_GID);
+          await fsp.chown(child, AGENT_UID, AGENT_GID);
         } catch {
           /* best effort — file may have vanished */
         }
       }
-    }
-  } catch {
-    /* best effort */
-  }
+    })
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -96,15 +105,19 @@ export function generateBranchName(issueId: number, title: string): string {
 // Git helpers
 // ---------------------------------------------------------------------------
 
-function git(args: string[], cwd: string, log: FastifyBaseLogger): string {
+async function git(
+  args: string[],
+  cwd: string,
+  log: FastifyBaseLogger
+): Promise<string> {
   log.debug({ event: 'git_exec', args, cwd }, `git ${args[0]}`);
   try {
-    return execFileSync('git', args, {
+    const { stdout } = await execFileP('git', args, {
       cwd,
       encoding: 'utf-8',
       timeout: 120_000, // 2 minute timeout for git operations
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    });
+    return stdout.trim();
   } catch (err: unknown) {
     const error = err as { stderr?: string; message?: string };
     const stderr = error.stderr ?? error.message ?? String(err);
@@ -125,7 +138,10 @@ function getAgentAuthUrl(repoOwner: string, repoName: string): string {
  * Verify and restore the workspace to a known-good git state.
  * Aborts stale rebase/merge, restores expected branch.
  */
-export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
+export async function verifyWorkspaceState(
+  task: Task,
+  log: FastifyBaseLogger
+): Promise<void> {
   const workdir = getWorkdir(task);
   if (!fs.existsSync(workdir)) return;
 
@@ -138,7 +154,7 @@ export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
     fs.existsSync(path.join(gitDir, 'rebase-apply'))
   ) {
     try {
-      git(['rebase', '--abort'], workdir, log);
+      await git(['rebase', '--abort'], workdir, log);
       log.warn(
         { event: 'rebase_aborted', task_id: task.id },
         'Aborted stale rebase left by agent'
@@ -151,7 +167,7 @@ export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
   // Abort any in-progress merge conflict
   if (fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))) {
     try {
-      git(['merge', '--abort'], workdir, log);
+      await git(['merge', '--abort'], workdir, log);
       log.warn(
         { event: 'merge_aborted', task_id: task.id },
         'Aborted stale merge left by agent'
@@ -164,22 +180,22 @@ export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
   // Ensure we're on the expected branch
   if (task.branch_name) {
     try {
-      const currentBranch = git(
+      const currentBranch = await git(
         ['branch', '--show-current'],
         workdir,
         log
       );
       if (currentBranch !== task.branch_name) {
         try {
-          git(['checkout', task.branch_name], workdir, log);
+          await git(['checkout', task.branch_name], workdir, log);
         } catch {
           // Branch doesn't exist locally — recreate from remote
-          git(
+          await git(
             ['fetch', 'origin', task.branch_name],
             workdir,
             log
           );
-          git(
+          await git(
             ['checkout', '-B', task.branch_name, `origin/${task.branch_name}`],
             workdir,
             log
@@ -209,10 +225,10 @@ export function verifyWorkspaceState(task: Task, log: FastifyBaseLogger): void {
  * Prepare the workspace for an agent container.
  * Clones if new, sets URL if existing, checks out branch.
  */
-export function prepareWorkspace(
+export async function prepareWorkspace(
   task: Task,
   log: FastifyBaseLogger
-): void {
+): Promise<void> {
   const repo = getRepo(task.repo_id);
   if (!repo) {
     throw new Error(`Repo not found for task ${task.id}`);
@@ -227,22 +243,21 @@ export function prepareWorkspace(
       { event: 'workspace_clone', task_id: task.id },
       'Cloning workspace'
     );
-    fs.mkdirSync(workdir, { recursive: true });
-    execFileSync('git', ['clone', authUrl, workdir], {
+    await fsp.mkdir(workdir, { recursive: true });
+    await execFileP('git', ['clone', authUrl, workdir], {
       encoding: 'utf-8',
       timeout: 300_000, // 5 minute timeout for clone
-      stdio: ['pipe', 'pipe', 'pipe'],
     });
     insertTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
   } else {
     // Workspace exists — update remote URL (token rotation)
-    git(['remote', 'set-url', 'origin', authUrl], workdir, log);
+    await git(['remote', 'set-url', 'origin', authUrl], workdir, log);
   }
 
   if (task.attempt === 1) {
     // New task: create branch from latest base
-    git(['fetch', 'origin', repo.base_branch], workdir, log);
-    git(
+    await git(['fetch', 'origin', repo.base_branch], workdir, log);
+    await git(
       ['checkout', '-B', task.branch_name!, `origin/${repo.base_branch}`],
       workdir,
       log
@@ -250,14 +265,14 @@ export function prepareWorkspace(
     insertTaskEvent(task.id, 'branch_created', `Branch ${task.branch_name} created from ${repo.base_branch}`);
   } else {
     // Rework: checkout the existing branch as-is
-    verifyWorkspaceState(task, log);
+    await verifyWorkspaceState(task, log);
     try {
-      git(['checkout', task.branch_name!], workdir, log);
+      await git(['checkout', task.branch_name!], workdir, log);
     } catch {
       // Local branch missing — try to recreate from remote
       try {
-        git(['fetch', 'origin', task.branch_name!], workdir, log);
-        git(
+        await git(['fetch', 'origin', task.branch_name!], workdir, log);
+        await git(
           [
             'checkout',
             '-B',
@@ -287,12 +302,12 @@ export function prepareWorkspace(
   // Ensure output and task dirs exist
   const taskDir = getTaskDir(task);
   const outputDir = getOutputDir(task);
-  fs.mkdirSync(taskDir, { recursive: true });
-  fs.mkdirSync(outputDir, { recursive: true });
+  await fsp.mkdir(taskDir, { recursive: true });
+  await fsp.mkdir(outputDir, { recursive: true });
 
   // Ensure cache directory exists
   const cacheDir = getCacheDir(repo.owner, repo.name);
-  fs.mkdirSync(cacheDir, { recursive: true });
+  await fsp.mkdir(cacheDir, { recursive: true });
 
   // Add orchestrator/agent metadata paths to the per-clone exclude list. These
   // are NOT in the upstream .gitignore (and shouldn't be — they're orchestrator
@@ -300,7 +315,7 @@ export function prepareWorkspace(
   // sweeps them into a commit and the resulting PR contains only orchestrator
   // metadata instead of real source changes. .git/info/exclude is local-only
   // (never committed, never pushed), so this is the right place.
-  writeLocalGitExclude(workdir, [
+  await writeLocalGitExclude(workdir, [
     '.task/',
     '.output/',
     'opencode.json',
@@ -311,8 +326,8 @@ export function prepareWorkspace(
   // git clone / mkdir above creates root-owned files; without this the agent
   // (UID 1000) can't write to /output/progress.log and the harness exits 2.
   // Idempotent — safe to run on every prepare (including reworks).
-  chownRecursive(workdir);
-  chownRecursive(cacheDir);
+  await chownRecursive(workdir);
+  await chownRecursive(cacheDir);
 
   log.info(
     { event: 'workspace_ready', task_id: task.id, workdir },
@@ -320,13 +335,16 @@ export function prepareWorkspace(
   );
 }
 
-function writeLocalGitExclude(workdir: string, patterns: string[]): void {
+async function writeLocalGitExclude(
+  workdir: string,
+  patterns: string[]
+): Promise<void> {
   const excludePath = path.join(workdir, '.git', 'info', 'exclude');
   try {
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    await fsp.mkdir(path.dirname(excludePath), { recursive: true });
     let existing = '';
     try {
-      existing = fs.readFileSync(excludePath, 'utf-8');
+      existing = await fsp.readFile(excludePath, 'utf-8');
     } catch {
       /* file doesn't exist yet */
     }
@@ -339,7 +357,7 @@ function writeLocalGitExclude(workdir: string, patterns: string[]): void {
       }
     }
     if (changed) {
-      fs.writeFileSync(
+      await fsp.writeFile(
         excludePath,
         Array.from(lines).filter(Boolean).join('\n') + '\n'
       );
@@ -363,11 +381,11 @@ function writeLocalGitExclude(workdir: string, patterns: string[]): void {
 // This is a per-tool concern but lives in workspace.ts so the file lands
 // before the agent container starts. Called from the scheduler.
 
-export function writeAgentConfigFile(
+export async function writeAgentConfigFile(
   task: Task,
   tool: AgentTool,
   log: FastifyBaseLogger
-): void {
+): Promise<void> {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(tool.env_vars || '{}');
@@ -382,11 +400,13 @@ export function writeAgentConfigFile(
 
   const target = path.join(getWorkdir(task), 'opencode.json');
   try {
-    fs.writeFileSync(target, JSON.stringify(parsed, null, 2));
-    try {
-      fs.chownSync(target, 1000, 1000);
-    } catch {
-      /* best effort on non-Linux */
+    await fsp.writeFile(target, JSON.stringify(parsed, null, 2));
+    if (process.platform === 'linux') {
+      try {
+        await fsp.chown(target, 1000, 1000);
+      } catch {
+        /* best effort */
+      }
     }
     log.info(
       { event: 'agent_config_written', task_id: task.id, tool_id: tool.id, path: target },
@@ -410,24 +430,24 @@ export interface ChangeDetection {
   hasLocalCommits: boolean;
 }
 
-export function detectChanges(
+export async function detectChanges(
   task: Task,
   baseBranch: string,
   log: FastifyBaseLogger
-): ChangeDetection {
+): Promise<ChangeDetection> {
   const workdir = getWorkdir(task);
 
   let hasUncommitted = false;
   try {
-    git(['diff', '--quiet'], workdir, log);
-    git(['diff', '--cached', '--quiet'], workdir, log);
+    await git(['diff', '--quiet'], workdir, log);
+    await git(['diff', '--cached', '--quiet'], workdir, log);
   } catch {
     hasUncommitted = true;
   }
 
   let hasUntracked = false;
   try {
-    const untracked = git(
+    const untracked = await git(
       ['ls-files', '--others', '--exclude-standard'],
       workdir,
       log
@@ -439,7 +459,7 @@ export function detectChanges(
 
   let hasLocalCommits = false;
   try {
-    const commits = git(
+    const commits = await git(
       ['log', `origin/${baseBranch}..HEAD`, '--oneline'],
       workdir,
       log

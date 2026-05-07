@@ -1,7 +1,11 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { Task } from '@orchestrator/shared';
+
+const execFileP = promisify(execFile);
 import { getTasks, getRepo, updateTask, insertTaskEvent } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import { buildPullRequestBody } from './forgejo-linking.js';
@@ -109,8 +113,8 @@ export async function onStartup(
             'Processing results from exited container'
           );
           try {
-            const result = readResult(task);
-            const role = readRole(task);
+            const result = await readResult(task);
+            const role = await readRole(task);
             await scheduler.processCompletedTask(task, result, role);
             await removeContainer(container);
           } catch {
@@ -427,7 +431,7 @@ async function recoverTask(
     // No branch on remote — check for local work
     const workdir = getWorkdir(task);
     if (fs.existsSync(path.join(workdir, '.git'))) {
-      const changes = detectChanges(task, repo.base_branch, log);
+      const changes = await detectChanges(task, repo.base_branch, log);
 
       if (
         changes.hasUncommitted ||
@@ -442,7 +446,7 @@ async function recoverTask(
 
         if (changes.hasUncommitted || changes.hasUntracked) {
           try {
-            execFileSync('git', ['add', '-A'], {
+            await execFileP('git', ['add', '-A'], {
               cwd: workdir,
               encoding: 'utf-8',
               timeout: 30_000,
@@ -456,7 +460,7 @@ async function recoverTask(
               issueTitle = `Issue #${task.issue_id}`;
             }
 
-            execFileSync(
+            await execFileP(
               'git',
               [
                 'commit',
@@ -483,7 +487,7 @@ async function recoverTask(
 
         // Push salvaged work
         try {
-          execFileSync(
+          await execFileP(
             'git',
             ['push', '-f', 'origin', task.branch_name],
             {
@@ -559,16 +563,16 @@ function resetToQueued(
 // File reading helpers
 // ---------------------------------------------------------------------------
 
-function readResult(task: Task): AgentResult {
+async function readResult(task: Task): Promise<AgentResult> {
   const outputDir = getOutputDir(task);
-  const raw = fs.readFileSync(path.join(outputDir, 'result.json'), 'utf-8');
+  const raw = await fsp.readFile(path.join(outputDir, 'result.json'), 'utf-8');
   return JSON.parse(raw);
 }
 
-function readRole(task: Task): 'develop' | 'review' {
+async function readRole(task: Task): Promise<'develop' | 'review'> {
   const taskDir = getTaskDir(task);
   try {
-    const raw = fs.readFileSync(path.join(taskDir, 'meta.json'), 'utf-8');
+    const raw = await fsp.readFile(path.join(taskDir, 'meta.json'), 'utf-8');
     const meta = JSON.parse(raw);
     return meta.role ?? 'develop';
   } catch {

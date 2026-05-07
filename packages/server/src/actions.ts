@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import type { Task } from '@orchestrator/shared';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { getRepo, getTask, updateTask, getDb } from './db.js';
@@ -153,17 +153,18 @@ export async function resetTask(
     }
   }
 
-  // 4. Delete local workspace
+  // 4. Delete local workspace. fsp.rm with force:true swallows ENOENT, so the
+  // existsSync pre-check is unnecessary and would block the event loop on a
+  // multi-GB workspace if we kept the sync rmSync. Async rm yields to libuv
+  // between syscalls.
   const workdir = getWorkdir(task);
-  if (fs.existsSync(workdir)) {
-    try {
-      fs.rmSync(workdir, { recursive: true, force: true });
-    } catch (err) {
-      log.warn(
-        { event: 'reset_workspace_delete_failed', task_id: task.id, err },
-        'Failed to delete workspace'
-      );
-    }
+  try {
+    await fsp.rm(workdir, { recursive: true, force: true });
+  } catch (err) {
+    log.warn(
+      { event: 'reset_workspace_delete_failed', task_id: task.id, err },
+      'Failed to delete workspace'
+    );
   }
 
   // 5. Remove status/* labels only (preserve human-merge, human-review, repo/* labels)

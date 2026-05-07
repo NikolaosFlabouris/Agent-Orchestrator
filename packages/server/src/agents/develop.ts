@@ -1,5 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { Task } from '@orchestrator/shared';
+
+const execFileP = promisify(execFile);
 import { getRepo, getTask, updateTask } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
@@ -42,7 +45,7 @@ export async function postDevAgent(
 
   const workdir = getWorkdir(task);
 
-  verifyWorkspaceState(task, log);
+  await verifyWorkspaceState(task, log);
 
   // ── Step 1: verify-push ──────────────────────────────────────────────────
   // Check whether the agent's branch exists on the remote and is ahead of
@@ -120,7 +123,7 @@ export async function postDevAgent(
     }
 
     // Check for local work to salvage
-    const changes = detectChanges(task, repo.base_branch, log);
+    const changes = await detectChanges(task, repo.base_branch, log);
 
     if (
       !changes.hasUncommitted &&
@@ -166,18 +169,18 @@ export async function postDevAgent(
         async () => {
           // Re-check changes inside the step so a re-run after a partial commit
           // still does the right thing.
-          const innerChanges = detectChanges(task, repo.base_branch, log);
+          const innerChanges = await detectChanges(task, repo.base_branch, log);
 
           let committedNewWork = false;
           if (innerChanges.hasUncommitted || innerChanges.hasUntracked) {
             committedNewWork = true;
             try {
-              execFileSync('git', ['add', '-A'], {
+              await execFileP('git', ['add', '-A'], {
                 cwd: workdir,
                 encoding: 'utf-8',
                 timeout: 30_000,
               });
-              execFileSync(
+              await execFileP(
                 'git',
                 [
                   'commit',
@@ -202,7 +205,7 @@ export async function postDevAgent(
           let pushSucceeded = false;
           for (let pushAttempt = 0; pushAttempt < 2; pushAttempt++) {
             try {
-              execFileSync(
+              await execFileP(
                 'git',
                 ['push', '-f', 'origin', task.branch_name!],
                 {

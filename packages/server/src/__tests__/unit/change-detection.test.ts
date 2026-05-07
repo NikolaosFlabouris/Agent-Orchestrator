@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 /**
  * Change detection logic tests.
  *
- * The actual detectChanges function calls git via execFileSync,
+ * The actual detectChanges function calls git via execFile (async),
  * so we test the logic patterns here against the three boolean signals:
  * hasUncommitted, hasUntracked, hasLocalCommits.
  *

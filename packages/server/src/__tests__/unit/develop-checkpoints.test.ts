@@ -130,7 +130,7 @@ beforeEach(() => {
   // Default: updateTask is a no-op
   mocks.updateTask.mockReturnValue(undefined);
   mocks.updateTaskWithSync.mockReturnValue(undefined);
-  mocks.verifyWorkspaceState.mockReturnValue(undefined);
+  mocks.verifyWorkspaceState.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------

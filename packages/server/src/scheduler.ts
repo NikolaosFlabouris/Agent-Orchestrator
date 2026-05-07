@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Task, Repo, AgentTool } from '@orchestrator/shared';
 import {
@@ -111,6 +112,13 @@ export class Scheduler {
   // container-wait callbacks. The orphan sweep must not re-enter itself —
   // a second sweep could double-finalise attempts. This flag serialises it.
   private orphanSweepInFlight = false;
+  // fillSlots is now async (workspace prep is async), so two concurrent ticks
+  // could both pick the same candidate from a stale DB read. Serialise it.
+  // Held only for the duration of the candidate-selection + launch loop, NOT
+  // for the rest of the tick (reconcileOrphans / checkCompletedContainers can
+  // still run in parallel with each other because they target disjoint task
+  // states from fillSlots).
+  private fillSlotsInFlight = false;
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -280,7 +288,7 @@ export class Scheduler {
     let result: AgentResult;
     const resultPath = path.join(outputDir, 'result.json');
     try {
-      const raw = fs.readFileSync(resultPath, 'utf-8');
+      const raw = await fsp.readFile(resultPath, 'utf-8');
       result = JSON.parse(raw) as AgentResult;
     } catch {
       this.log.warn(
@@ -294,7 +302,7 @@ export class Scheduler {
     let role: 'develop' | 'review' = 'develop';
     const metaPath = path.join(taskDir, 'meta.json');
     try {
-      const raw = fs.readFileSync(metaPath, 'utf-8');
+      const raw = await fsp.readFile(metaPath, 'utf-8');
       const meta = JSON.parse(raw) as TaskMeta;
       role = meta.role;
     } catch {
@@ -331,7 +339,21 @@ export class Scheduler {
 
   private async fillSlots(): Promise<void> {
     if (this.paused) return;
+    // Re-entry guard: a webhook-triggered tick that arrives mid-launch would
+    // otherwise read the same DB snapshot and pick the same candidate before
+    // the in-flight launch's updateTask has bumped the active count. Skipping
+    // is correct — the in-flight call will pick up any newly-queued work on
+    // its next pass, and the trailing tick can run on the next event.
+    if (this.fillSlotsInFlight) return;
+    this.fillSlotsInFlight = true;
+    try {
+      await this._fillSlotsInner();
+    } finally {
+      this.fillSlotsInFlight = false;
+    }
+  }
 
+  private async _fillSlotsInner(): Promise<void> {
     let available = getAvailableSlots();
     if (available <= 0) return;
 
@@ -482,22 +504,22 @@ export class Scheduler {
     }
 
     // Archive previous output
-    this.archivePreviousOutput(task);
+    await this.archivePreviousOutput(task);
 
     // Verify workspace state
-    verifyWorkspaceState(task, this.log);
+    await verifyWorkspaceState(task, this.log);
 
     // Update status to preparing
     updateTaskWithSync(task.id, { status: 'preparing' });
 
     // Prepare workspace
-    prepareWorkspace(task, this.log);
+    await prepareWorkspace(task, this.log);
 
     // Write task files
-    this.writeTaskFiles(task, repo, tool, issue, feedback);
+    await this.writeTaskFiles(task, repo, tool, issue, feedback);
 
     // Write tool-specific config file (e.g. opencode.json) into the workspace
-    writeAgentConfigFile(task, tool, this.log);
+    await writeAgentConfigFile(task, tool, this.log);
 
     // Resolve config
     const effective = this.resolveConfig(task, repo, tool);
@@ -564,7 +586,7 @@ export class Scheduler {
     const cacheDir = getCacheDir(repo.owner, repo.name);
 
     // Archive previous output
-    this.archivePreviousOutput(task);
+    await this.archivePreviousOutput(task);
 
     // Record pre-review SHA
     let preReviewSha: string | undefined;
@@ -579,10 +601,10 @@ export class Scheduler {
     }
 
     // Write task files
-    this.writeTaskFiles(task, repo, tool, issue, null, 'review');
+    await this.writeTaskFiles(task, repo, tool, issue, null, 'review');
 
     // Write tool-specific config file (e.g. opencode.json) into the workspace
-    writeAgentConfigFile(task, tool, this.log);
+    await writeAgentConfigFile(task, tool, this.log);
 
     // Resolve config
     const effective = this.resolveConfig(task, repo, tool);
@@ -701,7 +723,7 @@ export class Scheduler {
     task: Task,
     result: AgentResult
   ): Promise<void> {
-    this.completeAttempt(task, result);
+    await this.completeAttempt(task, result);
 
     if (result.status === 'success') {
       const ready = await postDevAgent(task, this.forgejo, this.log);
@@ -767,7 +789,7 @@ export class Scheduler {
     task: Task,
     result: AgentResult
   ): Promise<void> {
-    this.completeAttempt(task, result);
+    await this.completeAttempt(task, result);
 
     const state = activeState.get(task.id);
     const reviewRetryCount = state?.reviewRetryCount ?? 0;
@@ -797,7 +819,7 @@ export class Scheduler {
     const reviewPath = path.join(outputDir, 'review.json');
     let review: { verdict: 'approved' | 'changes_needed' | 'unclear'; summary?: string; feedback?: any };
     try {
-      const raw = fs.readFileSync(reviewPath, 'utf-8');
+      const raw = await fsp.readFile(reviewPath, 'utf-8');
       review = JSON.parse(raw);
       if (!review.verdict) throw new Error('No verdict field');
     } catch {
@@ -843,7 +865,7 @@ export class Scheduler {
 
   // ---- Attempt tracking ----
 
-  private completeAttempt(task: Task, result: AgentResult): void {
+  private async completeAttempt(task: Task, result: AgentResult): Promise<void> {
     let attemptId: number;
     const state = activeState.get(task.id);
 
@@ -855,7 +877,7 @@ export class Scheduler {
       const metaPath = path.join(getTaskDir(task), 'meta.json');
       let role: 'develop' | 'review' = 'develop';
       try {
-        const raw = fs.readFileSync(metaPath, 'utf-8');
+        const raw = await fsp.readFile(metaPath, 'utf-8');
         role = JSON.parse(raw).role ?? 'develop';
       } catch { /* default to develop */ }
 
@@ -882,15 +904,13 @@ export class Scheduler {
     let feedback: string | null = null;
     const outputDir = getOutputDir(task);
     const reviewPath = path.join(outputDir, 'review.json');
-    if (fs.existsSync(reviewPath)) {
-      try {
-        const raw = fs.readFileSync(reviewPath, 'utf-8');
-        const review = JSON.parse(raw);
-        verdict = review.verdict ?? null;
-        feedback = review.feedback ? JSON.stringify(review.feedback) : null;
-      } catch {
-        // Best effort
-      }
+    try {
+      const raw = await fsp.readFile(reviewPath, 'utf-8');
+      const review = JSON.parse(raw);
+      verdict = review.verdict ?? null;
+      feedback = review.feedback ? JSON.stringify(review.feedback) : null;
+    } catch {
+      // File missing or unreadable — leave verdict/feedback null.
     }
 
     // Map agent result status to attempt status
@@ -1056,16 +1076,16 @@ export class Scheduler {
     return env;
   }
 
-  private writeTaskFiles(
+  private async writeTaskFiles(
     task: Task,
     repo: Repo,
     tool: AgentTool,
     issue: { title: string; body: string },
     feedback: string | null = null,
     role: 'develop' | 'review' = 'develop'
-  ): void {
+  ): Promise<void> {
     const taskDir = getTaskDir(task);
-    fs.mkdirSync(taskDir, { recursive: true });
+    await fsp.mkdir(taskDir, { recursive: true });
 
     const effective = this.resolveConfig(task, repo, tool);
 
@@ -1077,7 +1097,7 @@ export class Scheduler {
     } else {
       prompt = buildReviewPrompt(task, repo, issue);
     }
-    fs.writeFileSync(promptPath, prompt, 'utf-8');
+    await fsp.writeFile(promptPath, prompt, 'utf-8');
 
     // Write meta.json
     const metaPath = path.join(taskDir, 'meta.json');
@@ -1095,13 +1115,14 @@ export class Scheduler {
       agent_tool: task.agent_tool ?? repo.agent_tool,
       agent_command: effective.command,
     };
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
   }
 
-  private archivePreviousOutput(task: Task): void {
+  private async archivePreviousOutput(task: Task): Promise<void> {
     const outputDir = getOutputDir(task);
     const resultPath = path.join(outputDir, 'result.json');
 
+    // Cheap single-stat early-return: nothing to archive if no prior result.
     if (!fs.existsSync(resultPath)) return;
 
     // Find archive dir name from attempt data
@@ -1110,13 +1131,18 @@ export class Scheduler {
     const archiveDir = path.join(archiveBase, archiveName);
 
     try {
-      fs.mkdirSync(archiveDir, { recursive: true });
+      await fsp.mkdir(archiveDir, { recursive: true });
 
       // Move files
       for (const file of ['result.json', 'progress.log', 'review.json']) {
         const src = path.join(outputDir, file);
-        if (fs.existsSync(src)) {
-          fs.renameSync(src, path.join(archiveDir, file));
+        try {
+          await fsp.rename(src, path.join(archiveDir, file));
+        } catch (err: unknown) {
+          // ENOENT — file was never produced this attempt; skip silently.
+          // Anything else propagates to the outer catch.
+          const code = (err as { code?: string } | null)?.code;
+          if (code !== 'ENOENT') throw err;
         }
       }
     } catch (err) {
