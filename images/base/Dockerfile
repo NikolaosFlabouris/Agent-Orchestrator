@@ -8,6 +8,14 @@ RUN apt-get update && apt-get install -y \
     gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
+# Git author identity for the dev agent's commits. The dev agent prompt tells
+# the agent to `git commit -m "..."` (see scheduler.ts). Without this, the
+# commit fails with "Please tell me who you are" and the agent leaves its
+# work uncommitted in the workspace. Distinct from the orchestrator's
+# salvage identity so commit authors reveal who actually committed.
+RUN git config --system user.email "agent@agent-orchestrator.local" \
+ && git config --system user.name "Coding Agent"
+
 # Node.js is required for Claude Agent SDK regardless of project language
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \

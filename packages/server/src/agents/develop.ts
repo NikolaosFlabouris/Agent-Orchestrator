@@ -194,10 +194,18 @@ export async function postDevAgent(
                 }
               );
             } catch (err) {
+              // Without a successful commit there is nothing new to push, so
+              // proceeding would force-push the unchanged branch and falsely
+              // report `work_salvaged`. Surface the failure to the outer catch
+              // so the task is marked failed and the operator sees a real
+              // diagnostic instead of an empty PR. Common cause: missing
+              // `user.email`/`user.name` git config in the orchestrator image.
+              const detail = err instanceof Error ? err.message : String(err);
               log.warn(
                 { event: 'salvage_commit_failed', task_id: task.id, err },
                 'Failed to commit salvaged work'
               );
+              throw new Error(`Salvage commit failed: ${detail}`);
             }
           }
 
@@ -237,6 +245,7 @@ export async function postDevAgent(
         }
       );
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
@@ -245,12 +254,12 @@ export async function postDevAgent(
         await forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          'Salvage push failed. Local work preserved in workspace.'
+          `Salvage failed: ${detail}. Local work preserved in workspace.`
         );
       } catch { /* best effort */ }
       log.error(
-        { event: 'salvage_push_failed', task_id: task.id, err },
-        'Salvage push failed after retries'
+        { event: 'salvage_failed', task_id: task.id, err },
+        'Salvage failed'
       );
       return false;
     }
@@ -317,35 +326,71 @@ export async function postDevAgent(
           'Pull request created'
         );
 
+        // Fetch the PR once to drive both the empty-diff check and the link
+        // repair. Failure to fetch is non-fatal for the link repair; the
+        // empty-diff check just doesn't run (the merge step has its own
+        // empty-diff guard as a backstop).
+        let createdPr: Awaited<ReturnType<typeof forgejo.getPullRequest>> | null = null;
+        try {
+          createdPr = await forgejo.getPullRequest(repo, createResult.pr_number);
+        } catch {
+          // Best effort — link check / empty check skipped
+        }
+
+        // Empty-PR guard: Forgejo cheerfully accepts a PR whose head has no
+        // net changes against base (e.g., an agent that pushes only reverts,
+        // or a future code path that creates a PR before any work is pushed).
+        // Such PRs report `mergeable: true` but `changed_files: 0`, so the
+        // merge endpoint returns 405 and the operator sees a confusing
+        // "Merge failed unexpectedly" message hours later. Fail here instead.
+        // The empty PR is left open so a human can inspect what happened.
+        if (createdPr && createdPr.changed_files === 0) {
+          updateTaskWithSync(task.id, {
+            status: 'failed',
+            completed_at: new Date().toISOString(),
+          });
+          try {
+            await forgejo.commentOnIssue(
+              repo,
+              task.issue_id,
+              `PR #${createResult.pr_number} has no changes against ${repo.base_branch} — nothing to review or merge. The branch was pushed but its diff is empty. PR left open for inspection; use Reset to retry.`
+            );
+          } catch { /* best effort */ }
+          log.error(
+            {
+              event: 'pr_empty_diff',
+              task_id: task.id,
+              pr_number: createResult.pr_number,
+            },
+            'Created PR has no changes against base — failing task'
+          );
+          return false;
+        }
+
         // Verify the closing-keyword link made it into the PR body. A correctly
         // behaved Forgejo returns the body verbatim, so this should always be
         // true — but if a server-side filter or a future code path stripped it,
         // we repair before relying on the link downstream.
         // This check is only relevant immediately after creation (not on replay).
-        try {
-          const pr = await forgejo.getPullRequest(repo, createResult.pr_number);
-          if (!hasIssueLink(pr.body, task.issue_id)) {
-            const repaired = ensureIssueLink(pr.body, task.issue_id);
-            try {
-              await forgejo.updatePullRequest(repo, pr.number, { body: repaired });
-              recordTaskEvent(
-                task.id,
-                'pr_issue_link_repaired',
-                `Restored \`Closes #${task.issue_id}\` link on PR #${pr.number}`
-              );
-              log.warn(
-                { event: 'pr_issue_link_missing', task_id: task.id, pr_number: pr.number },
-                'PR body missing issue link after create — repaired'
-              );
-            } catch (err) {
-              log.error(
-                { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
-                'Failed to repair missing PR↔issue link'
-              );
-            }
+        if (createdPr && !hasIssueLink(createdPr.body, task.issue_id)) {
+          const repaired = ensureIssueLink(createdPr.body, task.issue_id);
+          try {
+            await forgejo.updatePullRequest(repo, createdPr.number, { body: repaired });
+            recordTaskEvent(
+              task.id,
+              'pr_issue_link_repaired',
+              `Restored \`Closes #${task.issue_id}\` link on PR #${createdPr.number}`
+            );
+            log.warn(
+              { event: 'pr_issue_link_missing', task_id: task.id, pr_number: createdPr.number },
+              'PR body missing issue link after create — repaired'
+            );
+          } catch (err) {
+            log.error(
+              { event: 'pr_issue_link_repair_failed', task_id: task.id, err },
+              'Failed to repair missing PR↔issue link'
+            );
           }
-        } catch {
-          // Best effort — link check failure is non-fatal
         }
       }
     } else {

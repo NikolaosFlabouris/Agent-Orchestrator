@@ -34,6 +34,34 @@ export async function attemptMerge(
   // Pre-merge check: verify PR is still mergeable
   try {
     const pr = await forgejo.getPullRequest(repo, freshTask.pr_number!);
+
+    // Empty-diff guard: Forgejo's merge endpoint returns 405 (not a clean
+    // error) when the PR has no changes against base. Fail with a clear
+    // message before that happens. postDevAgent has its own empty-diff guard
+    // at PR creation; this is the backstop for any path that bypasses it.
+    if (pr.changed_files === 0) {
+      updateTaskWithSync(task.id, {
+        status: 'failed',
+        completed_at: new Date().toISOString(),
+      });
+      try {
+        await forgejo.commentOnIssue(
+          repo,
+          task.issue_id,
+          `PR #${freshTask.pr_number} has no changes against ${repo.base_branch} — nothing to merge. PR left open for inspection; use Reset to retry.`
+        );
+      } catch { /* best effort */ }
+      log.error(
+        {
+          event: 'merge_empty_diff',
+          task_id: task.id,
+          pr_number: freshTask.pr_number,
+        },
+        'PR has no changes against base — refusing to attempt merge'
+      );
+      return;
+    }
+
     if (pr.mergeable === false) {
       const newAttempt = freshTask.attempt + 1;
       const maxAttempts = freshTask.max_attempts ?? 3;
@@ -257,7 +285,64 @@ export async function processReviewVerdict(
     }
   }
 
-  recordTaskEvent(task.id, 'review_verdict', `Review verdict: ${review.verdict}${review.summary ? ' — ' + review.summary : ''}`);
+  // Fetch PR diff stats for the verdict event and the empty-diff guard below.
+  // Best effort: if this fails the verdict still gets recorded (without
+  // stats) and the empty-diff guard is skipped — attemptMerge has its own
+  // empty-diff guard as a backstop.
+  let prStats: { changed_files: number; additions: number; deletions: number } | null = null;
+  if (freshTask.pr_number) {
+    try {
+      const pr = await forgejo.getPullRequest(repo, freshTask.pr_number);
+      prStats = {
+        changed_files: pr.changed_files,
+        additions: pr.additions,
+        deletions: pr.deletions,
+      };
+    } catch {
+      // Best effort
+    }
+  }
+
+  const statsSuffix = prStats
+    ? ` (changed_files=${prStats.changed_files}, additions=${prStats.additions}, deletions=${prStats.deletions})`
+    : '';
+  recordTaskEvent(
+    task.id,
+    'review_verdict',
+    `Review verdict: ${review.verdict}${statsSuffix}${review.summary ? ' — ' + review.summary : ''}`
+  );
+
+  // Guard: an "approved" verdict on a zero-diff PR is a model hallucination.
+  // postDevAgent's PR-create check should have prevented us from ever
+  // reaching review with an empty PR, but if state changed since (or this
+  // function is called via a future code path that bypasses postDevAgent),
+  // refuse to act on the verdict and fail the task.
+  if (
+    review.verdict === 'approved' &&
+    prStats !== null &&
+    prStats.changed_files === 0
+  ) {
+    updateTaskWithSync(task.id, {
+      status: 'failed',
+      completed_at: new Date().toISOString(),
+    });
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Review approved but PR #${freshTask.pr_number} has no changes against ${repo.base_branch}. Rejecting verdict and failing task. PR left open for inspection; use Reset to retry.`
+      );
+    } catch { /* best effort */ }
+    log.error(
+      {
+        event: 'review_approved_empty_diff',
+        task_id: task.id,
+        pr_number: freshTask.pr_number,
+      },
+      'Review approved an empty PR — refusing verdict and failing task'
+    );
+    return;
+  }
 
   if (review.verdict === 'approved') {
     // Check for human-merge label

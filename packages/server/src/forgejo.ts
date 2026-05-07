@@ -31,6 +31,15 @@ export interface ForgejoPullRequest {
   state: string;
   merged: boolean;
   mergeable: boolean;
+  // Number of files changed in the PR's diff vs base. Forgejo returns 0 when
+  // the head branch has no net changes against base (even if commits exist
+  // ahead — e.g., reverts that cancel each other). Used by postDevAgent and
+  // attemptMerge to fail empty PRs early instead of attempting a merge that
+  // would 405. additions/deletions are surfaced in the review_verdict event
+  // so operators can spot verdict-vs-diff mismatches at a glance.
+  changed_files: number;
+  additions: number;
+  deletions: number;
   html_url: string;
   head: { ref: string; sha: string };
   base: { ref: string };

@@ -8,6 +8,13 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 # with "detected dubious ownership in repository".
 RUN git config --system --add safe.directory '*'
 
+# Git author identity for the orchestrator's salvage commits (see
+# postDevAgent in packages/server/src/agents/develop.ts). Without this, the
+# salvage `git commit` fails with "Please tell me who you are", the staged
+# work is lost, and the task ends up with an empty PR.
+RUN git config --system user.email "orchestrator@agent-orchestrator.local" \
+ && git config --system user.name "Agent Orchestrator"
+
 WORKDIR /app
 
 # Install dependencies
