@@ -104,6 +104,20 @@ export function notifyStreamComplete(taskId: number): void {
  */
 export function notifyTaskCreated(task: Task): void {
   insertTaskEvent(task.id, 'task_created', `Task created for issue #${task.issue_id}`);
+  if (_forgejo) {
+    const repo = getRepo(task.repo_id);
+    if (repo) {
+      _forgejo
+        .commentOnIssue(
+          repo,
+          task.issue_id,
+          `Task queued for orchestration (attempt 1/${task.max_attempts ?? 3}).`
+        )
+        .catch(() => {
+          /* best effort */
+        });
+    }
+  }
   broadcastDashboardEvent({
     type: 'task_created',
     task,
