@@ -200,6 +200,7 @@ export type TaskAction =
   | { action: 'force_fail'; reason?: string }
   | { action: 'reset' }
   | { action: 'requeue' }
+  | { action: 'extend'; additional_attempts: number }
   | { agent_tool: string | null };
 
 export interface RepoResponse {

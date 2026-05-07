@@ -227,6 +227,78 @@ export async function resetTask(
 }
 
 /**
+ * Extend a task — bump max_attempts by additionalAttempts, transition the task
+ * back to a runnable state, and let the existing rework path pick it up.
+ *
+ * - If the task has a PR, status → 'changes-needed' (rework path).
+ * - If no PR, status → 'queued' (placed at back of FIFO queue).
+ * - attempt counter is left unchanged.
+ * - completed_at is cleared.
+ */
+export async function extendTask(
+  task: Task,
+  forgejo: ForgejoClient,
+  scheduler: Scheduler,
+  log: FastifyBaseLogger,
+  additionalAttempts: number,
+): Promise<void> {
+  const repo = getRepo(task.repo_id);
+  const oldMaxAttempts = task.max_attempts ?? 3;
+  const newMaxAttempts = oldMaxAttempts + additionalAttempts;
+
+  // 1. Record event
+  recordTaskEvent(
+    task.id,
+    'task_extended',
+    `Extended by ${additionalAttempts} (max_attempts ${oldMaxAttempts} → ${newMaxAttempts})`
+  );
+
+  // 2. Determine new status and queue placement
+  const hasPr = task.pr_number != null;
+  const nextStatus = hasPr ? 'changes-needed' : 'queued';
+
+  let queuePosition: number | null = null;
+  if (!hasPr) {
+    queuePosition =
+      ((
+        getDb()
+          .prepare('SELECT MAX(queue_position) as max_pos FROM tasks')
+          .get() as { max_pos: number | null }
+      ).max_pos ?? 0) + 1;
+  }
+
+  // 3. Update DB with sync (handles label swap)
+  updateTaskWithSync(task.id, {
+    status: nextStatus,
+    max_attempts: newMaxAttempts,
+    completed_at: null,
+    queue_position: queuePosition,
+  });
+
+  // 4. Best-effort Forgejo issue comment
+  if (repo) {
+    try {
+      const prClause = hasPr ? ` Resuming from existing PR #${task.pr_number}.` : '';
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Task extended: granted ${additionalAttempts} more attempt${additionalAttempts === 1 ? '' : 's'} (max_attempts is now ${newMaxAttempts}).${prClause}`
+      );
+    } catch {
+      // Best effort
+    }
+  }
+
+  log.info(
+    { event: 'task_extended', task_id: task.id, additionalAttempts, newMaxAttempts },
+    'Task extended'
+  );
+
+  // 5. Trigger scheduler so the task is picked up promptly
+  scheduler.triggerTick();
+}
+
+/**
  * Requeue a task — set status to queued, assign next queue position,
  * clear timing, post comment and record event.
  */

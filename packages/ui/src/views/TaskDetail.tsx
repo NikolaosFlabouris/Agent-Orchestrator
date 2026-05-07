@@ -15,6 +15,7 @@ const RESETTABLE_STATUSES = new Set([
   'failed', 'cancelled', 'awaiting-human-merge', 'awaiting-human-review', 'needs-human-review',
 ]);
 const REQUEUEABLE_STATUSES = new Set(['reset', 'cancelled']);
+const EXTENDABLE_STATUSES = new Set(['failed']);
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
@@ -23,6 +24,8 @@ export function TaskDetail() {
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [agentToolError, setAgentToolError] = useState<string | null>(null);
+  const [extendModalOpen, setExtendModalOpen] = useState(false);
+  const [extendAmount, setExtendAmount] = useState(1);
   const tools = useStore((s) => s.tools);
   const setTools = useStore((s) => s.setTools);
 
@@ -62,6 +65,21 @@ export function TaskDetail() {
       setTask(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function handleExtend() {
+    if (!task || actionPending) return;
+    setActionPending(true);
+    try {
+      await api.patchTask(task.id, { action: 'extend', additional_attempts: extendAmount });
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+      setExtendModalOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Extend failed');
     } finally {
       setActionPending(false);
     }
@@ -263,6 +281,15 @@ export function TaskDetail() {
                Reset
              </button>
            )}
+           {EXTENDABLE_STATUSES.has(task.status) && (
+             <button
+               onClick={() => { setExtendAmount(1); setExtendModalOpen(true); }}
+               disabled={actionPending}
+               className="text-sm px-3 py-1.5 rounded border border-orange-800 text-orange-400 hover:bg-orange-950 disabled:opacity-50"
+             >
+               Extend
+             </button>
+           )}
            {REQUEUEABLE_STATUSES.has(task.status) && (
              <button
                onClick={() => handleAction({ action: 'requeue' })}
@@ -275,6 +302,66 @@ export function TaskDetail() {
          </div>
 
       </div>
+
+      {/* Extend modal */}
+      {extendModalOpen && task && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 w-80 shadow-xl">
+            <h2 className="text-lg font-semibold mb-4">Extend Task</h2>
+            <p className="text-sm text-gray-400 mb-4">
+              Grant additional attempts without resetting any existing work or PR.
+            </p>
+            <div className="mb-3">
+              <label className="block text-xs text-gray-500 mb-1">Additional attempts</label>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={extendAmount}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (!isNaN(v)) setExtendAmount(Math.min(10, Math.max(1, v)));
+                }}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex gap-2 mb-4">
+              {[1, 3, 5].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setExtendAmount(n)}
+                  className={`text-xs px-3 py-1 rounded border transition-colors ${
+                    extendAmount === n
+                      ? 'border-blue-600 text-blue-300 bg-blue-950'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-600'
+                  }`}
+                >
+                  +{n}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-500 mb-5">
+              New max_attempts will be: <span className="text-gray-200 font-mono">{task.max_attempts + extendAmount}</span>
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setExtendModalOpen(false)}
+                disabled={actionPending}
+                className="text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExtend}
+                disabled={actionPending}
+                className="text-sm px-4 py-1.5 rounded border border-orange-700 text-orange-300 bg-orange-950/50 hover:bg-orange-950 disabled:opacity-50"
+              >
+                {actionPending ? 'Extending…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
         {/* Timeline */}
