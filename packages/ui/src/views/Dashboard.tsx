@@ -89,9 +89,12 @@ export function Dashboard() {
   const completedTasks = store.tasks
     .filter((t) => !ACTIVE_STATUSES.has(t.status) && t.status !== 'queued')
     .sort((a, b) => {
-      const aKey = a.completed_at ?? a.created_at;
-      const bKey = b.completed_at ?? b.created_at;
-      return bKey.localeCompare(aKey);
+      const aNull = a.completed_at === null;
+      const bNull = b.completed_at === null;
+      if (aNull && bNull) return b.created_at.localeCompare(a.created_at);
+      if (aNull) return -1;
+      if (bNull) return 1;
+      return b.completed_at!.localeCompare(a.completed_at!);
     });
 
   return (
