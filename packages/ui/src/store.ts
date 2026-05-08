@@ -15,8 +15,9 @@ interface DashboardState {
   paused: boolean;
   dailyCostUsd: number;
   dailyCompletions: number;
+  forgejoBaseUrl: string;
   alerts: Alert[];
-
+ 
   // Actions
   setSnapshot: (data: {
     tasks: TaskResponse[];
@@ -35,6 +36,7 @@ interface DashboardState {
   }) => void;
   setDailyCost: (cost: number) => void;
   setDailyCompletions: (count: number) => void;
+  setForgejoBaseUrl: (url: string) => void;
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
   setTools: (tools: ToolResponse[]) => void;
@@ -49,6 +51,7 @@ export const useStore = create<DashboardState>((set) => ({
   paused: false,
   dailyCostUsd: 0,
   dailyCompletions: 0,
+  forgejoBaseUrl: '',
   alerts: [],
 
   setSnapshot: (data) =>
@@ -84,7 +87,8 @@ export const useStore = create<DashboardState>((set) => ({
 
   setDailyCost: (cost) => set({ dailyCostUsd: cost }),
   setDailyCompletions: (count) => set({ dailyCompletions: count }),
-
+  setForgejoBaseUrl: (url) => set({ forgejoBaseUrl: url }),
+ 
   addAlert: (alert) =>
     set((state) => ({ alerts: [...state.alerts, alert] })),
 
