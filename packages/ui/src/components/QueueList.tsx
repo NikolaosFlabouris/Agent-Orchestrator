@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   DndContext,
   closestCenter,
@@ -9,7 +9,7 @@ import {
   useDraggable,
   useDroppable,
 } from '@dnd-kit/core';
-import type { DragEndEvent } from '@dnd-kit/core';
+import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { TaskResponse } from '../api.js';
 
@@ -79,6 +79,16 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
 
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: task.id });
 
+  const navigate = useNavigate();
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+
+  const issueHref =
+    forgejoBaseUrl && task.repo
+      ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
+      : null;
+
+  const goToTask = () => navigate(`/tasks/${task.id}`);
+
   // Combine refs
   const setRef = (node: HTMLDivElement | null) => {
     setDragRef(node);
@@ -108,14 +118,34 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
       >
         ::
       </span>
-      <Link
-        to={`/tasks/${task.id}`}
-        className="flex-1 flex items-center justify-between"
+      <div
+        role="link"
+        tabIndex={0}
+        onClick={goToTask}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            goToTask();
+          }
+        }}
+        className="flex-1 flex items-center justify-between cursor-pointer"
       >
         <div>
-          <span className="text-blue-400 font-mono text-sm">
-            #{task.issue_id}
-          </span>{' '}
+          {issueHref ? (
+            <a
+              href={issueHref}
+              target="_blank"
+              rel="noreferrer noopener"
+              onClick={(e) => e.stopPropagation()}
+              className="text-blue-400 font-mono text-sm hover:underline"
+            >
+              #{task.issue_id}
+            </a>
+          ) : (
+            <span className="text-blue-400 font-mono text-sm">
+              #{task.issue_id}
+            </span>
+          )}{' '}
           <span>{task.issue_title}</span>
           {task.repo && (
             <span className="text-gray-500 text-sm ml-2">
@@ -126,7 +156,7 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
         <div className="text-sm text-gray-400">
           Position {task.queue_position}
         </div>
-      </Link>
+      </div>
     </div>
   );
 }

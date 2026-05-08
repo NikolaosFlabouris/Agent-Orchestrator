@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
@@ -296,6 +296,16 @@ function ToolChip({ task }: { task: TaskResponse }) {
 }
 
 function ActiveTaskCard({ task }: { task: TaskResponse }) {
+  const navigate = useNavigate();
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+
+  const issueHref =
+    forgejoBaseUrl && task.repo
+      ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
+      : null;
+
+  const goToTask = () => navigate(`/tasks/${task.id}`);
+
   const phaseLabel: Record<string, string> = {
     preparing: 'Preparing',
     'in-progress': 'Implementing',
@@ -304,9 +314,17 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
   };
 
   return (
-    <Link
-      to={`/tasks/${task.id}`}
-      className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors"
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={goToTask}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          goToTask();
+        }
+      }}
+      className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer"
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -318,9 +336,21 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
             />
           )}
           <div>
-            <span className="text-blue-400 font-mono text-sm">
-              #{task.issue_id}
-            </span>{' '}
+            {issueHref ? (
+              <a
+                href={issueHref}
+                target="_blank"
+                rel="noreferrer noopener"
+                onClick={(e) => e.stopPropagation()}
+                className="text-blue-400 font-mono text-sm hover:underline"
+              >
+                #{task.issue_id}
+              </a>
+            ) : (
+              <span className="text-blue-400 font-mono text-sm">
+                #{task.issue_id}
+              </span>
+            )}{' '}
             <span className="font-medium">{task.issue_title}</span>
             {task.repo && (
               <span className="text-gray-500 text-sm ml-2">
@@ -342,20 +372,50 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
           )}
         </div>
       </div>
-    </Link>
+    </div>
   );
 }
 
 function CompletedItem({ task }: { task: TaskResponse }) {
+  const navigate = useNavigate();
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+
+  const issueHref =
+    forgejoBaseUrl && task.repo
+      ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
+      : null;
+
+  const goToTask = () => navigate(`/tasks/${task.id}`);
+
   return (
-    <Link
-      to={`/tasks/${task.id}`}
-      className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors"
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={goToTask}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          goToTask();
+        }
+      }}
+      className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors cursor-pointer"
     >
       <div>
-        <span className="text-blue-400 font-mono text-sm">
-          #{task.issue_id}
-        </span>{' '}
+        {issueHref ? (
+          <a
+            href={issueHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(e) => e.stopPropagation()}
+            className="text-blue-400 font-mono text-sm hover:underline"
+          >
+            #{task.issue_id}
+          </a>
+        ) : (
+          <span className="text-blue-400 font-mono text-sm">
+            #{task.issue_id}
+          </span>
+        )}{' '}
         <span>{task.issue_title}</span>
       </div>
       <div className="flex items-center gap-3 text-sm">
@@ -368,7 +428,7 @@ function CompletedItem({ task }: { task: TaskResponse }) {
           <span className="text-gray-500">{timeAgo(task.completed_at)}</span>
         )}
       </div>
-    </Link>
+    </div>
   );
 }
 

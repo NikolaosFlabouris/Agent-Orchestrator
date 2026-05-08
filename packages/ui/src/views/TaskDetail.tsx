@@ -29,6 +29,7 @@ export function TaskDetail() {
   const [extendError, setExtendError] = useState<string | null>(null);
   const tools = useStore((s) => s.tools);
   const setTools = useStore((s) => s.setTools);
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
 
   useEffect(() => {
     if (!id) return;
@@ -171,9 +172,20 @@ export function TaskDetail() {
               </Link>
             </div>
             <h1 className="text-xl font-semibold mt-1">
-              <span className="text-blue-400 font-mono">
-                #{task.issue_id}
-              </span>{' '}
+              {forgejoBaseUrl && task.repo ? (
+                <a
+                  href={`${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="text-blue-400 font-mono hover:underline"
+                >
+                  #{task.issue_id}
+                </a>
+              ) : (
+                <span className="text-blue-400 font-mono">
+                  #{task.issue_id}
+                </span>
+              )}{' '}
               {task.issue_title}
             </h1>
             <div className="text-sm text-gray-400 mt-1 space-x-4">
@@ -192,7 +204,7 @@ export function TaskDetail() {
                     href={task.forgejo_links?.pr}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-400 hover:text-blue-300"
+                    className="text-blue-400 hover:text-blue-300 hover:underline"
                   >
                     #{task.pr_number}
                   </a>
