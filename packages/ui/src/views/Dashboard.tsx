@@ -86,9 +86,16 @@ export function Dashboard() {
   const queuedTasks = store.tasks
     .filter((t) => t.status === 'queued')
     .sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
-  const completedTasks = store.tasks.filter(
-    (t) => !ACTIVE_STATUSES.has(t.status) && t.status !== 'queued'
-  );
+  const completedTasks = store.tasks
+    .filter((t) => !ACTIVE_STATUSES.has(t.status) && t.status !== 'queued')
+    .sort((a, b) => {
+      const aNull = a.completed_at === null;
+      const bNull = b.completed_at === null;
+      if (aNull && bNull) return b.created_at.localeCompare(a.created_at);
+      if (aNull) return -1;
+      if (bNull) return 1;
+      return b.completed_at!.localeCompare(a.completed_at!);
+    });
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
