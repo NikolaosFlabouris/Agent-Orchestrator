@@ -161,6 +161,7 @@ export interface StatusResponse {
   queue_depth: number;
   daily_completions: number;
   daily_cost_usd: number;
+  forgejo_base_url: string;
   forgejo_connected: boolean;
   uptime_seconds: number;
   /** Per-provider active-slot / concurrency-limit breakdown. Empty array when

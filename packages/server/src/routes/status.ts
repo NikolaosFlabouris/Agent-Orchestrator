@@ -69,6 +69,7 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
         queue_depth: queueDepth,
         daily_completions: dailyRow.completions,
         daily_cost_usd: Math.round(dailyRow.cost * 100) / 100,
+        forgejo_base_url: process.env.FORGEJO_URL ?? 'http://forgejo:3000',
         forgejo_connected: true,
         last_poll_at: poller?.lastPollAt ?? null,
         uptime_seconds: Math.floor((Date.now() - startTime) / 1000),

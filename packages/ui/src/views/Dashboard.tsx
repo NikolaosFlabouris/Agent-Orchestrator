@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
-import type { StatusResponse, TaskResponse } from '../api.js';
+import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
 import { connectDashboardWs } from '../ws.js';
 import type { DashboardWsEvent } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
@@ -18,17 +18,19 @@ const ACTIVE_STATUSES = new Set([
 export function Dashboard() {
   const store = useStore();
   const [pools, setPools] = useState<StatusResponse['providers']>([]);
-
+  const [repos, setRepos] = useState<RepoResponse[]>([]);
+ 
   useEffect(() => {
     // Pull status immediately and every 5 s. Daily cost/completions come from
     // the same payload; providers are sampled often so the Pools row stays
     // close to live. Cost is cheap (single SQL query + one JSON serialisation).
     const refresh = () => {
-      api.getStatus().then((s) => {
-        store.setDailyCost(s.daily_cost_usd);
-        store.setDailyCompletions(s.daily_completions);
-        setPools(s.providers ?? []);
-      }).catch(() => {});
+        api.getStatus().then((s) => {
+          store.setDailyCost(s.daily_cost_usd);
+          store.setDailyCompletions(s.daily_completions);
+          store.setForgejoBaseUrl(s.forgejo_base_url);
+          setPools(s.providers ?? []);
+        }).catch(() => {});
     };
     refresh();
     const timer = window.setInterval(refresh, 5_000);
@@ -74,7 +76,10 @@ export function Dashboard() {
     if (store.tools.length === 0) {
       api.getTools().then((res) => store.setTools(res.tools)).catch(() => {});
     }
-
+ 
+    // Fetch repos once on mount for the Repos strip
+    api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
+ 
     return () => {
       disconnect();
       window.clearInterval(timer);
@@ -137,53 +142,80 @@ export function Dashboard() {
             >
               Settings
             </Link>
-            <Link
-              to="/help"
-              className="text-blue-400 hover:text-blue-300"
-            >
-              Help
-            </Link>
-          </div>
+             <Link
+               to="/help"
+               className="text-blue-400 hover:text-blue-300"
+             >
+               Help
+             </Link>
+             {store.forgejoBaseUrl && (
+               <a
+                 href={store.forgejoBaseUrl}
+                 target="_blank"
+                 rel="noreferrer noopener"
+                 className="text-blue-400 hover:text-blue-300"
+               >
+                 Forgejo ↗
+               </a>
+             )}
+           </div>
         </div>
       </header>
 
-      {pools.length > 0 && (
-        <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
-          <span className="text-gray-500 uppercase tracking-wide">
-            Pools
-          </span>
-          {pools.map((p) => {
-            const full =
-              p.concurrency_limit > 0 &&
-              p.active_slots >= p.concurrency_limit;
-            const paused = p.concurrency_limit === 0;
-            return (
-              <span
-                key={p.id}
-                className={
-                  paused
-                    ? 'text-yellow-400'
-                    : full
-                      ? 'text-orange-400'
-                      : 'text-gray-300'
-                }
-                title={
-                  paused
-                    ? `${p.display_name}: paused (concurrency_limit = 0)`
-                    : full
-                      ? `${p.display_name}: at limit — candidate tasks on this provider will wait`
-                      : `${p.display_name}: ${p.concurrency_limit - p.active_slots} slot(s) free`
-                }
-              >
-                {p.display_name}: {p.active_slots}/{p.concurrency_limit}
-                {paused ? ' (paused)' : ''}
-              </span>
-            );
-          })}
-        </div>
-      )}
-
-      <AlertBanner alerts={store.alerts} />
+       {pools.length > 0 && (
+         <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
+           <span className="text-gray-500 uppercase tracking-wide">
+             Pools
+           </span>
+           {pools.map((p) => {
+             const full =
+               p.concurrency_limit > 0 &&
+               p.active_slots >= p.concurrency_limit;
+             const paused = p.concurrency_limit === 0;
+             return (
+               <span
+                 key={p.id}
+                 className={
+                   paused
+                     ? 'text-yellow-400'
+                     : full
+                       ? 'text-orange-400'
+                       : 'text-gray-300'
+                 }
+                 title={
+                   paused
+                     ? `${p.display_name}: paused (concurrency_limit = 0)`
+                     : full
+                       ? `${p.display_name}: at limit — candidate tasks on this provider will wait`
+                       : `${p.display_name}: ${p.concurrency_limit - p.active_slots} slot(s) free`
+                 }
+               >
+                 {p.display_name}: {p.active_slots}/{p.concurrency_limit}
+                 {paused ? ' (paused)' : ''}
+               </span>
+             );
+           })}
+         </div>
+       )}
+ 
+       {repos.length > 0 && store.forgejoBaseUrl && (
+         <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
+           <span className="text-gray-500 uppercase tracking-wide">Repos</span>
+           {repos.map((r) => (
+             <a
+               key={r.id}
+               href={`${store.forgejoBaseUrl}/${r.owner}/${r.name}`}
+               target="_blank"
+               rel="noreferrer noopener"
+               className="text-gray-300 hover:text-blue-300"
+             >
+               {r.owner}/{r.name} ↗
+             </a>
+           ))}
+         </div>
+       )}
+ 
+       <AlertBanner alerts={store.alerts} />
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
         {/* Active tasks */}
