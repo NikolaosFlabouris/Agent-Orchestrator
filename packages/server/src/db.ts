@@ -6,14 +6,16 @@ import type {
   AttemptRole,
   AttemptStatus,
   Repo,
-  AgentTool,
   Provider,
+  Model,
+  AgentProfile,
+  HarnessId,
   TaskEvent,
   SettingsKey,
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 20;
+const CURRENT_SCHEMA_VERSION = 21;
 
 let _db: Database.Database;
 
@@ -72,15 +74,18 @@ function createTables(db: Database.Database): void {
       owner TEXT NOT NULL,
       name TEXT NOT NULL,
       base_branch TEXT DEFAULT 'main',
-      agent_tool TEXT NOT NULL,
+      -- Per-repo default agent profile. NULL falls back to
+      -- settings.default_agent_profile_id at task-launch time. RESTRICT on
+      -- delete: operator must reassign or unset before deleting the profile.
+      agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
       -- Ordered JSON array of typed install steps the harness runs before
       -- the agent starts. Each entry is { kind, cwd? } for package-manager
       -- steps or { kind: 'script', path, cwd? } for the script escape hatch.
       -- See @orchestrator/shared InstallStep. Default '[]' = no install.
-      install_steps TEXT NOT NULL DEFAULT '[]',
+      install_steps TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(install_steps)),
       -- Per-repo opt-in for the script-kind install step. 0 = forbidden,
       -- 1 = allowed. Default 0; operator must consciously enable since
-      -- script steps inherit the agent container env (FORWARDED_KEYS).
+      -- script steps inherit the agent container env.
       allow_script_steps INTEGER NOT NULL DEFAULT 0,
       container_memory_mb INTEGER,
       container_cpu_cores INTEGER,
@@ -106,8 +111,9 @@ function createTables(db: Database.Database): void {
       attempt INTEGER DEFAULT 1,
       max_attempts INTEGER DEFAULT 7,
       prep_failure_count INTEGER DEFAULT 0,
-      agent_tool TEXT,
-      model TEXT,
+      -- Per-task profile override. NULL inherits from
+      -- repos.agent_profile_id, which inherits from settings.default_*.
+      agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
       container_id TEXT,
       started_at TEXT,
       completed_at TEXT,
@@ -129,51 +135,87 @@ function createTables(db: Database.Database): void {
       completed_at TEXT,
       log_path TEXT,
       feedback TEXT,
-      model TEXT
+      -- Snapshot of the model_id resolved at attempt-launch time. Stored
+      -- on the attempt so audit/usage records survive subsequent edits to
+      -- the agent profile or model row.
+      model_id TEXT,
+      -- Snapshot of the harness id resolved at attempt-launch time.
+      harness_id TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
 
+    -- agent_tools is the legacy table replaced by providers + models +
+    -- agent_profiles in schema v21. Kept in createTables so the v3/v4/v9
+    -- migration ALTERs run cleanly on fresh installs (the migration chain
+    -- runs even for first-run); v21 then drops it.
+    CREATE TABLE IF NOT EXISTS agent_tools (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      command_template TEXT,
+      env_vars TEXT NOT NULL DEFAULT '{}',
+      config_file_path TEXT,
+      config_file_content TEXT,
+      timeout_minutes INTEGER NOT NULL DEFAULT 2880,
+      provider_id TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
+      -- Provider kind (anthropic, openai, ollama, etc.). Determines
+      -- credential shape, env-var name, default base_url, and which
+      -- harnesses can target this provider. See PROVIDER_KINDS.
+      kind TEXT NOT NULL,
       -- Per-provider concurrency cap (an upstream LLM constraint, e.g. an
       -- API rate-limit bucket or a single Ollama server). 0 means "paused"
       -- (no task assigned to this provider launches). NULL is not allowed.
       -- Independent from the host resource pool (settings.max_agent_memory_mb /
       -- max_agent_cpu_cores), which gates hardware capacity for every task.
       concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
+      -- Connection URL. NULL for cloud kinds (uses kind's default). REQUIRED
+      -- for self-hosted kinds (ollama).
+      base_url TEXT,
+      -- Inline secret (Ollama bearer/basic auth token, or a cloud API key
+      -- when the operator is multi-instancing a kind without env-var
+      -- indirection). NULL when api_key_env_var is used or no auth needed.
+      auth_token TEXT,
+      -- Name of the orchestrator-side env var holding this provider's API
+      -- key. The orchestrator reads from its own env at launch and exports
+      -- the value into the agent container under the kind's standard name.
+      api_key_env_var TEXT,
       notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS agent_tools (
+    CREATE TABLE IF NOT EXISTS models (
+      id INTEGER PRIMARY KEY,
+      provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
+      -- Bare model identifier as the inference endpoint expects, without
+      -- any provider prefix (e.g. 'claude-sonnet-4-6', 'qwen2.5-coder:14b').
+      model_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      UNIQUE(provider_id, model_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_models_provider_id ON models(provider_id);
+
+    CREATE TABLE IF NOT EXISTS agent_profiles (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      command_template TEXT,
-      -- Flat key/value JSON. Forwarded as container env vars at launch.
-      -- Overrides FORWARDED_KEYS values when keys collide; arbitrary other
-      -- keys are added to the container env.
-      env_vars TEXT NOT NULL DEFAULT '{}',
-      -- Optional config file dropped into the workspace before the agent
-      -- runs. Path is relative to /repo (the workspace root inside the
-      -- container). Used by tools like OpenCode that take config from a
-      -- file rather than env vars or CLI flags. Both columns must be set,
-      -- or both must be NULL.
-      config_file_path TEXT,
-      config_file_content TEXT,
-      -- Per-tool wall-clock timeout (minutes). Schema v17 made this NOT NULL
-      -- and removed the global / per-repo override layers — every tool
-      -- carries its own value. Default 2880 (48 h) is the form pre-fill for
-      -- new tools; operators are expected to type their actual budget over
-      -- it (typically 120 min for paid APIs, 2880 min for free local
-      -- servers). The seed values match: 120 paid, 2880 local.
-      timeout_minutes INTEGER NOT NULL DEFAULT 2880,
-      -- Optional provider this tool belongs to, for upstream concurrency
-      -- pooling. Null = tool has no provider; the host resource pool still
-      -- gates its launch.
-      provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
+      -- Code-defined harness this profile uses. See HARNESS_IDS.
+      harness_id TEXT NOT NULL,
+      -- FK to the model surrogate PK. The provider is reachable via the
+      -- model row.
+      model_pk INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+      -- Harness-specific config (typed knobs the harness understands).
+      -- Stored as JSON; the harness module owns its schema.
+      config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
+      -- Wall-clock timeout (minutes) for an agent run using this profile.
+      timeout_minutes INTEGER NOT NULL DEFAULT 2880
     );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_profiles_model_pk ON agent_profiles(model_pk);
 
     CREATE TABLE IF NOT EXISTS task_events (
       id INTEGER PRIMARY KEY,
@@ -675,6 +717,238 @@ function runMigrations(db: Database.Database): void {
 
     db.prepare("UPDATE settings SET value = '20' WHERE key = 'schema_version'").run();
   }
+
+  if (version < 21) {
+    // Replace the monolithic `agent_tools` row with a three-layer
+    // composition: providers (concrete connection identity), models
+    // (provider-scoped model_ids), and agent_profiles (the operator-
+    // composed pairing). Hard cut — no data preservation.
+    //
+    // Wrapped in a transaction so a process crash mid-migration leaves
+    // schema_version=20 and the next boot retries cleanly. Without this,
+    // a partial v21 (e.g. wiped providers but no bootstrap seed) could
+    // leave the install unbootable.
+    //
+    // Operations:
+    //   1. Fail in-flight tasks (no clean re-resolution path post-cut).
+    //   2. Drop legacy `agent_tools`.
+    //   3. Wipe legacy `providers` rows (we re-seed under the new schema).
+    //   4. Extend `providers` with: kind, base_url, auth_token,
+    //      api_key_env_var.
+    //   5. Create `models` and `agent_profiles` (createTables also runs at
+    //      boot, so for fresh installs these already exist via IF NOT
+    //      EXISTS — the CREATE here is for upgrade-in-place).
+    //   6. Repos: drop `agent_tool`, add `agent_profile_id`.
+    //   7. Tasks: drop `agent_tool` and `model`, add `agent_profile_id`.
+    //   8. Attempts: rename `model` → `model_id`, add `harness_id`.
+    //   9. Drop `default_model` setting; (re-)seed bootstrap provider +
+    //      model + profile + `default_agent_profile_id` setting.
+    //
+    // Each step is PRAGMA-guarded so the migration is idempotent: on a
+    // fresh install where createTables already produced the new shape,
+    // every step finds a no-op condition.
+    const runV21 = db.transaction(() => {
+      // 1. Fail in-flight tasks. Statuses considered active for this
+      //    purpose: queued (waiting), preparing, in-progress, in-review,
+      //    changes-needed. Terminal statuses (merged, failed, cancelled,
+      //    awaiting-human-*, needs-human-review, reset) are left alone.
+      db.prepare(
+        `UPDATE tasks
+         SET status = 'failed', completed_at = COALESCE(completed_at, datetime('now'))
+         WHERE status IN ('queued','preparing','in-progress','in-review','changes-needed')`
+      ).run();
+
+      // 2. Drop legacy agent_tools.
+      db.exec('DROP TABLE IF EXISTS agent_tools');
+
+      // 3. Wipe legacy providers (we re-seed under the new schema below).
+      db.exec('DELETE FROM providers');
+
+      // 4. Extend providers.
+      const providerCols = db
+        .prepare('PRAGMA table_info(providers)')
+        .all() as Array<{ name: string }>;
+      if (!providerCols.some((c) => c.name === 'kind')) {
+        // Rows were just wiped, so NOT NULL DEFAULT is safe in one shot.
+        db.exec("ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT 'anthropic'");
+      }
+      if (!providerCols.some((c) => c.name === 'base_url')) {
+        db.exec('ALTER TABLE providers ADD COLUMN base_url TEXT');
+      }
+      if (!providerCols.some((c) => c.name === 'auth_token')) {
+        db.exec('ALTER TABLE providers ADD COLUMN auth_token TEXT');
+      }
+      if (!providerCols.some((c) => c.name === 'api_key_env_var')) {
+        db.exec('ALTER TABLE providers ADD COLUMN api_key_env_var TEXT');
+      }
+
+      // 5. Ensure models + agent_profiles exist (createTables handles fresh
+      //    installs but be defensive for upgrade-in-place).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS models (
+          id INTEGER PRIMARY KEY,
+          provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
+          model_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          UNIQUE(provider_id, model_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_models_provider_id ON models(provider_id);
+
+        CREATE TABLE IF NOT EXISTS agent_profiles (
+          id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL,
+          harness_id TEXT NOT NULL,
+          model_pk INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+          config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
+          timeout_minutes INTEGER NOT NULL DEFAULT 2880
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_profiles_model_pk ON agent_profiles(model_pk);
+      `);
+
+      // 6. Repos: agent_tool → agent_profile_id.
+      const repoCols = db
+        .prepare('PRAGMA table_info(repos)')
+        .all() as Array<{ name: string }>;
+      if (!repoCols.some((c) => c.name === 'agent_profile_id')) {
+        db.exec(
+          'ALTER TABLE repos ADD COLUMN agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
+        );
+      }
+      if (repoCols.some((c) => c.name === 'agent_tool')) {
+        db.exec('ALTER TABLE repos DROP COLUMN agent_tool');
+      }
+
+      // 7. Tasks: drop agent_tool + model, add agent_profile_id.
+      const taskCols = db
+        .prepare('PRAGMA table_info(tasks)')
+        .all() as Array<{ name: string }>;
+      if (!taskCols.some((c) => c.name === 'agent_profile_id')) {
+        db.exec(
+          'ALTER TABLE tasks ADD COLUMN agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
+        );
+      }
+      if (taskCols.some((c) => c.name === 'agent_tool')) {
+        db.exec('ALTER TABLE tasks DROP COLUMN agent_tool');
+      }
+      if (taskCols.some((c) => c.name === 'model')) {
+        db.exec('ALTER TABLE tasks DROP COLUMN model');
+      }
+
+      // 8. Attempts: rename model → model_id, add harness_id.
+      const attemptCols = db
+        .prepare('PRAGMA table_info(attempts)')
+        .all() as Array<{ name: string }>;
+      if (
+        attemptCols.some((c) => c.name === 'model') &&
+        !attemptCols.some((c) => c.name === 'model_id')
+      ) {
+        db.exec('ALTER TABLE attempts RENAME COLUMN model TO model_id');
+      }
+      if (!attemptCols.some((c) => c.name === 'harness_id')) {
+        db.exec('ALTER TABLE attempts ADD COLUMN harness_id TEXT');
+      }
+
+      // 9. Drop default_model + bootstrap seed.
+      db.prepare("DELETE FROM settings WHERE key = 'default_model'").run();
+      seedBootstrapProfile(db);
+
+      db.prepare("UPDATE settings SET value = '21' WHERE key = 'schema_version'").run();
+    });
+    runV21();
+  }
+}
+
+/** v21 bootstrap: seed the standard cloud providers + a starter model on
+ *  Anthropic + a default Claude SDK profile, then point
+ *  `settings.default_agent_profile_id` at it.
+ *
+ *  - Providers other than Anthropic are seeded as rows with no credentials
+ *    so the operator can see them in the UI and fill in the connection
+ *    detail when ready. Their concurrency_limit is set to a reasonable
+ *    paid-API default (5).
+ *  - Anthropic provider points at `ANTHROPIC_API_KEY`. If the env var is
+ *    set, the bootstrap profile launches successfully out of the box; if
+ *    not, the profile is visible but flagged "missing credential" by the
+ *    Settings UI.
+ *  - Local Ollama is NOT seeded — operators add their own with the URL of
+ *    their server. */
+function seedBootstrapProfile(db: Database.Database): void {
+  const insertProvider = db.prepare(
+    `INSERT OR IGNORE INTO providers
+       (id, display_name, kind, concurrency_limit, base_url, auth_token, api_key_env_var, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const cloudSeeds: Array<{
+    id: string;
+    display_name: string;
+    kind: string;
+    api_key_env_var: string;
+  }> = [
+    { id: 'anthropic',  display_name: 'Anthropic',           kind: 'anthropic',  api_key_env_var: 'ANTHROPIC_API_KEY' },
+    { id: 'openai',     display_name: 'OpenAI',              kind: 'openai',     api_key_env_var: 'OPENAI_API_KEY' },
+    { id: 'gemini',     display_name: 'Google Gemini',       kind: 'gemini',     api_key_env_var: 'GEMINI_API_KEY' },
+    { id: 'mistral',    display_name: 'Mistral',             kind: 'mistral',    api_key_env_var: 'MISTRAL_API_KEY' },
+    { id: 'deepseek',   display_name: 'DeepSeek',            kind: 'deepseek',   api_key_env_var: 'DEEPSEEK_API_KEY' },
+    { id: 'openrouter', display_name: 'OpenRouter',          kind: 'openrouter', api_key_env_var: 'OPENROUTER_API_KEY' },
+  ];
+  for (const s of cloudSeeds) {
+    insertProvider.run(s.id, s.display_name, s.kind, 5, null, null, s.api_key_env_var, null);
+  }
+
+  // Seed a representative model per cloud provider so operators see a
+  // populated dropdown immediately. Operators can add/remove via UI.
+  const insertModel = db.prepare(
+    `INSERT OR IGNORE INTO models (provider_id, model_id, display_name) VALUES (?, ?, ?)`
+  );
+  const modelSeeds: Array<{ provider_id: string; model_id: string; display_name: string }> = [
+    { provider_id: 'anthropic', model_id: 'claude-opus-4-7',     display_name: 'Claude Opus 4.7' },
+    { provider_id: 'anthropic', model_id: 'claude-sonnet-4-6',   display_name: 'Claude Sonnet 4.6' },
+    { provider_id: 'anthropic', model_id: 'claude-haiku-4-5',    display_name: 'Claude Haiku 4.5' },
+    { provider_id: 'openai',    model_id: 'gpt-4o',              display_name: 'GPT-4o' },
+    { provider_id: 'openai',    model_id: 'gpt-4o-mini',         display_name: 'GPT-4o mini' },
+    { provider_id: 'openai',    model_id: 'o1',                  display_name: 'o1' },
+    { provider_id: 'gemini',    model_id: 'gemini-2.5-pro',      display_name: 'Gemini 2.5 Pro' },
+    { provider_id: 'gemini',    model_id: 'gemini-2.5-flash',    display_name: 'Gemini 2.5 Flash' },
+    { provider_id: 'gemini',    model_id: 'gemma-3-27b',         display_name: 'Gemma 3 27B' },
+    { provider_id: 'mistral',   model_id: 'mistral-large-latest',display_name: 'Mistral Large' },
+    { provider_id: 'mistral',   model_id: 'codestral-latest',    display_name: 'Codestral' },
+    { provider_id: 'deepseek',  model_id: 'deepseek-chat',       display_name: 'DeepSeek Chat' },
+    { provider_id: 'deepseek',  model_id: 'deepseek-reasoner',   display_name: 'DeepSeek Reasoner' },
+  ];
+  for (const m of modelSeeds) {
+    insertModel.run(m.provider_id, m.model_id, m.display_name);
+  }
+
+  // Bootstrap profile: Claude SDK + Sonnet. Claude SDK is the simplest
+  // harness and Anthropic is the most-tested provider, so this is the
+  // safest "works out of the box" combination if ANTHROPIC_API_KEY is set.
+  // Throw if the seeded sonnet row can't be found — without it, no
+  // default profile exists and the orchestrator would have no fallback
+  // when a task and its repo both lack an agent_profile_id. Better to
+  // fail boot loudly than silently produce an unusable system.
+  const sonnetRow = db
+    .prepare("SELECT id FROM models WHERE provider_id = 'anthropic' AND model_id = 'claude-sonnet-4-6'")
+    .get() as { id: number } | undefined;
+  if (!sonnetRow) {
+    throw new Error(
+      'v21 bootstrap: failed to find seeded Anthropic sonnet model. ' +
+      'This indicates a partial migration state — the providers/models seed ' +
+      'did not complete. Inspect the orchestrator DB and either restore ' +
+      'from backup or manually seed an Anthropic provider + sonnet model + ' +
+      'default agent profile, then bump schema_version to 21.'
+    );
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO agent_profiles
+       (id, display_name, harness_id, model_pk, config_json, timeout_minutes)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run('default-claude-sdk', 'Claude SDK + Sonnet', 'claude-sdk', sonnetRow.id, '{}', 120);
+
+  db.prepare(
+    `INSERT OR REPLACE INTO settings (key, value)
+     VALUES ('default_agent_profile_id', 'default-claude-sdk')`
+  ).run();
 }
 
 /** v20 backfill helper: map a legacy `pre_agent_script` string to a typed
@@ -697,12 +971,13 @@ function translatePreAgentScript(
 function seedDefaultSettings(db: Database.Database): void {
   const defaults: Record<string, string> = {
     schema_version: '1',
-    // Default resource pool: roughly the old (max_concurrency=5 ×
-    // 4096 MB / 2 cores) effective ceiling — sized for a typical 24+ GB
-    // / 8+ core dev host. Operators tune via Settings → Global Settings.
+    // Default resource pool: sized for a typical 24+ GB / 8+ core dev host.
+    // Operators tune via Settings → Global Settings.
     max_agent_memory_mb: '20480',
     max_agent_cpu_cores: '10',
-    default_model: 'sonnet',
+    // `default_agent_profile_id` is set by the v21 migration after the
+    // bootstrap profile is created (it can't be seeded here because the
+    // profile row doesn't exist yet at v1).
   };
 
   const insert = db.prepare(
@@ -773,8 +1048,7 @@ export function insertTask(task: {
   status: TaskStatus;
   queue_position?: number;
   max_attempts?: number;
-  agent_tool?: string | null;
-  model?: string | null;
+  agent_profile_id?: string | null;
 }): Task {
   const queuePos =
     task.queue_position ??
@@ -786,8 +1060,8 @@ export function insertTask(task: {
 
   const result = getDb()
     .prepare(
-      `INSERT INTO tasks (issue_id, issue_title, repo_id, status, queue_position, max_attempts, agent_tool, model)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (issue_id, issue_title, repo_id, status, queue_position, max_attempts, agent_profile_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.issue_id,
@@ -796,8 +1070,7 @@ export function insertTask(task: {
       task.status,
       queuePos,
       task.max_attempts ?? DEFAULT_MAX_ATTEMPTS,
-      task.agent_tool ?? null,
-      task.model ?? null
+      task.agent_profile_id ?? null
     );
 
   return getTask(result.lastInsertRowid as number)!;
@@ -815,8 +1088,7 @@ export function updateTask(
       | 'attempt'
       | 'max_attempts'
       | 'prep_failure_count'
-      | 'agent_tool'
-      | 'model'
+      | 'agent_profile_id'
       | 'container_id'
       | 'started_at'
       | 'completed_at'
@@ -847,12 +1119,13 @@ export function insertAttempt(attempt: {
   role: AttemptRole;
   status: AttemptStatus;
   started_at?: string;
-  model?: string;
+  model_id?: string | null;
+  harness_id?: string | null;
 }): Attempt {
   const result = getDb()
     .prepare(
-      `INSERT INTO attempts (task_id, attempt_number, role, status, started_at, model)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO attempts (task_id, attempt_number, role, status, started_at, model_id, harness_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       attempt.task_id,
@@ -860,7 +1133,8 @@ export function insertAttempt(attempt: {
       attempt.role,
       attempt.status,
       attempt.started_at ?? new Date().toISOString(),
-      attempt.model ?? null
+      attempt.model_id ?? null,
+      attempt.harness_id ?? null
     );
 
   return getDb()
@@ -878,7 +1152,8 @@ export function updateAttempt(
       | 'completed_at'
       | 'log_path'
       | 'feedback'
-      | 'model'
+      | 'model_id'
+      | 'harness_id'
     >
   >
 ): void {
@@ -961,20 +1236,6 @@ export function getRepoByOwnerName(owner: string, name: string): Repo | undefine
   return hydrateRepo(row);
 }
 
-// -- Agent Tools --
-
-export function getAgentTool(id: string): AgentTool | undefined {
-  return getDb()
-    .prepare('SELECT * FROM agent_tools WHERE id = ?')
-    .get(id) as AgentTool | undefined;
-}
-
-export function getAgentTools(): AgentTool[] {
-  return getDb()
-    .prepare('SELECT * FROM agent_tools ORDER BY id')
-    .all() as AgentTool[];
-}
-
 // -- Providers --
 
 export function getProvider(id: string): Provider | undefined {
@@ -992,9 +1253,20 @@ export function getProviders(): Provider[] {
 export function insertProvider(p: Provider): void {
   getDb()
     .prepare(
-      'INSERT INTO providers (id, display_name, concurrency_limit, notes) VALUES (?, ?, ?, ?)'
+      `INSERT INTO providers
+         (id, display_name, kind, concurrency_limit, base_url, auth_token, api_key_env_var, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(p.id, p.display_name, p.concurrency_limit, p.notes ?? null);
+    .run(
+      p.id,
+      p.display_name,
+      p.kind,
+      p.concurrency_limit,
+      p.base_url ?? null,
+      p.auth_token ?? null,
+      p.api_key_env_var ?? null,
+      p.notes ?? null
+    );
 }
 
 export function updateProvider(
@@ -1014,10 +1286,185 @@ export function deleteProvider(id: string): void {
   getDb().prepare('DELETE FROM providers WHERE id = ?').run(id);
 }
 
-export function countToolsUsingProvider(providerId: string): number {
+/** Number of models pointing at this provider. Used to gate provider
+ *  deletion: RESTRICT semantics in the FK plus the UI shows the count so
+ *  operators know what to reassign. */
+export function countModelsUsingProvider(providerId: string): number {
   const row = getDb()
-    .prepare('SELECT COUNT(*) AS n FROM agent_tools WHERE provider_id = ?')
+    .prepare('SELECT COUNT(*) AS n FROM models WHERE provider_id = ?')
     .get(providerId) as { n: number };
+  return row.n;
+}
+
+// -- Models --
+
+export function getModel(id: number): Model | undefined {
+  return getDb()
+    .prepare('SELECT * FROM models WHERE id = ?')
+    .get(id) as Model | undefined;
+}
+
+export function getModelByProviderAndId(
+  providerId: string,
+  modelId: string
+): Model | undefined {
+  return getDb()
+    .prepare('SELECT * FROM models WHERE provider_id = ? AND model_id = ?')
+    .get(providerId, modelId) as Model | undefined;
+}
+
+export function getModelsByProvider(providerId: string): Model[] {
+  return getDb()
+    .prepare('SELECT * FROM models WHERE provider_id = ? ORDER BY model_id')
+    .all(providerId) as Model[];
+}
+
+export function getAllModels(): Model[] {
+  return getDb()
+    .prepare('SELECT * FROM models ORDER BY provider_id, model_id')
+    .all() as Model[];
+}
+
+export function insertModel(m: {
+  provider_id: string;
+  model_id: string;
+  display_name: string;
+}): Model {
+  const result = getDb()
+    .prepare(
+      'INSERT INTO models (provider_id, model_id, display_name) VALUES (?, ?, ?)'
+    )
+    .run(m.provider_id, m.model_id, m.display_name);
+  return getModel(result.lastInsertRowid as number)!;
+}
+
+export function updateModel(
+  id: number,
+  updates: Partial<Pick<Model, 'display_name'>>
+): void {
+  if (updates.display_name === undefined) return;
+  getDb()
+    .prepare('UPDATE models SET display_name = ? WHERE id = ?')
+    .run(updates.display_name, id);
+}
+
+export function deleteModel(id: number): void {
+  getDb().prepare('DELETE FROM models WHERE id = ?').run(id);
+}
+
+export function countProfilesUsingModel(modelPk: number): number {
+  const row = getDb()
+    .prepare('SELECT COUNT(*) AS n FROM agent_profiles WHERE model_pk = ?')
+    .get(modelPk) as { n: number };
+  return row.n;
+}
+
+// -- Agent profiles --
+
+/** SQLite stores `config_json` as a JSON string. Hydrate to the typed
+ *  AgentProfile shape consumers expect. Malformed JSON → `{}`. */
+function hydrateAgentProfile(
+  row: Record<string, unknown> | undefined
+): AgentProfile | undefined {
+  if (!row) return undefined;
+  let cfg: unknown = {};
+  try {
+    cfg = JSON.parse((row.config_json as string) ?? '{}');
+  } catch {
+    cfg = {};
+  }
+  return {
+    id: row.id as string,
+    display_name: row.display_name as string,
+    harness_id: row.harness_id as HarnessId,
+    model_pk: row.model_pk as number,
+    config_json: (cfg && typeof cfg === 'object' ? cfg : {}) as Record<
+      string,
+      unknown
+    >,
+    timeout_minutes: row.timeout_minutes as number,
+  };
+}
+
+export function getAgentProfile(id: string): AgentProfile | undefined {
+  const row = getDb()
+    .prepare('SELECT * FROM agent_profiles WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return hydrateAgentProfile(row);
+}
+
+export function getAgentProfiles(): AgentProfile[] {
+  const rows = getDb()
+    .prepare('SELECT * FROM agent_profiles ORDER BY id')
+    .all() as Record<string, unknown>[];
+  return rows.map((r) => hydrateAgentProfile(r)!);
+}
+
+export function insertAgentProfile(p: AgentProfile): void {
+  getDb()
+    .prepare(
+      `INSERT INTO agent_profiles
+         (id, display_name, harness_id, model_pk, config_json, timeout_minutes)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      p.id,
+      p.display_name,
+      p.harness_id,
+      p.model_pk,
+      JSON.stringify(p.config_json ?? {}),
+      p.timeout_minutes
+    );
+}
+
+export function updateAgentProfile(
+  id: string,
+  updates: Partial<Omit<AgentProfile, 'id'>>
+): void {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if (updates.display_name !== undefined) {
+    sets.push('display_name = ?');
+    params.push(updates.display_name);
+  }
+  if (updates.harness_id !== undefined) {
+    sets.push('harness_id = ?');
+    params.push(updates.harness_id);
+  }
+  if (updates.model_pk !== undefined) {
+    sets.push('model_pk = ?');
+    params.push(updates.model_pk);
+  }
+  if (updates.config_json !== undefined) {
+    sets.push('config_json = ?');
+    params.push(JSON.stringify(updates.config_json ?? {}));
+  }
+  if (updates.timeout_minutes !== undefined) {
+    sets.push('timeout_minutes = ?');
+    params.push(updates.timeout_minutes);
+  }
+  if (sets.length === 0) return;
+  params.push(id);
+  getDb()
+    .prepare(`UPDATE agent_profiles SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...params);
+}
+
+export function deleteAgentProfile(id: string): void {
+  getDb().prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
+}
+
+export function countReposUsingProfile(profileId: string): number {
+  const row = getDb()
+    .prepare('SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ?')
+    .get(profileId) as { n: number };
+  return row.n;
+}
+
+export function countTasksUsingProfile(profileId: string): number {
+  const row = getDb()
+    .prepare('SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ?')
+    .get(profileId) as { n: number };
   return row.n;
 }
 

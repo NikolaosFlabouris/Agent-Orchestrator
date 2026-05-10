@@ -12,8 +12,11 @@ export interface Task {
   attempt: number;
   max_attempts: number;
   prep_failure_count: number;
-  agent_tool: string | null;
-  model: string | null;
+  /** Per-task agent profile override. NULL = inherit from
+   *  `repos.agent_profile_id`, which itself falls back to
+   *  `settings.default_agent_profile_id`. The orchestrator resolves the
+   *  full chain when launching. */
+  agent_profile_id: string | null;
   container_id: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -45,7 +48,13 @@ export interface Attempt {
   completed_at: string | null;
   log_path: string | null;
   feedback: string | null;
-  model: string | null;
+  /** Snapshot of the model_id resolved at attempt-launch time. Stored on
+   *  the attempt row so audit/usage records survive subsequent edits to
+   *  the agent profile or its model row. */
+  model_id: string | null;
+  /** Snapshot of the harness id resolved at attempt-launch time. Same
+   *  reasoning as model_id — robust against profile edits mid-task. */
+  harness_id: string | null;
 }
 
 export type AttemptRole = 'develop' | 'review';
@@ -56,7 +65,9 @@ export interface Repo {
   owner: string;
   name: string;
   base_branch: string;
-  agent_tool: string;
+  /** Per-repo default agent profile. NULL = fall back to
+   *  `settings.default_agent_profile_id`. */
+  agent_profile_id: string | null;
   /** Ordered list of dependency-install steps the harness runs (sequentially,
    *  under a single `flock` on the shared cache mount) before the agent
    *  starts. Empty array = no install. Each entry is one of:
@@ -68,8 +79,7 @@ export interface Repo {
   install_steps: InstallStep[];
   /** Per-repo opt-in for the `script` install-step kind. Default false. The
    *  operator must flip this to allow committers to influence what runs at
-   *  pre-agent time, since the script inherits the agent container's env
-   *  including FORWARDED_KEYS. */
+   *  pre-agent time, since the script inherits the agent container env. */
   allow_script_steps: boolean;
   container_memory_mb: number | null;
   container_cpu_cores: number | null;
@@ -109,49 +119,119 @@ export const INSTALL_STEP_KINDS: readonly InstallStepKind[] = [
   'go-mod-download',
 ] as const;
 
-export interface AgentTool {
+// ---------------------------------------------------------------------------
+// Provider / Model / Agent profile
+// ---------------------------------------------------------------------------
+//
+// Three-layer config replaces the old monolithic `agent_tools` row:
+//
+//   provider — concrete connection identity (kind + credential + URL).
+//              Cloud kinds are typically singletons; self-hosted kinds
+//              (ollama) can have multiple instances.
+//   model    — a model_id known to a specific provider. Composite identity:
+//              (provider_id, model_id). Model strings are stored bare;
+//              harnesses prefix `<kind>/...` when the binary expects it.
+//   profile  — the operator-composed pairing: (harness_id, provider_id,
+//              model_id, harness-specific config). What tasks reference.
+
+/** Stable identifiers for the kinds of provider the orchestrator knows
+ *  about. Adding a kind requires code (new harness support + new UI form
+ *  in the Providers tab + new env-export logic). */
+export type ProviderKind =
+  | 'anthropic'
+  | 'claude-subscription'
+  | 'openai'
+  | 'gemini'
+  | 'mistral'
+  | 'deepseek'
+  | 'openrouter'
+  | 'ollama';
+
+export const PROVIDER_KINDS: readonly ProviderKind[] = [
+  'anthropic',
+  'claude-subscription',
+  'openai',
+  'gemini',
+  'mistral',
+  'deepseek',
+  'openrouter',
+  'ollama',
+] as const;
+
+export interface Provider {
+  /** Operator-authored stable id (e.g. "anthropic-team", "ollama-gpu"). */
   id: string;
   display_name: string;
-  type: AgentToolType;
-  command_template: string | null;
-  /** Flat key/value JSON. Forwarded as container env vars at launch. Keys
-   *  that collide with FORWARDED_KEYS override the orchestrator's host
-   *  values; arbitrary other keys are added to the container env. */
-  env_vars: string;
-  /** Optional config file path, relative to /repo (the workspace root inside
-   *  the container). Set together with config_file_content. */
-  config_file_path: string | null;
-  /** Optional config file content (raw text). Set together with
-   *  config_file_path. The orchestrator writes this to /repo/${path} before
-   *  the agent container starts. */
-  config_file_content: string | null;
-  /** Per-tool wall-clock timeout (minutes). Required since schema v17 — no
-   *  longer fall through to repo or global. The orchestrator passes this
-   *  verbatim to the harness's container-lifetime guard. Form pre-fill for
-   *  new tools is 2880 (48 h); seeded paid tools use 120 (2 h). */
-  timeout_minutes: number;
-  /** Concurrency pool this tool belongs to. Tools sharing a provider_id
-   *  serialise against that provider's concurrency_limit; tools with null
-   *  provider_id only have to fit in the host resource pool
-   *  (settings.max_agent_memory_mb / max_agent_cpu_cores). */
-  provider_id: string | null;
+  /** Determines credential shape, env-var name, default base_url, and which
+   *  harnesses can target this provider. See PROVIDER_KINDS. */
+  kind: ProviderKind;
+  /** Max simultaneous agent containers that can target this provider.
+   *  0 = paused (no tasks using this provider launch). Independent from
+   *  the host resource pool (settings.max_agent_memory_mb /
+   *  max_agent_cpu_cores), which gates hardware capacity. */
+  concurrency_limit: number;
+  /** Connection URL. NULL for cloud kinds (uses kind's default endpoint).
+   *  REQUIRED for self-hosted kinds (ollama). */
+  base_url: string | null;
+  /** Name of the orchestrator-side env var holding this provider's API
+   *  key (e.g. 'ANTHROPIC_API_KEY'). The orchestrator reads from its own
+   *  env at launch and exports the value into the agent container under
+   *  the kind's standard name. NULL when auth_token is used instead. */
+  api_key_env_var: string | null;
+  /** Inline secret for self-hosted providers (Ollama bearer/basic auth)
+   *  OR for cloud providers when the operator wants to multi-instance a
+   *  kind without using env-var indirection. NULL when api_key_env_var is
+   *  used or no auth is required. Stored in the DB as plaintext. */
+  auth_token: string | null;
+  /** Free-text operator notes. */
+  notes: string | null;
 }
 
-export type AgentToolType = 'sdk' | 'cli';
+export interface Model {
+  /** Surrogate primary key. Operators reference models by (provider_id,
+   *  model_id) but the FK from agent_profiles is to this surrogate. */
+  id: number;
+  /** FK → providers.id. Hard delete RESTRICTED if any models reference. */
+  provider_id: string;
+  /** Bare model identifier as the inference endpoint expects, without any
+   *  provider prefix (e.g. 'claude-sonnet-4-6', 'qwen2.5-coder:14b').
+   *  Harnesses that need '<provider>/<model>' form prefix at launch time. */
+  model_id: string;
+  display_name: string;
+}
 
-/** A provider represents an upstream resource (e.g. a specific Ollama server,
- *  an Anthropic API key's rate-limit bucket) whose concurrent use the
- *  orchestrator bounds via concurrency_limit. Two tools pointing at the same
- *  provider share a slot budget; tools on different providers run in parallel. */
-export interface Provider {
+/** Stable identifiers for the harnesses the orchestrator knows about.
+ *  Adding a harness requires code (new module + matching UI form
+ *  component). */
+export type HarnessId =
+  | 'claude-sdk'
+  | 'claude-code'
+  | 'opencode'
+  | 'pi';
+
+export const HARNESS_IDS: readonly HarnessId[] = [
+  'claude-sdk',
+  'claude-code',
+  'opencode',
+  'pi',
+] as const;
+
+export interface AgentProfile {
+  /** Operator-authored stable id. */
   id: string;
   display_name: string;
-  /** Max simultaneous agent containers that can use this provider.
-   *  0 = paused (no tasks using this provider launch).
-   *  Respected in addition to the host resource pool
-   *  (settings.max_agent_memory_mb / max_agent_cpu_cores). */
-  concurrency_limit: number;
-  notes: string | null;
+  /** Code-defined harness this profile uses. */
+  harness_id: HarnessId;
+  /** FK → models.id. The provider is reachable via the model. */
+  model_pk: number;
+  /** Harness-specific config (typed knobs the harness understands).
+   *  Stored as JSON; the harness module owns its schema. Empty object
+   *  if the harness has no operator-tunable knobs. */
+  config_json: Record<string, unknown>;
+  /** Wall-clock timeout (minutes) for an agent run using this profile.
+   *  Form pre-fill for new profiles is 2880 (48h); paid-API typical is
+   *  120 (2h). */
+  timeout_minutes: number;
 }
 
 export interface Settings {
@@ -164,7 +244,9 @@ export interface Settings {
   /** Max simultaneous agent-container CPU cores. Same composition as
    *  `max_agent_memory_mb` but for CPU. Both must allow launch. */
   max_agent_cpu_cores: string;
-  default_model: string;
+  /** Fallback agent profile when neither task nor repo specifies one.
+   *  Set on first-run seed; operator can change via Global Settings. */
+  default_agent_profile_id: string;
   last_shutdown: string;
 }
 
