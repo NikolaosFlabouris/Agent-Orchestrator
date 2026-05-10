@@ -17,6 +17,7 @@ import {
   detectChanges,
 } from '../workspace.js';
 import { runStep, getStep } from '../checkpoints.js';
+import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -496,7 +497,7 @@ export async function handleDevFailure(
   const freshTask = getTask(task.id)!;
   const repo = getRepo(task.repo_id);
   const newAttempt = freshTask.attempt + 1;
-  const maxAttempts = freshTask.max_attempts ?? 3;
+  const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
 
   if (newAttempt > maxAttempts) {
     // Max attempts exhausted

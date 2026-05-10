@@ -1,4 +1,5 @@
 import type { Repo } from '@orchestrator/shared';
+import type { ForgejoMergeStrategy } from './merge-strategy.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +63,15 @@ export interface ForgejoRepo {
   owner: { login: string };
   default_branch: string;
   html_url: string;
+  // Per-repo merge-strategy permissions, returned by `GET /repos/:owner/:name`.
+  // The `listUserRepos` payload also includes them. Optional in the type
+  // because older Forgejo deployments may not surface every flag; missing
+  // flags are treated as "not allowed" by getRepoMergeOptions.
+  allow_merge_commits?: boolean;
+  allow_rebase?: boolean;
+  allow_rebase_explicit?: boolean;
+  allow_squash_merge?: boolean;
+  allow_fast_forward_only_merge?: boolean;
 }
 
 export interface ForgejoHook {
@@ -156,6 +166,23 @@ export class ForgejoClient {
       'GET',
       `/user/repos?limit=${limit}`
     );
+  }
+
+  /** Fetch the repo's allowed merge strategies from Forgejo. The repo info
+   *  endpoint returns one boolean per strategy; we project them to the
+   *  string `Do` values that Forgejo's merge endpoint accepts. */
+  async getRepoMergeOptions(repo: Repo): Promise<ForgejoMergeStrategy[]> {
+    const info = await this.request<ForgejoRepo>(
+      'GET',
+      this.repoPath(repo)
+    );
+    const allowed: ForgejoMergeStrategy[] = [];
+    if (info.allow_squash_merge) allowed.push('squash');
+    if (info.allow_merge_commits) allowed.push('merge');
+    if (info.allow_rebase) allowed.push('rebase');
+    if (info.allow_rebase_explicit) allowed.push('rebase-merge');
+    if (info.allow_fast_forward_only_merge) allowed.push('fast-forward-only');
+    return allowed;
   }
 
   // ---- Issues ----
@@ -383,7 +410,7 @@ export class ForgejoClient {
   async mergePullRequest(
     repo: Repo,
     prNumber: number,
-    mergeType: 'merge' | 'squash' | 'rebase' = 'squash'
+    mergeType: ForgejoMergeStrategy = 'squash'
   ): Promise<void> {
     await this.request(
       'POST',

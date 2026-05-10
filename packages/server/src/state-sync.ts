@@ -2,6 +2,7 @@ import type { Task } from '@orchestrator/shared';
 import { getTask, getRepo, updateTask as dbUpdateTask, insertTaskEvent } from './db.js';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
 import { sendStreamComplete } from './ws/output.js';
+import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 
@@ -111,7 +112,7 @@ export function notifyTaskCreated(task: Task): void {
         .commentOnIssue(
           repo,
           task.issue_id,
-          `Task queued for orchestration (attempt 1/${task.max_attempts ?? 3}).`
+          `Task queued for orchestration (attempt 1/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
         )
         .catch(() => {
           /* best effort */

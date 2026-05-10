@@ -2,7 +2,10 @@ import Docker from 'dockerode';
 import os from 'node:os';
 import fs from 'node:fs';
 import type { Task, Repo, AgentTool } from '@orchestrator/shared';
-import { getSetting, getSettingInt } from './db.js';
+import {
+  DEFAULT_CONTAINER_MEMORY_MB,
+  DEFAULT_CONTAINER_CPU_CORES,
+} from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Client
@@ -116,33 +119,31 @@ export async function createAgentContainer(
   // The orchestrator passes in paths as they appear INSIDE its own container.
   // The Docker daemon interprets bind-mount sources as HOST paths, so translate
   // before constructing the Binds array. No-op on plain Linux where the two
-  // agree. Also ensure language-specific cache subdirectories exist and are
-  // writable by the agent user before Docker auto-creates them as root-owned.
-  ensureCacheSubdirs(cacheDir, repo.image_type);
+  // agree. Also ensure cache subdirectories exist and are writable by the
+  // agent user before Docker auto-creates them as root-owned.
+  ensureCacheSubdirs(cacheDir);
 
   const workdirHost = toHostPath(workdir);
   const taskDirHost = toHostPath(taskDir);
   const outputDirHost = toHostPath(outputDir);
   const cacheDirHost = toHostPath(cacheDir);
 
+  // All language cache buckets are always mounted. The unified
+  // orchestrator-agent image ships Node, Python, and Go toolchains together,
+  // so a repo can be polyglot. Empty buckets cost ~0 bytes until something
+  // writes to them.
   const mounts = [
     `${workdirHost}:/repo`,
     `${taskDirHost}:/task`,
     `${outputDirHost}:/output`,
     `${cacheDirHost}:/cache`,
+    `${cacheDirHost}/node_modules:/repo/node_modules`,
+    `${cacheDirHost}/npm-cache:/home/agent/.npm`,
+    `${cacheDirHost}/venv:/repo/.venv`,
+    `${cacheDirHost}/pip-cache:/home/agent/.cache/pip`,
+    `${cacheDirHost}/go-mod-cache:/home/agent/go/pkg/mod`,
+    `${cacheDirHost}/go-build-cache:/home/agent/.cache/go-build`,
   ];
-
-  // Language-specific cache mounts
-  if (repo.image_type === 'node') {
-    mounts.push(`${cacheDirHost}/node_modules:/repo/node_modules`);
-    mounts.push(`${cacheDirHost}/npm-cache:/home/agent/.npm`);
-  } else if (repo.image_type === 'python') {
-    mounts.push(`${cacheDirHost}/venv:/repo/.venv`);
-    mounts.push(`${cacheDirHost}/pip-cache:/home/agent/.cache/pip`);
-  } else if (repo.image_type === 'go') {
-    mounts.push(`${cacheDirHost}/go-mod-cache:/home/agent/go/pkg/mod`);
-    mounts.push(`${cacheDirHost}/go-build-cache:/home/agent/.cache/go-build`);
-  }
 
   // Entrypoint determined by tool type
   const entrypoint =
@@ -150,14 +151,14 @@ export async function createAgentContainer(
       ? ['npx', 'tsx', '/usr/local/bin/harness-sdk.ts']
       : ['/usr/local/bin/harness-cli'];
 
-  // Resource limits — task/repo overrides or global defaults
-  const memoryMb =
-    repo.container_memory_mb ?? getSettingInt('default_container_memory_mb');
-  const cpuCores =
-    repo.container_cpu_cores ?? getSettingInt('default_container_cpu_cores');
+  // Resource limits — per-repo override or compile-time default. Heavy
+  // workloads (Rust, large Next.js, Bazel) need the per-repo override; the
+  // default covers small-to-medium projects. See constants.ts.
+  const memoryMb = repo.container_memory_mb ?? DEFAULT_CONTAINER_MEMORY_MB;
+  const cpuCores = repo.container_cpu_cores ?? DEFAULT_CONTAINER_CPU_CORES;
 
   const container = await getDocker().createContainer({
-    Image: `orchestrator-agent-${repo.image_type}:latest`,
+    Image: 'orchestrator-agent:latest',
     Entrypoint: entrypoint,
     Labels: {
       [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE,
@@ -254,16 +255,23 @@ export function getContainer(containerId: string): Docker.Container {
 // ---------------------------------------------------------------------------
 // Cache-dir pre-creation (so Docker does not auto-create as root)
 // ---------------------------------------------------------------------------
+//
+// The unified agent image carries all three language toolchains, so we always
+// pre-create all cache buckets. Empty buckets cost ~0 bytes until something
+// writes to them; the orchestrator's WORKSPACE_RETENTION_DAYS cleanup
+// handles aging out anything that grows.
 
-const CACHE_SUBDIRS: Record<string, string[]> = {
-  node: ['node_modules', 'npm-cache'],
-  python: ['venv', 'pip-cache'],
-  go: ['go-mod-cache', 'go-build-cache'],
-};
+const CACHE_SUBDIRS = [
+  'node_modules',
+  'npm-cache',
+  'venv',
+  'pip-cache',
+  'go-mod-cache',
+  'go-build-cache',
+];
 
-function ensureCacheSubdirs(cacheDir: string, imageType: string): void {
-  const subs = CACHE_SUBDIRS[imageType] ?? [];
-  for (const sub of subs) {
+function ensureCacheSubdirs(cacheDir: string): void {
+  for (const sub of CACHE_SUBDIRS) {
     const p = `${cacheDir}/${sub}`;
     try {
       fs.mkdirSync(p, { recursive: true });

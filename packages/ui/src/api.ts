@@ -43,6 +43,8 @@ export const api = {
   // -- Status --
   getStatus: () =>
     request<StatusResponse>('GET', '/api/status'),
+  getHostCapacity: () =>
+    request<HostCapacityResponse>('GET', '/api/status/host-capacity'),
   pause: () => request('POST', '/api/status/pause'),
   resume: () => request('POST', '/api/status/resume'),
 
@@ -105,7 +107,6 @@ export interface TaskResponse {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
-  total_cost_usd: number;
   blocked_by: number[];
   /** Runtime health derived from container state. 'orphaned' means the
    *  task looks active but its container has vanished; the orchestrator
@@ -147,20 +148,21 @@ export interface AttemptResponse {
   verdict: string | null;
   started_at: string | null;
   completed_at: string | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
   model: string | null;
-  cost_usd: number | null;
   feedback: string | null;
 }
 
 export interface StatusResponse {
   state: string;
-  active_slots: number;
-  max_concurrency: number;
+  /** Host resource pool — utilisation vs cap on each dimension. */
+  host_pool: {
+    memory_used_mb: number;
+    memory_total_mb: number;
+    cpu_used_cores: number;
+    cpu_total_cores: number;
+  };
   queue_depth: number;
   daily_completions: number;
-  daily_cost_usd: number;
   forgejo_base_url: string;
   forgejo_connected: boolean;
   uptime_seconds: number;
@@ -172,6 +174,15 @@ export interface StatusResponse {
     concurrency_limit: number;
     active_slots: number;
   }>;
+}
+
+export interface HostCapacityResponse {
+  /** 'docker' = detected via the Docker daemon (true container ceiling).
+   *  'os' = fallback when the daemon was unreachable (orchestrator's view of
+   *  the host, may differ from what Docker can actually allocate). */
+  source: 'docker' | 'os';
+  memory_total_mb: number;
+  cpu_cores: number;
 }
 
 export interface CreateTaskRequest {
@@ -202,22 +213,50 @@ export type TaskAction =
   | { action: 'reset' }
   | { action: 'requeue' }
   | { action: 'extend'; additional_attempts: number }
-  | { agent_tool: string | null };
+  | { agent_tool: string | null }
+  | { max_attempts: number };
 
 export interface RepoResponse {
   id: number;
   owner: string;
   name: string;
   base_branch: string;
-  image_type: string;
   agent_tool: string;
-  pre_agent_script: string | null;
-  model: string | null;
-  max_turns: number | null;
-  timeout_minutes: number | null;
+  install_steps: InstallStep[];
+  allow_script_steps: boolean;
   container_memory_mb: number | null;
   container_cpu_cores: number | null;
+  merge_strategy: 'squash' | 'merge' | 'rebase';
 }
+
+export type InstallStepKind =
+  | 'npm-ci'
+  | 'npm-install'
+  | 'yarn-install'
+  | 'pnpm-install'
+  | 'pip-requirements'
+  | 'pip-pyproject'
+  | 'uv-sync'
+  | 'cargo-fetch'
+  | 'go-mod-download';
+
+export type InstallStep =
+  | { kind: InstallStepKind; cwd?: string }
+  | { kind: 'script'; path: string; cwd?: string };
+
+/** Display label per kind for the dropdown. The literal command on the
+ *  right-hand side is informational — it's also hardcoded server-side. */
+export const INSTALL_STEP_LABELS: Record<InstallStepKind, string> = {
+  'npm-ci': 'npm ci',
+  'npm-install': 'npm install',
+  'yarn-install': 'yarn install',
+  'pnpm-install': 'pnpm install',
+  'pip-requirements': 'pip install -r requirements.txt',
+  'pip-pyproject': 'pip install -e .',
+  'uv-sync': 'uv sync',
+  'cargo-fetch': 'cargo fetch',
+  'go-mod-download': 'go mod download',
+};
 
 export interface ToolResponse {
   id: string;
@@ -225,10 +264,10 @@ export interface ToolResponse {
   type: string;
   command_template: string | null;
   env_vars: Record<string, string>;
-  auth_type: string;
-  auth_config: Record<string, unknown>;
-  auth_status: string;
-  timeout_minutes: number | null;
+  config_file_path: string | null;
+  config_file_content: string | null;
+  /** NOT NULL since schema v17. Form pre-fill for new tools is 2880. */
+  timeout_minutes: number;
   provider_id: string | null;
 }
 
@@ -246,6 +285,9 @@ export interface ProviderResponse {
 export interface CredentialStatus {
   name: string;
   configured: boolean;
+  /** "orchestrator" — used by the orchestrator process itself.
+   *  "forwarded" — included in FORWARDED_KEYS, sent into every agent container. */
+  scope: 'orchestrator' | 'forwarded';
 }
 
 export interface ForgejoRepoResponse {

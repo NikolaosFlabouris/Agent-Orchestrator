@@ -240,9 +240,9 @@ describe('extendTask', () => {
     );
   });
 
-  it('uses the default max_attempts of 3 when task.max_attempts is null/undefined', async () => {
+  it('uses DEFAULT_MAX_ATTEMPTS when task.max_attempts is null/undefined', async () => {
     // Guards against the edge case where DB stores null for max_attempts —
-    // extendTask falls back to 3 via the `?? 3` expression.
+    // extendTask falls back to DEFAULT_MAX_ATTEMPTS (7) from constants.ts.
     const task = mkTask({ max_attempts: null as any }); // force null to exercise fallback
     const forgejo = makeForgejo();
     const scheduler = makeScheduler();
@@ -250,8 +250,8 @@ describe('extendTask', () => {
     await extendTask(task, forgejo, scheduler, silentLog, 1);
 
     const call = mocks.updateTaskWithSync.mock.calls[0];
-    // null ?? 3 → 3, then 3 + 1 = 4
-    expect(call[1].max_attempts).toBe(4);
+    // null ?? 7 → 7, then 7 + 1 = 8
+    expect(call[1].max_attempts).toBe(8);
   });
 
   it('posts a Forgejo issue comment (best-effort)', async () => {

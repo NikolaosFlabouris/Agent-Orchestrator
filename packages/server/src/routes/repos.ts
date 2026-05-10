@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { getDb, getRepo, getRepos, getTaskByIssue } from '../db.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { registerWebhook } from '../webhooks.js';
+import { validateInstallSteps } from '../install-steps.js';
 
 export function createRepoRoutes(forgejo: ForgejoClient) {
   return async function repoRoutes(app: FastifyInstance): Promise<void> {
@@ -37,29 +38,37 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
     // POST /api/repos
     app.post('/api/repos', async (request, reply) => {
       const body = request.body as Record<string, unknown>;
-      if (!body?.owner || !body?.name || !body?.image_type || !body?.agent_tool) {
+      if (!body?.owner || !body?.name || !body?.agent_tool) {
         return reply
           .status(400)
-          .send({ error: 'Required: owner, name, image_type, agent_tool' });
+          .send({ error: 'Required: owner, name, agent_tool' });
+      }
+
+      const allowScriptSteps = body.allow_script_steps === true || body.allow_script_steps === 1;
+      let installSteps: ReturnType<typeof validateInstallSteps>;
+      try {
+        installSteps = validateInstallSteps(body.install_steps, allowScriptSteps);
+      } catch (err) {
+        return reply
+          .status(400)
+          .send({ error: err instanceof Error ? err.message : String(err) });
       }
 
       const result = getDb()
         .prepare(
-          `INSERT INTO repos (owner, name, base_branch, image_type, agent_tool, pre_agent_script, model, max_turns, timeout_minutes, container_memory_mb, container_cpu_cores)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO repos (owner, name, base_branch, agent_tool, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           body.owner,
           body.name,
           body.base_branch ?? 'main',
-          body.image_type,
           body.agent_tool,
-          body.pre_agent_script ?? null,
-          body.model ?? null,
-          body.max_turns ?? null,
-          body.timeout_minutes ?? null,
+          JSON.stringify(installSteps),
+          allowScriptSteps ? 1 : 0,
           body.container_memory_mb ?? null,
-          body.container_cpu_cores ?? null
+          body.container_cpu_cores ?? null,
+          body.merge_strategy ?? 'squash'
         );
 
       const repo = getRepo(result.lastInsertRowid as number);
@@ -86,9 +95,9 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
 
         const body = request.body as Record<string, unknown>;
         const updatable = [
-          'base_branch', 'image_type', 'agent_tool', 'pre_agent_script',
-          'model', 'max_turns', 'timeout_minutes', 'container_memory_mb',
-          'container_cpu_cores',
+          'base_branch', 'agent_tool',
+          'container_memory_mb', 'container_cpu_cores',
+          'merge_strategy',
         ];
         const sets: string[] = [];
         const params: unknown[] = [];
@@ -98,6 +107,30 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
             sets.push(`${key} = ?`);
             params.push(body[key] ?? null);
           }
+        }
+
+        // install_steps + allow_script_steps validate together because the
+        // script-step opt-in gates the kind: 'script' validation. If only
+        // one is in the patch body, fall back to the existing repo's value
+        // for the other so the validator sees a consistent view.
+        if ('install_steps' in body || 'allow_script_steps' in body) {
+          const allow =
+            'allow_script_steps' in body
+              ? body.allow_script_steps === true || body.allow_script_steps === 1
+              : repo.allow_script_steps;
+          const stepsRaw = 'install_steps' in body ? body.install_steps : repo.install_steps;
+          let installSteps: ReturnType<typeof validateInstallSteps>;
+          try {
+            installSteps = validateInstallSteps(stepsRaw, allow);
+          } catch (err) {
+            return reply
+              .status(400)
+              .send({ error: err instanceof Error ? err.message : String(err) });
+          }
+          sets.push('install_steps = ?');
+          params.push(JSON.stringify(installSteps));
+          sets.push('allow_script_steps = ?');
+          params.push(allow ? 1 : 0);
         }
 
         if (sets.length === 0) {

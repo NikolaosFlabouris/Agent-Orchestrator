@@ -3,11 +3,17 @@ import type { TaskResponse, StatusResponse } from './api.js';
 type DashboardHandler = (event: DashboardWsEvent) => void;
 type OutputHandler = (event: OutputWsEvent) => void;
 
+export interface HostPool {
+  memory_used_mb: number;
+  memory_total_mb: number;
+  cpu_used_cores: number;
+  cpu_total_cores: number;
+}
+
 export interface DashboardSnapshot {
   type: 'snapshot';
   tasks: TaskResponse[];
-  activeCount: number;
-  maxConcurrency: number;
+  hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
 }
@@ -17,7 +23,7 @@ export type DashboardWsEvent =
   | { type: 'task_updated'; task: TaskResponse }
   | { type: 'task_created'; task: TaskResponse }
   | { type: 'task_removed'; taskId: number }
-  | { type: 'status_changed'; paused: boolean; activeCount: number; queueDepth: number };
+  | { type: 'status_changed'; paused: boolean; hostPool: HostPool; queueDepth: number };
 
 export type OutputWsEvent =
   | { type: 'output'; taskId: number; data: string; timestamp: string }

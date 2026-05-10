@@ -16,6 +16,11 @@ const RESETTABLE_STATUSES = new Set([
 ]);
 const REQUEUEABLE_STATUSES = new Set(['reset', 'cancelled']);
 const EXTENDABLE_STATUSES = new Set(['failed']);
+// max_attempts is editable in any non-terminal state. Terminal tasks should
+// use 'extend' (failed) or 'requeue' (cancelled/reset) instead.
+const MAX_ATTEMPTS_EDITABLE_STATUSES = new Set([
+  'queued', 'preparing', 'in-progress', 'in-review', 'changes-needed',
+]);
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
@@ -27,6 +32,10 @@ export function TaskDetail() {
   const [extendModalOpen, setExtendModalOpen] = useState(false);
   const [extendAmount, setExtendAmount] = useState(1);
   const [extendError, setExtendError] = useState<string | null>(null);
+  const [editingMaxAttempts, setEditingMaxAttempts] = useState(false);
+  const [maxAttemptsDraft, setMaxAttemptsDraft] = useState<number | null>(null);
+  const [maxAttemptsError, setMaxAttemptsError] = useState<string | null>(null);
+  const [maxAttemptsPending, setMaxAttemptsPending] = useState(false);
   const tools = useStore((s) => s.tools);
   const setTools = useStore((s) => s.setTools);
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
@@ -147,6 +156,52 @@ export function TaskDetail() {
     }
   }
 
+  function startEditMaxAttempts() {
+    if (!task) return;
+    setMaxAttemptsDraft(task.max_attempts);
+    setMaxAttemptsError(null);
+    setEditingMaxAttempts(true);
+  }
+
+  function cancelEditMaxAttempts() {
+    setEditingMaxAttempts(false);
+    setMaxAttemptsDraft(null);
+    setMaxAttemptsError(null);
+  }
+
+  async function handleMaxAttemptsSave() {
+    if (!task || maxAttemptsPending) return;
+    if (maxAttemptsDraft === null) return;
+    if (!Number.isInteger(maxAttemptsDraft) || maxAttemptsDraft < 1) {
+      setMaxAttemptsError('Must be a positive integer');
+      return;
+    }
+    if (maxAttemptsDraft < task.attempt) {
+      setMaxAttemptsError(
+        `Cannot set below current attempt count (${task.attempt})`
+      );
+      return;
+    }
+    if (maxAttemptsDraft === task.max_attempts) {
+      cancelEditMaxAttempts();
+      return;
+    }
+    setMaxAttemptsPending(true);
+    try {
+      await api.patchTask(task.id, { max_attempts: maxAttemptsDraft });
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+      setEditingMaxAttempts(false);
+      setMaxAttemptsDraft(null);
+    } catch (err) {
+      setMaxAttemptsError(
+        err instanceof Error ? err.message : 'Failed to update max attempts'
+      );
+    } finally {
+      setMaxAttemptsPending(false);
+    }
+  }
+
   if (error) {
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100 p-6">
@@ -165,11 +220,6 @@ export function TaskDetail() {
       </div>
     );
   }
-
-  const totalCost = task.attempts.reduce(
-    (sum, a) => sum + (a.cost_usd ?? 0),
-    0
-  );
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -269,9 +319,62 @@ export function TaskDetail() {
               <StatusBadge status={task.status} />
               {task.health === 'orphaned' && <HealthBadge health={task.health} />}
             </div>
-            <div className="text-sm text-gray-400 mt-1">
-              Attempt {task.attempt}/{task.max_attempts}
+            <div className="text-sm text-gray-400 mt-1 flex items-center gap-2 justify-end">
+              {editingMaxAttempts && MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) ? (
+                <>
+                  <span>Attempt {task.attempt}/</span>
+                  <input
+                    type="number"
+                    min={task.attempt}
+                    value={maxAttemptsDraft ?? ''}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      setMaxAttemptsDraft(Number.isNaN(v) ? null : v);
+                      if (maxAttemptsError) setMaxAttemptsError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleMaxAttemptsSave();
+                      else if (e.key === 'Escape') cancelEditMaxAttempts();
+                    }}
+                    autoFocus
+                    disabled={maxAttemptsPending}
+                    className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-right"
+                  />
+                  <button
+                    onClick={handleMaxAttemptsSave}
+                    disabled={maxAttemptsPending}
+                    className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={cancelEditMaxAttempts}
+                    disabled={maxAttemptsPending}
+                    className="text-xs text-gray-500 hover:text-gray-300"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span>Attempt {task.attempt}/{task.max_attempts}</span>
+                  {MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) && (
+                    <button
+                      onClick={startEditMaxAttempts}
+                      className="text-xs text-blue-400 hover:text-blue-300"
+                      title="Change max attempts"
+                    >
+                      Edit
+                    </button>
+                  )}
+                </>
+              )}
             </div>
+            {maxAttemptsError && (
+              <div className="text-xs text-red-400 mt-1 text-right">
+                {maxAttemptsError}
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -425,12 +528,6 @@ export function TaskDetail() {
               <AttemptRow key={attempt.id} attempt={attempt} />
             ))}
           </div>
-        </section>
-
-        {/* Cost summary */}
-        <section>
-          <h2 className="text-lg font-medium mb-2">Cost Summary</h2>
-          <p className="text-2xl font-mono">${totalCost.toFixed(2)}</p>
         </section>
 
         {/* Links */}
@@ -600,14 +697,8 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
         </div>
         <div className="flex items-center gap-4 text-sm text-gray-400">
           <span>{duration}</span>
-          {attempt.input_tokens != null && (
-            <span>
-              {(attempt.input_tokens / 1000).toFixed(0)}k in /{' '}
-              {((attempt.output_tokens ?? 0) / 1000).toFixed(0)}k out
-            </span>
-          )}
-          {attempt.cost_usd != null && (
-            <span className="font-mono">${attempt.cost_usd.toFixed(2)}</span>
+          {attempt.model && (
+            <span className="font-mono text-xs">{attempt.model}</span>
           )}
         </div>
       </div>

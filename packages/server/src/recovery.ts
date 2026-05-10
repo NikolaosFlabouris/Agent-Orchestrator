@@ -31,11 +31,6 @@ interface AgentResult {
   status: 'success' | 'failure' | 'timeout';
   exit_code?: number;
   error_message?: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-    model: string;
-  };
 }
 
 /**

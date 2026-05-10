@@ -22,8 +22,8 @@ import { describe, it, expect } from 'vitest';
  *   - The orchestrator is running and reachable at TEST_ORCHESTRATOR_URL
  *   - Agent images built: `./scripts/build-agent-images.sh`
  *   - Agent tools seeded: `npm run seed:tools`
- *   - The repo `TEST_REPO` is registered in the orchestrator with an image_type
- *     and an agent_tool (the mock tool `orchestrator-agent-test-mock` is
+ *   - The repo `TEST_REPO` is registered in the orchestrator with an
+ *     agent_tool (the mock tool `orchestrator-agent-test-mock` is
  *     recommended for deterministic behavior).
  *   - Labels `status/queued`, `status/in-progress`, `status/in-review`,
  *     `status/merged` exist in the repo (see docs/01-forgejo-setup.md).

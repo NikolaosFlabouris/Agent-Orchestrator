@@ -183,16 +183,7 @@ function classifyJsonLine(obj: JsonObj, raw: string): { show: boolean; content: 
 
   if (type === 'result') {
     const turns = obj.num_turns ?? '?';
-    const cost =
-      typeof obj.total_cost_usd === 'number'
-        ? obj.total_cost_usd.toFixed(4)
-        : typeof obj.costUsd === 'number'
-          ? (obj.costUsd as number).toFixed(4)
-          : '?';
-    const usage = obj.usage as JsonObj | undefined;
-    const input = usage?.input_tokens ?? '?';
-    const output = usage?.output_tokens ?? '?';
-    return { show: true, content: `[result] turns=${turns} cost=$${cost} input=${input} output=${output}` };
+    return { show: true, content: `[result] turns=${turns}` };
   }
 
   // Pi event types

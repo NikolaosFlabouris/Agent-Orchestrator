@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { TaskResponse, ToolResponse } from './api.js';
+import type { HostPool } from './ws.js';
 
 interface Alert {
   level: 'info' | 'warning' | 'error';
@@ -9,20 +10,17 @@ interface Alert {
 interface DashboardState {
   tasks: TaskResponse[];
   tools: ToolResponse[];
-  activeCount: number;
-  maxConcurrency: number;
+  hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
-  dailyCostUsd: number;
   dailyCompletions: number;
   forgejoBaseUrl: string;
   alerts: Alert[];
- 
+
   // Actions
   setSnapshot: (data: {
     tasks: TaskResponse[];
-    activeCount: number;
-    maxConcurrency: number;
+    hostPool: HostPool;
     queueDepth: number;
     paused: boolean;
   }) => void;
@@ -31,10 +29,10 @@ interface DashboardState {
   removeTask: (taskId: number) => void;
   setStatus: (data: {
     paused: boolean;
-    activeCount: number;
+    hostPool: HostPool;
     queueDepth: number;
   }) => void;
-  setDailyCost: (cost: number) => void;
+  setHostPool: (hostPool: HostPool) => void;
   setDailyCompletions: (count: number) => void;
   setForgejoBaseUrl: (url: string) => void;
   addAlert: (alert: Alert) => void;
@@ -42,14 +40,19 @@ interface DashboardState {
   setTools: (tools: ToolResponse[]) => void;
 }
 
+const ZERO_POOL: HostPool = {
+  memory_used_mb: 0,
+  memory_total_mb: 0,
+  cpu_used_cores: 0,
+  cpu_total_cores: 0,
+};
+
 export const useStore = create<DashboardState>((set) => ({
   tasks: [],
   tools: [],
-  activeCount: 0,
-  maxConcurrency: 5,
+  hostPool: ZERO_POOL,
   queueDepth: 0,
   paused: false,
-  dailyCostUsd: 0,
   dailyCompletions: 0,
   forgejoBaseUrl: '',
   alerts: [],
@@ -57,8 +60,7 @@ export const useStore = create<DashboardState>((set) => ({
   setSnapshot: (data) =>
     set({
       tasks: data.tasks,
-      activeCount: data.activeCount,
-      maxConcurrency: data.maxConcurrency,
+      hostPool: data.hostPool,
       queueDepth: data.queueDepth,
       paused: data.paused,
     }),
@@ -81,14 +83,14 @@ export const useStore = create<DashboardState>((set) => ({
   setStatus: (data) =>
     set({
       paused: data.paused,
-      activeCount: data.activeCount,
+      hostPool: data.hostPool,
       queueDepth: data.queueDepth,
     }),
 
-  setDailyCost: (cost) => set({ dailyCostUsd: cost }),
+  setHostPool: (hostPool) => set({ hostPool }),
   setDailyCompletions: (count) => set({ dailyCompletions: count }),
   setForgejoBaseUrl: (url) => set({ forgejoBaseUrl: url }),
- 
+
   addAlert: (alert) =>
     set((state) => ({ alerts: [...state.alerts, alert] })),
 

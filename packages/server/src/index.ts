@@ -4,7 +4,8 @@ import fastifyStatic from "@fastify/static";
 import fastifyCookie from "@fastify/cookie";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { initDatabase } from "./db.js";
+import { initDatabase, wasFirstRun, updateSetting } from "./db.js";
+import { detectHostCapacity } from "./host-capacity.js";
 import { ForgejoClient } from "./forgejo.js";
 import {
   initDocker,
@@ -33,10 +34,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const FORGEJO_URL = process.env.FORGEJO_URL ?? "http://forgejo:3000";
 const FORGEJO_ORCHESTRATOR_TOKEN = process.env.FORGEJO_ORCHESTRATOR_TOKEN ?? "";
-const DATA_DIR = process.env.DATA_DIR ?? process.cwd();
-const DB_PATH = process.env.DB_PATH ?? path.join(DATA_DIR, "orchestrator.db");
-const PORT = parseInt(process.env.PORT ?? "8080", 10);
-const HOST = process.env.HOST ?? "0.0.0.0";
+// Container layout invariants: the persistence volume is mounted at /data,
+// SQLite lives at the root of it, and Fastify binds 0.0.0.0:8080 because the
+// docker-compose port mapping forwards 8081→8080. Changing any of these
+// requires a matching change to docker-compose.yml + Dockerfile, so they
+// stay as constants instead of env-tunable knobs.
+const DB_PATH = "/data/orchestrator.db";
+const PORT = 8080;
+const HOST = "0.0.0.0";
 const COOKIE_SECRET =
   process.env.COOKIE_SECRET ?? "orchestrator-dev-secret-change-in-production";
 
@@ -98,6 +103,32 @@ async function main() {
       { event: "docker_connection_failed", err },
       "Failed to connect to Docker",
     );
+  }
+
+  // -- First-run host-capacity seeding --
+  // On a fresh install, replace the static fallback resource pool with the
+  // capacity Docker actually reports. Existing installs are left alone — the
+  // operator's prior tuning takes precedence over re-detection.
+  if (wasFirstRun()) {
+    try {
+      const capacity = await detectHostCapacity();
+      updateSetting("max_agent_memory_mb", String(capacity.memory_total_mb));
+      updateSetting("max_agent_cpu_cores", String(capacity.cpu_cores));
+      log.info(
+        {
+          event: "host_capacity_seeded",
+          source: capacity.source,
+          memory_total_mb: capacity.memory_total_mb,
+          cpu_cores: capacity.cpu_cores,
+        },
+        "Seeded resource pool from detected host capacity",
+      );
+    } catch (err) {
+      log.warn(
+        { event: "host_capacity_probe_failed", err },
+        "Could not detect host capacity on first run; static defaults retained",
+      );
+    }
   }
 
   // -- State sync (WebSocket broadcast + Forgejo label sync) --

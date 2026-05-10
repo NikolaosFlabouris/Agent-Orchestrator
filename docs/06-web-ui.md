@@ -119,7 +119,6 @@ Returns all active and queued tasks, plus the most recent completed tasks (limit
       "started_at": "2025-03-15T10:42:00Z",
       "completed_at": null,
       "created_at": "2025-03-15T10:40:00Z",
-      "total_cost_usd": 4.52,
       "blocked_by": []
     }
   ]
@@ -129,9 +128,9 @@ Returns all active and queued tasks, plus the most recent completed tasks (limit
 Field notes:
 - `issue_title` is fetched from Forgejo, not stored in the DB
 - `repo` is joined from the `repos` table
-- `total_cost_usd` is computed: `SUM(cost_usd) FROM attempts WHERE task_id = ?`
 - `blocked_by` is computed from dependency parsing (array of issue IDs that are still open)
 - Active and queued tasks are always returned in full; completed tasks are limited by `limit`
+- Cost tracking was removed in schema v14 — there is no `total_cost_usd` field on the task or `cost_usd`/`input_tokens`/`output_tokens` on the per-attempt rows
 
 Frontend grouping: active = `status IN ('preparing', 'in-progress', 'in-review', 'changes-needed')`, queued = `status == 'queued'`, completed = everything else.
 
@@ -156,7 +155,6 @@ Returns the same task object as above, plus the full attempt history and timelin
   "started_at": "2025-03-15T10:42:00Z",
   "completed_at": null,
   "created_at": "2025-03-15T10:40:00Z",
-  "total_cost_usd": 4.52,
   "blocked_by": [],
   "attempts": [
     {
@@ -167,10 +165,7 @@ Returns the same task object as above, plus the full attempt history and timelin
       "verdict": null,
       "started_at": "2025-03-15T10:42:00Z",
       "completed_at": "2025-03-15T10:55:00Z",
-      "input_tokens": 125000,
-      "output_tokens": 8500,
-      "model": "claude-sonnet-4-20250514",
-      "cost_usd": 2.26,
+      "model": "sonnet",
       "feedback": null
     },
     {
@@ -181,10 +176,7 @@ Returns the same task object as above, plus the full attempt history and timelin
       "verdict": "changes_needed",
       "started_at": "2025-03-15T10:55:30Z",
       "completed_at": "2025-03-15T11:02:00Z",
-      "input_tokens": 95000,
-      "output_tokens": 3200,
-      "model": "claude-sonnet-4-20250514",
-      "cost_usd": 1.33,
+      "model": "sonnet",
       "feedback": "[{\"file\":\"src/login.ts\",\"line\":42,\"comment\":\"Missing null check\"}]"
     },
     {
@@ -195,10 +187,7 @@ Returns the same task object as above, plus the full attempt history and timelin
       "verdict": null,
       "started_at": "2025-03-15T11:02:30Z",
       "completed_at": null,
-      "input_tokens": null,
-      "output_tokens": null,
       "model": null,
-      "cost_usd": null,
       "feedback": null
     }
   ],
@@ -266,35 +255,35 @@ POST   /webhooks/forgejo            → Forgejo webhook receiver (payload define
       "owner": "org",
       "name": "frontend",
       "base_branch": "main",
-      "image_type": "node",
       "agent_tool": "claude-agent-sdk",
-      "pre_agent_script": "npm ci",
-      "model": null,
-      "max_turns": null,
-      "timeout_minutes": null,
+      "install_steps": [{ "kind": "npm-ci" }],
+      "allow_script_steps": false,
       "container_memory_mb": null,
-      "container_cpu_cores": null
+      "container_cpu_cores": null,
+      "merge_strategy": "squash"
     }
   ]
 }
 ```
 
-`POST /api/repos` request — required: `owner`, `name`, `image_type`, `agent_tool`. All other fields are optional (defaults: `base_branch` = `"main"`, nullable fields = `null`):
+`POST /api/repos` request — required: `owner`, `name`, `agent_tool`. All other fields are optional (defaults: `base_branch` = `"main"`, `install_steps` = `[]`, `allow_script_steps` = `false`, nullable resource fields = `null`):
 
 ```json
 {
   "owner": "org",
   "name": "backend",
   "base_branch": "main",
-  "image_type": "python",
   "agent_tool": "claude-agent-sdk",
-  "pre_agent_script": "pip install -r requirements.txt",
-  "model": "opus",
-  "timeout_minutes": 60
+  "install_steps": [
+    { "kind": "pip-requirements", "cwd": "services/api" },
+    { "kind": "pnpm-install" }
+  ]
 }
 ```
 
-Nullable fields (`model`, `max_turns`, `timeout_minutes`, `container_memory_mb`, `container_cpu_cores`) mean "use global default". Setting a value overrides the global for all tasks in this repo.
+`install_steps` is an ordered list. Recognised kinds: `npm-ci`, `npm-install`, `yarn-install`, `pnpm-install`, `pip-requirements`, `pip-pyproject`, `uv-sync`, `cargo-fetch`, `go-mod-download`. Each entry may include an optional `cwd` (relative to `/repo`, no `..`, no leading `/`). The `script` kind (`{ kind: "script", path: "scripts/setup.sh", cwd: "..." }`) runs `bash <path>` and is only accepted when this repo's `allow_script_steps` is `true`. Toggling `allow_script_steps` is the operator's per-repo opt-in for letting committers influence what runs at pre-agent time, since scripts inherit the agent container env (`ANTHROPIC_API_KEY`, `FORGEJO_AGENT_TOKEN`, etc.).
+
+Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "use global default". Setting a value overrides the global for all tasks in this repo.
 
 #### GET /api/tools Response & POST /api/tools Request
 
@@ -308,10 +297,7 @@ Nullable fields (`model`, `max_turns`, `timeout_minutes`, `container_memory_mb`,
       "display_name": "Claude Agent SDK",
       "type": "sdk",
       "command_template": null,
-      "env_vars": {},
-      "auth_type": "api-key",
-      "auth_config": { "env_var": "ANTHROPIC_API_KEY" },
-      "auth_status": "configured"
+      "env_vars": {}
     },
     {
       "id": "opencode-local",
@@ -322,18 +308,13 @@ Nullable fields (`model`, `max_turns`, `timeout_minutes`, `container_memory_mb`,
         "OPENCODE_PROVIDER": "openai-compatible",
         "OPENCODE_MODEL": "codestral-latest",
         "OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1"
-      },
-      "auth_type": "api-key",
-      "auth_config": { "env_var": "OPENCODE_API_KEY", "optional": true },
-      "auth_status": "not required"
+      }
     }
   ]
 }
 ```
 
-The `auth_status` field is computed at response time (not stored): `"configured"` if the env var exists in `process.env`, `"missing"` if required but not set, `"not required"` if `auth_type` is `"none"` or `auth_config.optional` is `true` and the env var is not set.
-
-`POST /api/tools` request — required: `id`, `display_name`, `type`, `auth_type`. All other fields are optional:
+`POST /api/tools` request — required: `id`, `display_name`, `type`. All other fields are optional:
 
 ```json
 {
@@ -344,13 +325,11 @@ The `auth_status` field is computed at response time (not stored): `"configured"
   "env_vars": {
     "OPENCODE_PROVIDER": "anthropic",
     "OPENCODE_MODEL": "claude-sonnet-4-20250514"
-  },
-  "auth_type": "api-key",
-  "auth_config": { "env_var": "ANTHROPIC_API_KEY" }
+  }
 }
 ```
 
-The `env_vars` object contains non-secret configuration injected as container environment variables. Secret credentials (API keys) are never stored here — they're referenced by env var name in `auth_config` and read from `process.env` at container creation time.
+The `env_vars` object contains non-secret configuration injected as container environment variables. Provider credentials (API keys) are never stored here — they live in the orchestrator's `.env` and are forwarded into every container via the fixed `FORWARDED_KEYS` list (see `packages/server/src/credentials.ts`).
 
 #### GET /api/repos/:id/issues Response
 
@@ -402,20 +381,20 @@ Required: `issue_id`, `repo_id`. All other fields are optional.
 
 ```json
 {
-  "max_concurrency": 5,
-  "default_max_attempts": 3,
-  "agent_timeout_minutes": 30,
-  "poll_interval_seconds": 60,
-  "merge_strategy": "squash",
-  "model_pricing": {
-    "claude-sonnet-4": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
-    "claude-opus-4": { "input_per_mtok": 5.00, "output_per_mtok": 25.00 },
-    "claude-haiku-4": { "input_per_mtok": 1.00, "output_per_mtok": 5.00 }
-  },
-  "workspace_retention_days": 7,
-  "disk_threshold_bytes": 53687091200
+  "max_agent_memory_mb": 20480,
+  "max_agent_cpu_cores": 10,
+  "default_model": "sonnet"
 }
 ```
+
+Note: `poll_interval_seconds` (60s), `default_max_attempts` (7), and
+`workspace_retention_days` (7) are compile-time constants in
+`packages/server/src/constants.ts`, not editable settings. Per-task
+`max_attempts` overrides are settable via `POST /api/tasks` at create time
+and via `PATCH /api/tasks/:id` (with `{ max_attempts: N }`) on the Task
+Detail page for non-terminal tasks. Cost tracking (`model_pricing`,
+`daily_cost_usd`, per-task / per-attempt cost) was removed in schema v14 —
+use Anthropic's console for spend visibility.
 
 #### HTTP Status Codes
 
@@ -437,24 +416,21 @@ All error responses include a JSON body: `{ "error": "Human-readable description
 ```json
 {
   "state": "running",
-  "active_slots": 3,
-  "max_concurrency": 5,
+  "host_pool": {
+    "memory_used_mb": 12288,
+    "memory_total_mb": 20480,
+    "cpu_used_cores": 6,
+    "cpu_total_cores": 10
+  },
   "queue_depth": 7,
   "daily_completions": 12,
-  "daily_cost_usd": 28.50,
   "forgejo_connected": true,
   "last_poll_at": "2025-03-15T11:00:03Z",
-  "uptime_seconds": 86400,
-  "disk": {
-    "workspaces_bytes": 5368709120,
-    "caches_bytes": 2147483648,
-    "total_bytes": 7516192768,
-    "threshold_bytes": 53687091200
-  }
+  "uptime_seconds": 86400
 }
 ```
 
-The UI dashboard header uses `state`, `active_slots`, `max_concurrency`, `queue_depth`, `daily_completions`, and `daily_cost_usd`. The remaining fields (`forgejo_connected`, `last_poll_at`, `uptime_seconds`, `disk`) are used by the Settings view and the monitoring/alert system.
+The UI dashboard header uses `state`, `host_pool` (rendered as `Mem: used/total GB · CPU: used/total`), `queue_depth`, and `daily_completions`. The remaining fields (`forgejo_connected`, `last_poll_at`, `uptime_seconds`) are visibility-only — the orchestrator no longer alerts on a disk threshold (use OS-level disk monitoring instead). The host resource pool replaces the older count-based `active_slots` / `max_concurrency` pair: per-repo `container_memory_mb` / `container_cpu_cores` make a count of running tasks a leaky proxy for actual host capacity.
 
 ### WebSocket Endpoints
 

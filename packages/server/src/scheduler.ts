@@ -8,7 +8,6 @@ import {
   getAgentTool,
   getProviders,
   getSetting,
-  getSettingInt,
   updateTask,
   insertAttempt,
   updateAttempt,
@@ -33,8 +32,11 @@ import {
 } from './docker.js';
 import {
   getCandidates,
-  getAvailableSlots,
+  getAvailableResources,
+  getTaskResources,
+  fitsInPool,
   checkDependenciesMet,
+  type TaskResources,
 } from './queue.js';
 import {
   prepareWorkspace,
@@ -54,6 +56,9 @@ import {
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import { runOrphanSweep } from './orphan-recovery.js';
+import { FORWARDED_KEYS } from './credentials.js';
+import { DEFAULT_MAX_ATTEMPTS, POLL_INTERVAL_SECONDS } from './constants.js';
+import { INSTALL_STEP_COMMANDS } from './install-steps.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 // ---------------------------------------------------------------------------
@@ -64,11 +69,6 @@ interface AgentResult {
   status: 'success' | 'failure' | 'timeout';
   exit_code?: number;
   error_message?: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-    model: string;
-  };
 }
 
 interface TaskMeta {
@@ -80,10 +80,39 @@ interface TaskMeta {
   role: 'develop' | 'review';
   pr_number: number | null;
   model: string;
-  max_turns: number;
-  pre_agent_script: string | null;
+  /** Resolved install commands the harness runs sequentially under flock
+   *  before the agent. Each entry is the literal shell command to exec.
+   *  The orchestrator builds these from the repo's typed install_steps so
+   *  the harness never sees free-text input from the operator. */
+  install_commands: InstallCommand[];
   agent_tool: string;
   agent_command: string;
+}
+
+interface InstallCommand {
+  /** Literal shell command (e.g. `npm ci`) or `bash <path>` for script
+   *  steps. Always built by the orchestrator from a typed step. */
+  command: string;
+  /** Working directory (absolute path inside the container) the harness
+   *  should run the command in. Defaults to /repo. */
+  cwd: string;
+}
+
+/** Resolve a repo's typed install_steps into the literal command strings the
+ *  harness will exec. Script steps were already gated by allow_script_steps
+ *  at validation time; here we just translate { kind: 'script', path } into
+ *  `bash <path>`. cwd is anchored under /repo. */
+function buildInstallCommands(repo: Repo): InstallCommand[] {
+  const out: InstallCommand[] = [];
+  for (const step of repo.install_steps) {
+    const cwd = step.cwd ? `/repo/${step.cwd}` : '/repo';
+    if (step.kind === 'script') {
+      out.push({ command: `bash ${step.path}`, cwd });
+    } else {
+      out.push({ command: INSTALL_STEP_COMMANDS[step.kind], cwd });
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +159,9 @@ export class Scheduler {
     this.running = true;
     this.paused = false;
 
-    // 60-second fallback poll timer
-    const pollInterval = getSettingInt('poll_interval_seconds') * 1000 || 60_000;
+    // Fallback reconciliation tick. Webhooks drive the real-time path; this
+    // interval is the safety net for missed events. See constants.ts.
+    const pollInterval = POLL_INTERVAL_SECONDS * 1000;
     this.pollTimer = setInterval(() => {
       this.tick().catch((err) => {
         this.log.error({ event: 'tick_error', err }, 'Scheduler tick failed');
@@ -354,15 +384,22 @@ export class Scheduler {
   }
 
   private async _fillSlotsInner(): Promise<void> {
-    let available = getAvailableSlots();
-    if (available <= 0) return;
+    // Two layers gate every launch:
+    //   1. Host resource pool — sums active container memory/CPU and
+    //      refuses launch if the candidate would exceed the pool. The
+    //      pool sits in settings.max_agent_memory_mb / max_agent_cpu_cores;
+    //      candidate footprint comes from the task's repo
+    //      (container_memory_mb / container_cpu_cores) or the
+    //      DEFAULT_CONTAINER_* constants.
+    //   2. Per-provider concurrency_limit — addresses upstream LLM
+    //      provider constraints (Ollama can really only do 1 at a time;
+    //      Anthropic API has rate limits). Independent of host capacity.
+    let availableResources: TaskResources = getAvailableResources();
+    // Early exit if the host pool is fully saturated on either dimension.
+    // Realistic per-task footprints are always > 0, so a 0-headroom pool
+    // can't fit anything.
+    if (availableResources.memoryMb <= 0 || availableResources.cpuCores <= 0) return;
 
-    // Per-provider pool accounting. Count how many tasks are currently holding
-    // a slot against each provider (active = has container_id and status is
-    // preparing / in-progress / in-review). Candidates whose provider is at
-    // its concurrency_limit are skipped; candidates for other providers (or
-    // for no provider at all) still launch. The global max_concurrency
-    // ceiling is respected by the outer `available` counter.
     const active = [
       ...getTasks({ status: 'preparing' }),
       ...getTasks({ status: 'in-progress' }),
@@ -379,7 +416,7 @@ export class Scheduler {
     const candidates = getCandidates();
 
     for (const candidate of candidates) {
-      if (available <= 0) break;
+      if (availableResources.memoryMb <= 0 || availableResources.cpuCores <= 0) break;
 
       // Re-read task to get fresh state
       const task = getTask(candidate.id);
@@ -394,15 +431,20 @@ export class Scheduler {
         continue;
       }
 
+      // Host resource fit check — does this candidate's footprint fit in
+      // the remaining pool? We don't "break" on a miss: a later, smaller
+      // candidate could still fit (e.g. preferred FIFO order is task A
+      // (8 GB) → task B (1 GB), pool has 4 GB left → A skips, B launches).
+      const need = getTaskResources(task);
+      if (!fitsInPool(need, availableResources)) {
+        continue;
+      }
+
       // Provider pool check — skip if this candidate's pool is saturated.
-      // We don't "break"; a later candidate on a different (idle) provider
-      // can still launch past a busy earlier one. This trades strict FIFO
-      // for "idle resources should be used", which is what pools are for.
+      // A later candidate on a different (idle) provider can still launch.
       const tool = this.toolForTask(task);
       const providerKey = resolveProviderKey(task, tool, getRepo(task.repo_id));
-      if (
-        !canLaunchInPool(providerKey, activeByProvider, limitByProvider, available)
-      ) {
+      if (!canLaunchInPool(providerKey, activeByProvider, limitByProvider)) {
         continue;
       }
 
@@ -457,9 +499,12 @@ export class Scheduler {
           // Queued: fresh task
           await this.launchDevContainer(task);
         }
-        // Accounting: decrement global, bump the provider counter so a
-        // subsequent candidate on the same pool sees the updated state.
-        available--;
+        // Accounting: claim resources from the host pool and bump the
+        // provider counter so a subsequent candidate sees fresh state.
+        availableResources = {
+          memoryMb: availableResources.memoryMb - need.memoryMb,
+          cpuCores: availableResources.cpuCores - need.cpuCores,
+        };
         activeByProvider.set(
           providerKey,
           (activeByProvider.get(providerKey) ?? 0) + 1
@@ -525,7 +570,7 @@ export class Scheduler {
     const effective = this.resolveConfig(task, repo, tool);
 
     // Create and start container
-    const env = this.buildEnv(task, repo, tool);
+    const env = this.buildEnv(tool);
     const container = await createAgentContainer({
       task,
       repo,
@@ -550,7 +595,7 @@ export class Scheduler {
         await this.forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Dev agent starting (attempt ${task.attempt}/${task.max_attempts ?? 3}).`
+          `Dev agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
         );
       }
     } catch {
@@ -623,7 +668,7 @@ export class Scheduler {
     const effective = this.resolveConfig(task, repo, tool);
 
     // Create and start container
-    const env = this.buildEnv(task, repo, tool);
+    const env = this.buildEnv(tool);
     const container = await createAgentContainer({
       task,
       repo,
@@ -647,7 +692,7 @@ export class Scheduler {
         await this.forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Review agent starting (attempt ${task.attempt}/${task.max_attempts ?? 3}).`
+          `Review agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
         );
       }
     } catch {
@@ -922,9 +967,6 @@ export class Scheduler {
       }
     }
 
-    // Record cost
-    this.recordAttemptCost(task, result, attemptId);
-
     // Read review verdict if present
     let verdict: string | null = null;
     let feedback: string | null = null;
@@ -951,44 +993,6 @@ export class Scheduler {
       verdict,
       log_path: path.join(getOutputDir(task), 'progress.log'),
       feedback,
-    });
-  }
-
-  private recordAttemptCost(
-    task: Task,
-    result: AgentResult,
-    attemptId: number
-  ): void {
-    if (!result.usage?.input_tokens) return;
-
-    const modelKey = normalizeModelName(result.usage.model);
-    const pricingStr = getSetting('model_pricing');
-    let costUsd = 0;
-
-    if (pricingStr) {
-      try {
-        const pricing = JSON.parse(pricingStr);
-        const modelPricing = pricing[modelKey];
-        if (modelPricing) {
-          costUsd =
-            (result.usage.input_tokens * modelPricing.input_per_mtok) / 1_000_000 +
-            (result.usage.output_tokens * modelPricing.output_per_mtok) / 1_000_000;
-        } else {
-          this.log.warn(
-            { event: 'unknown_model_pricing', model: result.usage.model },
-            'No pricing found for model'
-          );
-        }
-      } catch {
-        // Invalid pricing JSON
-      }
-    }
-
-    updateAttempt(attemptId, {
-      input_tokens: result.usage.input_tokens,
-      output_tokens: result.usage.output_tokens,
-      model: result.usage.model,
-      cost_usd: costUsd,
     });
   }
 
@@ -1045,58 +1049,55 @@ export class Scheduler {
   }
 
   private resolveConfig(
-    task: Task,
-    repo: Repo,
+    _task: Task,
+    _repo: Repo,
     tool: AgentTool
-  ): { model: string; maxTurns: number; timeout: number; command: string } {
-    // Timeout resolution: tool > repo > global. Per-tool override is useful
-    // for raising the limit on free/local tools (e.g. OpenCode + Ollama) while
-    // keeping API-backed tools on a tighter safety budget.
+  ): { model: string; timeout: number; command: string } {
+    // Schema v17 collapsed the timeout chain — `tool.timeout_minutes` is
+    // NOT NULL and the only source. Per-repo and global overrides are gone.
+    // Model resolution is per-task → global default; max-turns isn't
+    // surfaced (CLI tools encode their own cap in command_template; the
+    // SDK harness uses its own default — wall-clock timeout is the
+    // lifetime safety net).
     return {
-      model: task.model ?? repo.model ?? getSetting('default_model') ?? 'sonnet',
-      maxTurns: repo.max_turns ?? (getSettingInt('default_max_turns') || 100),
-      timeout:
-        tool.timeout_minutes ??
-        repo.timeout_minutes ??
-        (getSettingInt('agent_timeout_minutes') || 30),
+      model: _task.model ?? getSetting('default_model') ?? 'sonnet',
+      timeout: tool.timeout_minutes,
       command: tool.command_template ?? '',
     };
   }
 
-  private buildEnv(task: Task, repo: Repo, tool: AgentTool): string[] {
+  private buildEnv(tool: AgentTool): string[] {
     const env: string[] = [];
 
-    // Static env vars from tool config. If the JSON looks like a config file
-    // (top-level `provider`/`permission`/`agent` key — typical of OpenCode's
-    // opencode.json shape), skip env-var injection: it would set garbage env
-    // vars like `provider=[object Object]`. The config is written to
-    // /repo/opencode.json instead by writeAgentConfigFile.
-    try {
-      const envVars = JSON.parse(tool.env_vars);
-      const isConfigShaped =
-        envVars &&
-        typeof envVars === 'object' &&
-        ('provider' in envVars || 'permission' in envVars || 'agent' in envVars);
-      if (!isConfigShaped) {
-        for (const [key, value] of Object.entries(envVars)) {
-          env.push(`${key}=${value}`);
-        }
+    // Order matters: Docker keeps the LAST value when a key appears more than
+    // once in Env. Push FORWARDED_KEYS first (host defaults from .env), then
+    // the tool's env_vars on top so per-tool overrides win on collision and
+    // arbitrary extras get added.
+
+    // Provider credentials — forwarded from the orchestrator's host env into
+    // every container. The tool's underlying CLI/SDK picks up whichever key
+    // it reads; unused keys sit harmlessly.
+    for (const key of FORWARDED_KEYS) {
+      const value = process.env[key];
+      if (value) {
+        env.push(`${key}=${value}`);
       }
-    } catch {
-      // Invalid JSON in env_vars
     }
 
-    // Auth credentials — read from process.env
+    // Per-tool env_vars: flat key/value (schema v10 split the dual-purpose
+    // JSON; structured config files live in tool.config_file_path/content).
+    // Stored as a JSON object string in the DB.
     try {
-      const authConfig = JSON.parse(tool.auth_config);
-      if (tool.auth_type === 'api-key' && authConfig.env_var) {
-        const key = process.env[authConfig.env_var];
-        if (key) {
-          env.push(`${authConfig.env_var}=${key}`);
+      const envVars = JSON.parse(tool.env_vars || '{}');
+      if (envVars && typeof envVars === 'object') {
+        for (const [key, value] of Object.entries(envVars)) {
+          if (typeof value === 'string') {
+            env.push(`${key}=${value}`);
+          }
         }
       }
     } catch {
-      // Invalid JSON in auth_config
+      // Invalid JSON in env_vars — skip silently.
     }
 
     return env;
@@ -1136,8 +1137,7 @@ export class Scheduler {
       role,
       pr_number: task.pr_number,
       model: effective.model,
-      max_turns: effective.maxTurns,
-      pre_agent_script: repo.pre_agent_script,
+      install_commands: buildInstallCommands(repo),
       agent_tool: task.agent_tool ?? repo.agent_tool,
       agent_command: effective.command,
     };
@@ -1183,15 +1183,6 @@ export class Scheduler {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Normalize model name by stripping date suffix.
- * "claude-sonnet-4-20250514" → "claude-sonnet-4"
- */
-export function normalizeModelName(model: string): string {
-  // Strip trailing date suffix like -YYYYMMDD
-  return model.replace(/-\d{8}$/, '');
-}
 
 function isNotFoundError(err: unknown): boolean {
   return (

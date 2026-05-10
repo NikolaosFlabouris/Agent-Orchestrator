@@ -1,5 +1,11 @@
 FROM ubuntu:24.04
 
+# Single agent image — supersedes the previous orchestrator-agent-{base,node,python,go}
+# hierarchy. All language toolchains live in one image so a repo doesn't have to
+# pick one, and polyglot repos work out of the box. Cache buckets for all three
+# languages are always mounted by the orchestrator (see docker.ts); empty
+# buckets cost ~0 bytes until something writes to them.
+
 RUN apt-get update && apt-get install -y \
     git \
     jq \
@@ -16,17 +22,29 @@ RUN apt-get update && apt-get install -y \
 RUN git config --system user.email "agent@agent-orchestrator.local" \
  && git config --system user.name "Coding Agent"
 
-# Node.js is required for Claude Agent SDK regardless of project language
+# Node.js 22 — required for the Claude Agent SDK harness and for installing
+# the npm-distributed agent CLIs below. Also serves as the Node toolchain for
+# Node-based repos.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Python toolchain — python3, pip, venv. Sized at ~50 MB.
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain — installed under /usr/local/go. Sized at ~150 MB.
+RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
+ENV GOPATH="/home/agent/go"
+
 # Install agent tools (as root, before switching user)
 RUN npm install -g @anthropic-ai/claude-code
 # OpenCode is distributed via npm — installs to /usr/local/bin (on the agent
-# user's PATH). The previous `curl -fsSL https://get.opencode.ai | bash` line
-# silently failed because that hostname does not exist; the official installer
-# lives at https://opencode.ai/install but is user-scoped, so npm is preferred.
+# user's PATH).
 RUN npm install -g opencode-ai
 # pi-coding-agent — minimal terminal coding harness with multi-provider support
 # (Anthropic, OpenAI, Ollama via models.json, etc.). Invoked non-interactively

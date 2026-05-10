@@ -43,9 +43,6 @@ RUN npm run build -w packages/server
 # `docker exec`s into this container) can find it at /app/scripts.
 COPY scripts ./scripts
 
-ENV UI_STATIC_PATH=/app/packages/ui/dist
-ENV DATA_DIR=/data
-
 EXPOSE 8080
 
 CMD ["node", "packages/server/dist/index.js"]

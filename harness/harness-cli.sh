@@ -11,23 +11,24 @@ mkdir -p "$OUTPUT_DIR"
 
 MAX_MINUTES=$(jq -r '.max_runtime_minutes' "$META")
 AGENT_COMMAND=$(jq -r '.agent_command' "$META")
-PRE_SCRIPT=$(jq -r '.pre_agent_script // empty' "$META")
 ATTEMPT=$(jq -r '.attempt' "$META")
 ROLE=$(jq -r '.role' "$META")
 
-# Pre-agent script (dependency install)
-# Lock file lives on /cache (shared volume) — NOT /tmp (container-local)
-#
-# Note: PRE_SCRIPT is executed via eval with full shell access.
-# The value is configured per repository via the Settings UI and stored in the DB.
-# It runs inside the agent container with access to all environment variables,
-# including LLM API keys and the agent git token. The UI warns administrators
-# when the value doesn't match a known dependency install pattern.
-if [ -n "$PRE_SCRIPT" ]; then
-  LOCKFILE="/cache/.dep-install-lock"
+# Install steps (dependency install). Each entry of meta.install_commands is
+# { command, cwd } pre-resolved by the orchestrator from the repo's typed
+# install_steps — operators cannot inject free-text shell here. Steps run
+# sequentially under a single flock against /cache so concurrent containers
+# on the same repo don't race on the dependency cache.
+LOCKFILE="/cache/.dep-install-lock"
+INSTALL_COUNT=$(jq -r '.install_commands | length' "$META")
+if [ "$INSTALL_COUNT" -gt 0 ]; then
   (
     flock -w 300 200
-    eval "$PRE_SCRIPT"
+    for i in $(seq 0 $((INSTALL_COUNT - 1))); do
+      CMD=$(jq -r ".install_commands[$i].command" "$META")
+      CWD=$(jq -r ".install_commands[$i].cwd" "$META")
+      ( cd "$CWD" && sh -c "$CMD" )
+    done
   ) 200>"$LOCKFILE"
 fi
 

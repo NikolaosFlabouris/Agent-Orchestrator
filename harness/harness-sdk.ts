@@ -11,10 +11,14 @@ interface Meta {
   role: 'develop' | 'review';
   pr_number: number | null;
   model: string;
-  max_turns: number;
-  pre_agent_script: string | null;
+  install_commands: InstallCommand[];
   agent_tool: string;
   agent_command: string;
+}
+
+interface InstallCommand {
+  command: string;
+  cwd: string;
 }
 
 interface Result {
@@ -29,27 +33,31 @@ const meta: Meta = JSON.parse(readFileSync('/task/meta.json', 'utf-8'));
 // The orchestrator assembles the full prompt before the container starts.
 const prompt = readFileSync('/task/prompt.md', 'utf-8');
 
-// Run pre-agent script (dependency install) with file lock on shared cache volume.
-// The lock prevents two containers on the same repo from running npm ci / pip install
-// simultaneously against the shared dependency cache mount.
-if (meta.pre_agent_script) {
-  try {
-    execSync(
-      `flock -w 300 /cache/.dep-install-lock ${meta.pre_agent_script}`,
-      { cwd: '/repo', stdio: 'inherit' }
-    );
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    writeFileSync(
-      '/output/result.json',
-      JSON.stringify({
-        status: 'failure',
-        exit_code: 1,
-        error_message: 'Pre-agent script failed: ' + msg,
-        usage: null,
-      })
-    );
-    process.exit(0);
+// Run install steps sequentially under a single flock against the shared
+// /cache mount. The lock prevents two containers on the same repo racing on
+// the dependency cache. Each step runs in its declared cwd. The orchestrator
+// pre-resolves typed install_steps into literal commands; the harness never
+// sees free-text input from operators.
+if (meta.install_commands && meta.install_commands.length > 0) {
+  for (const step of meta.install_commands) {
+    try {
+      execSync(
+        `flock -w 300 /cache/.dep-install-lock sh -c ${JSON.stringify(step.command)}`,
+        { cwd: step.cwd, stdio: 'inherit' }
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      writeFileSync(
+        '/output/result.json',
+        JSON.stringify({
+          status: 'failure',
+          exit_code: 1,
+          error_message: `Install step failed (${step.command} in ${step.cwd}): ${msg}`,
+          usage: null,
+        })
+      );
+      process.exit(0);
+    }
   }
 }
 
@@ -82,12 +90,16 @@ async function main() {
     // is "give the agent full capability inside its sandbox", not restrict-
     // list tools. bypassPermissions grants all tools including Write/MultiEdit/
     // TodoWrite/NotebookEdit/WebFetch/WebSearch.
+    // No maxTurns cap. The orchestrator's wall-clock timeout
+    // (`meta.max_runtime_minutes`, set by `agent_timeout_minutes`) is the
+    // lifetime safety net; relying on a turn count too is double-counting
+    // the same concern. The SDK applies its own internal default to keep
+    // pathological loops bounded inside an attempt.
     for await (const message of query({
       prompt,
       options: {
         permissionMode: 'bypassPermissions',
         model: meta.model || 'sonnet',
-        maxTurns: meta.max_turns || 100,
       },
     })) {
       // Accumulate token usage from each message

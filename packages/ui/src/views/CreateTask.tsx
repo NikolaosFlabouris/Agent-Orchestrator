@@ -251,8 +251,7 @@ export function CreateTask() {
                 value={maxAttempts}
                 onChange={(e) => setMaxAttempts(e.target.value)}
                 min="1"
-                max="10"
-                placeholder="Default"
+                placeholder="Default 7"
                 className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>

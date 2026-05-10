@@ -70,32 +70,29 @@ describe('canLaunchInPool', () => {
     mkProvider('ollama-b', 0), // paused
   ]);
 
-  it('blocks when the global ceiling is 0', () => {
-    expect(canLaunchInPool('anthropic', new Map(), limits, 0)).toBe(false);
-  });
-
-  it('allows when provider has headroom and global remains', () => {
-    expect(canLaunchInPool('anthropic', new Map([['anthropic', 1]]), limits, 5)).toBe(true);
+  it('allows when provider has headroom', () => {
+    expect(canLaunchInPool('anthropic', new Map([['anthropic', 1]]), limits)).toBe(true);
   });
 
   it('blocks when provider is at its limit', () => {
-    expect(canLaunchInPool('ollama-a', new Map([['ollama-a', 1]]), limits, 5)).toBe(false);
+    expect(canLaunchInPool('ollama-a', new Map([['ollama-a', 1]]), limits)).toBe(false);
   });
 
   it('treats a provider with limit=0 as paused (no launches)', () => {
-    expect(canLaunchInPool('ollama-b', new Map(), limits, 5)).toBe(false);
+    expect(canLaunchInPool('ollama-b', new Map(), limits)).toBe(false);
   });
 
-  it('treats NO_PROVIDER_KEY as subject to global only', () => {
-    expect(canLaunchInPool(NO_PROVIDER_KEY, new Map([[NO_PROVIDER_KEY, 100]]), limits, 5)).toBe(true);
-    expect(canLaunchInPool(NO_PROVIDER_KEY, new Map(), limits, 0)).toBe(false);
+  it('treats NO_PROVIDER_KEY as unconstrained from this layer', () => {
+    // No-provider tasks are gated only by the host resource pool, which is
+    // checked separately by the scheduler — this helper waves them through.
+    expect(canLaunchInPool(NO_PROVIDER_KEY, new Map([[NO_PROVIDER_KEY, 100]]), limits)).toBe(true);
+    expect(canLaunchInPool(NO_PROVIDER_KEY, new Map(), limits)).toBe(true);
   });
 
-  it('treats an unknown provider key (row deleted) as unlimited within global', () => {
+  it('treats an unknown provider key (row deleted) as unlimited from this layer', () => {
     // After ON DELETE SET NULL, tools lose their provider_id — but between
     // the migration dropping the row and the tool row cache refreshing, a
-    // task might still reference the old provider. Don't block it; the
-    // global ceiling is the safety net.
-    expect(canLaunchInPool('gone', new Map(), limits, 5)).toBe(true);
+    // task might still reference the old provider. Don't block it.
+    expect(canLaunchInPool('gone', new Map(), limits)).toBe(true);
   });
 });

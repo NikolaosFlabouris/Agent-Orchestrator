@@ -60,7 +60,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - `fillSlots`: priority ordering (in-review without container → orphaned rework → FIFO queued)
    - Dependency gating: parse checklist items from issue body, check if referenced issues are closed via Forgejo API
    - Queue position management: sparse integer ordering, `MAX(queue_position) + 1` for new tasks
-   - Concurrency limiter: `active_count < max_concurrency`
+   - Concurrency limiter: per-task resources fit in remaining host pool (memory + CPU); per-tool provider concurrency limit also respected
 
 2. **Workspace manager** (`packages/server/src/workspace.ts`)
    - `prepareWorkspace`: clone if new, `set-url` if existing (token rotation), checkout branch (new or rework), `verify_workspace_state`
@@ -117,12 +117,12 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - `postDevAgent`: branch verification, unexpected branch detection, salvage (uncommitted + untracked + local commits), push, PR creation with error handling
    - `attemptMerge`: freshness check, merge with error handling, conflict → rework
 
-6. **Attempt tracking and cost**
-   - `startAttempt`, `completeAttempt`, `recordAttemptCost`
-   - Model pricing from settings, `normalizeModelName`
+6. **Attempt tracking**
+   - `startAttempt`, `completeAttempt`
    - Output archiving before each new container launch
+   - (Cost tracking was removed in schema v14 — see `docs/05-orchestrator-core.md`.)
 
-**Validation:** Insert a queued task. Mock dev agent runs, commits, pushes. Orchestrator verifies push, creates PR. Mock review agent runs, writes approved verdict. Orchestrator merges PR, closes issue. Task reaches `status/merged`. Attempt rows have usage and cost data. Verify the rework cycle: mock review rejects → dev agent reruns → review approves → merge.
+**Validation:** Insert a queued task. Mock dev agent runs, commits, pushes. Orchestrator verifies push, creates PR. Mock review agent runs, writes approved verdict. Orchestrator merges PR, closes issue. Task reaches `status/merged`. Verify the rework cycle: mock review rejects → dev agent reruns → review approves → merge.
 
 ---
 
@@ -231,12 +231,11 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - PATCH `/api/tasks/:id` with action payload
 
 4. **Settings view** (`packages/ui/src/views/Settings.tsx`)
-   - Global settings form — all keys from settings inventory (doc 08): concurrency, max attempts, timeout, max turns, model, poll interval, merge strategy, workspace retention, disk threshold, container memory, container CPU
-   - Model pricing editor — JSON table from `model_pricing` setting
+   - Global settings form — see doc 08 for the current editable list (concurrency, default model). Most defaults live in `packages/server/src/constants.ts` (poll interval, default max attempts, workspace retention, drain timeout, stuck-task multiplier, default container memory/CPU).
    - Repository list with add/edit/remove — `GET/POST/PATCH /api/repos` with full schema (doc 06)
-   - Per-repo config: base branch, image type, agent tool, pre-agent script (with validation warning), model, max turns, timeout, container memory, container CPU (nullable fields = "use global default")
-   - Agent tools list with add/edit — `GET/POST/PATCH /api/tools` with full schema (doc 06), including `env_vars` JSON editor for non-secret config (URLs, provider, model)
-   - Credentials status (read-only) — shows `auth_status` computed field per tool
+   - Per-repo config: base branch, agent tool, pre-agent script (with validation warning), timeout, container memory, container CPU (nullable fields = "use global default")
+   - Agent tools list with add/edit — `GET/POST/PATCH /api/tools` with full schema (doc 06), including structured env-var override form and an optional config-file path/content (path anchored at /repo)
+   - Credentials view (read-only) — shows orchestrator-only secrets and the FORWARDED_KEYS provider keys
    - Forgejo connection status
    - Image rebuild trigger per repo (`POST /api/repos/:id/rebuild`)
 
@@ -269,7 +268,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - On startup: verify existing webhooks match the current orchestrator URL
 
 3. **Fallback polling** (`packages/server/src/polling.ts`)
-   - 60-second interval (from `poll_interval_seconds` setting)
+   - 60-second interval (`POLL_INTERVAL_SECONDS` constant in `packages/server/src/constants.ts`)
    - Query Forgejo for issues with `status/queued` label
    - Detect external state changes (manual label edits, issue closes, PR merges)
    - Same idempotency checks as webhook handlers

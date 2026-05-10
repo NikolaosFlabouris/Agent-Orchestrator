@@ -12,6 +12,7 @@ import {
 } from './docker.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import { resetTask } from './actions.js';
+import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -170,7 +171,7 @@ export async function recoverReviewOrphan(
   }
 
   const nextAttempt = task.attempt + 1;
-  const maxAttempts = task.max_attempts ?? 3;
+  const maxAttempts = task.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
   if (nextAttempt > maxAttempts) {
     await markExhausted(
       task,
@@ -251,7 +252,7 @@ export async function recoverDevOrphan(
   }
 
   const nextAttempt = task.attempt + 1;
-  const maxAttempts = task.max_attempts ?? 3;
+  const maxAttempts = task.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
   if (nextAttempt > maxAttempts) {
     await markExhausted(
       task,

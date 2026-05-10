@@ -71,16 +71,16 @@ The CLI harness accepts only the `{{PROMPT_FILE}}` placeholder in `command_templ
 `scripts/seed-agent-tools.ts` uses `opencode run "$(cat {{PROMPT_FILE}})"` as the default command template. OpenCode's CLI surface changes between releases; confirm the flags of the actually-installed version at bring-up time:
 
 ```bash
-docker run --rm -it orchestrator-agent-base:latest opencode run --help
+docker run --rm -it orchestrator-agent:latest opencode run --help
 ```
 
 If the non-interactive invocation differs, update the `command_template` via **Settings > Agent Tools** and re-seed with `npm run seed:tools -- --force` (or edit inline).
 
 ### Docker Compose stop_grace_period coupling
 
-The `stop_grace_period` in docker-compose.yml is static. The orchestrator's drain timeout is dynamic (`agent_timeout_minutes + 5`). If the admin changes the timeout via the UI without updating docker-compose.yml, Docker will SIGKILL before the drain completes.
+The `stop_grace_period` in docker-compose.yml is static. The orchestrator's drain timeout is the `DRAIN_TIMEOUT_MINUTES` constant (schema v17+) — they must stay in sync (`stop_grace_period = (DRAIN_TIMEOUT_MINUTES + 5)m`). Editing one without the other will SIGKILL the orchestrator before drain completes.
 
-Workaround: document that changing `agent_timeout_minutes` requires updating `stop_grace_period` and running `docker compose up -d`.
+Workaround: document that changing `DRAIN_TIMEOUT_MINUTES` requires updating `stop_grace_period` and running `docker compose up -d`.
 
 ### Forgejo comment/label failure resilience
 

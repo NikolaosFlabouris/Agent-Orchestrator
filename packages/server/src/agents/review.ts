@@ -1,10 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
-import { getRepo, getTask, getSetting, updateTask } from '../db.js';
+import { getRepo, getTask, updateTask } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { getOutputDir } from '../workspace.js';
+import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
+import {
+  resolveMergeStrategy,
+  type ForgejoMergeStrategy,
+  type PreferredMergeStrategy,
+} from '../merge-strategy.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 const MAX_REVIEW_RETRIES = 2;
@@ -28,8 +34,40 @@ export async function attemptMerge(
   if (!repo) return;
 
   const freshTask = getTask(task.id)!;
-  const mergeStrategy =
-    (getSetting('merge_strategy') as 'squash' | 'merge' | 'rebase') ?? 'squash';
+
+  // Resolve merge strategy: ask Forgejo which styles the repo permits, then
+  // pick one. Rules (see merge-strategy.ts):
+  //   1. exactly one allowed → use it (operator preference is moot)
+  //   2. multiple allowed AND operator's preferred is in the set → use preferred
+  //   3. multiple allowed but preferred not in set → first from PRIORITY_ORDER
+  // Falls back to the operator's preference verbatim if Forgejo is unreachable
+  // or the API call fails (preserves prior behaviour on transient failures).
+  const preferred = (repo.merge_strategy ?? 'squash') as PreferredMergeStrategy;
+  let mergeStrategy: ForgejoMergeStrategy = preferred;
+  let mergeReason: string = 'preferred (no Forgejo check)';
+  try {
+    const allowed = await forgejo.getRepoMergeOptions(repo);
+    const resolved = resolveMergeStrategy(allowed, preferred);
+    mergeStrategy = resolved.strategy;
+    mergeReason = resolved.reason;
+    if (resolved.reason === 'fallback') {
+      log.warn(
+        {
+          event: 'merge_strategy_fallback',
+          task_id: task.id,
+          preferred,
+          chosen: resolved.strategy,
+          allowed,
+        },
+        `Repo doesn't allow preferred merge strategy '${preferred}'; falling back to '${resolved.strategy}'`
+      );
+    }
+  } catch (err) {
+    log.warn(
+      { event: 'merge_options_fetch_failed', task_id: task.id, err },
+      'Could not fetch repo merge options; using preferred strategy verbatim'
+    );
+  }
 
   // Pre-merge check: verify PR is still mergeable
   try {
@@ -64,7 +102,7 @@ export async function attemptMerge(
 
     if (pr.mergeable === false) {
       const newAttempt = freshTask.attempt + 1;
-      const maxAttempts = freshTask.max_attempts ?? 3;
+      const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
       if (newAttempt > maxAttempts) {
         updateTaskWithSync(task.id, {
           status: 'failed',
@@ -112,7 +150,11 @@ export async function attemptMerge(
     await forgejo.mergePullRequest(repo, freshTask.pr_number!, mergeStrategy);
 
     // Merge succeeded
-    recordTaskEvent(task.id, 'pr_merged', `PR #${freshTask.pr_number} merged via ${mergeStrategy}`);
+    recordTaskEvent(
+      task.id,
+      'pr_merged',
+      `PR #${freshTask.pr_number} merged via ${mergeStrategy} (${mergeReason})`
+    );
     updateTaskWithSync(task.id, {
       status: 'merged',
       completed_at: new Date().toISOString(),
@@ -182,7 +224,7 @@ export async function attemptMerge(
     if (isConflict) {
       // Merge conflict — rework
       const newAttempt = freshTask.attempt + 1;
-      const maxAttempts = freshTask.max_attempts ?? 3;
+      const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
 
       if (newAttempt > maxAttempts) {
         updateTaskWithSync(task.id, {
@@ -377,7 +419,7 @@ export async function processReviewVerdict(
     }
   } else if (review.verdict === 'changes_needed') {
     const newAttempt = freshTask.attempt + 1;
-    const maxAttempts = freshTask.max_attempts ?? 3;
+    const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
     const feedbackStr =
       typeof review.feedback === 'string'
         ? review.feedback

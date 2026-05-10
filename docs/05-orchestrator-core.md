@@ -22,21 +22,27 @@ on TICK (triggered by: webhook event, container exit callback, or 60-second fall
        decides whether to free the slot or start the next phase in the same slot.)
 
   2. Fill empty slots (synchronous — runs within the tick)
-     While active_count < max_concurrency AND candidates remain:
+     While host pool has spare memory AND CPU AND candidates remain:
        - Take next item from priority order:
          a. Tasks in 'in-review' with no container (recovery: need review container started)
          b. Orphaned rework (status/changes-needed with no active slot)
          c. FIFO queue (status/queued by queue_position)
        - For queued tasks: check dependency gate; skip if deps not met
+       - For each candidate: check it fits in the remaining host pool
+         (sum of repo's container_memory_mb / container_cpu_cores ≤ remaining)
+       - For tools with a provider_id: also check the provider's
+         concurrency_limit hasn't been reached
        - Call launch_dev_container(task) or launch_review_container(task) based on status
          (workspace preparation, task file assembly, and container creation all happen
          synchronously within this step — the slot is occupied from this point onward)
-       - active_count++
+       - Subtract the launched task's memory/cpu from remaining host pool
 ```
 
 ## Queue Model
 
-The queue is a priority FIFO with a configurable concurrency limiter:
+The queue is a priority FIFO. Two independent gates decide whether a candidate
+launches: the host resource pool (memory + CPU caps configured via UI) and,
+if the task's tool has a `provider_id`, that provider's concurrency_limit.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -48,9 +54,11 @@ The queue is a priority FIFO with a configurable concurrency limiter:
 │  QUEUE (FIFO)                                            │
 │  Tasks in status/queued, ordered by queue_position (ASC) │
 ├──────────────────────────────────────────────────────────┤
-│  ACTIVE SLOTS (max_concurrency configurable via UI)      │
+│  ACTIVE TASKS (gated by host pool: memory + CPU caps)    │
 │  Tasks currently running (preparing, implementing,       │
-│  reviewing, reworking, or merging)                       │
+│  reviewing, reworking, or merging). Each consumes its    │
+│  repo's container_memory_mb / container_cpu_cores from   │
+│  the host pool.                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -335,9 +343,22 @@ attempt_merge(task):
     return
 
   try:
+    # Merge strategy resolution (schema v15+):
+    #   1. Fetch repo's allowed strategies from Forgejo (allow_squash_merge,
+    #      allow_merge_commits, allow_rebase, allow_rebase_explicit,
+    #      allow_fast_forward_only_merge).
+    #   2. If exactly one allowed → use it.
+    #   3. If multiple AND repo.merge_strategy is allowed → use it.
+    #   4. Otherwise → first allowed in priority order
+    #      (squash > merge > rebase > rebase-merge > fast-forward-only).
+    # The app-level default is 'squash'. See merge-strategy.ts for the
+    # resolver. Falls back to repo.merge_strategy verbatim if Forgejo is
+    # unreachable.
+    allowed = forgejo.get_repo_merge_options(repo)
+    merge_type = resolve_merge_strategy(allowed, repo.merge_strategy)
     result = forgejo.merge_pull_request(
       pr_number: task.pr_number,
-      merge_type: db.getSetting('merge_strategy')  # squash, merge, or rebase
+      merge_type: merge_type
     )
   catch error:
     # Unexpected merge error (404 PR deleted, 405 permission, network failure, etc.)
@@ -410,24 +431,29 @@ launch_dev_container(task, feedback=null):
   # Resolve per-task → per-repo → global settings for configurable fields
   effective_tool_id = task.agent_tool || repo.agent_tool
   effective_tool = db.getAgentTool(effective_tool_id)
-  effective_model = task.model || repo.model || db.getSetting('default_model')
-  effective_max_turns = repo.max_turns || db.getSetting('default_max_turns')
-  effective_timeout = repo.timeout_minutes || db.getSetting('agent_timeout_minutes')
+  effective_model = task.model || db.getSetting('default_model')
+  # timeout_minutes is per-tool only since schema v17 (NOT NULL on the
+  # agent_tools table). The previous tool > repo > global chain is gone.
+  effective_timeout = effective_tool.timeout_minutes
   effective_command = effective_tool.command_template || ''  # empty for SDK tools
+  # No max_turns in meta — CLI tools encode their own per-turn cap in
+  # command_template (e.g. claude-code's `--max-turns 100`); the SDK
+  # harness uses its own default. The wall-clock timeout above is the
+  # lifetime safety net.
 
   write /task/meta.json with {
     issue_id, branch_name, base_branch: repo.base_branch,
     max_runtime_minutes: effective_timeout,
     attempt: task.attempt, role: "develop",
-    pr_number, model: effective_model, max_turns: effective_max_turns,
-    pre_agent_script: repo.pre_agent_script,
+    pr_number, model: effective_model,
+    install_commands: build_install_commands(repo),
     agent_tool: effective_tool_id, agent_command: effective_command
   }
 
   # 4. Assemble environment variables (caller's responsibility — not done inside createAgentContainer)
-  env = buildEnv(task, repo, effective_tool)
+  env = buildEnv(effective_tool)
     # buildEnv reads tool.env_vars (non-secret config from DB) and
-    # tool.auth_config (env var names whose values come from process.env)
+    # forwards FORWARDED_KEYS (well-known LLM provider keys) from process.env
 
   # 5. Create and start container
   container = createAgentContainer({
@@ -475,9 +501,8 @@ launch_review_container(task):
   # 2. Resolve configuration (same resolution order as launch_dev_container)
   effective_tool_id = task.agent_tool || repo.agent_tool
   effective_tool = db.getAgentTool(effective_tool_id)
-  effective_model = task.model || repo.model || db.getSetting('default_model')
-  effective_max_turns = repo.max_turns || db.getSetting('default_max_turns')
-  effective_timeout = repo.timeout_minutes || db.getSetting('agent_timeout_minutes')
+  effective_model = task.model || db.getSetting('default_model')
+  effective_timeout = effective_tool.timeout_minutes  # per-tool only since v17
   effective_command = effective_tool.command_template || ''
 
   # 3. Assemble task files
@@ -486,8 +511,8 @@ launch_review_container(task):
     issue_id, branch_name, base_branch: repo.base_branch,
     max_runtime_minutes: effective_timeout,
     attempt: task.attempt, role: "review",
-    pr_number: task.pr_number, model: effective_model, max_turns: effective_max_turns,
-    pre_agent_script: repo.pre_agent_script,
+    pr_number: task.pr_number, model: effective_model,
+    install_commands: build_install_commands(repo),
     agent_tool: effective_tool_id, agent_command: effective_command
   }
 
@@ -554,88 +579,17 @@ On orchestrator restart, `task.current_attempt_id` is lost (it's in-memory). If 
 
 ## Cost Tracking
 
-### Token Usage Source
-
-The Anthropic API returns token usage with every response. The harness captures cumulative usage across all turns of an agent session and writes it to `result.json`:
-
-```json
-{
-  "status": "success",
-  "exit_code": 0,
-  "usage": {
-    "input_tokens": 125000,
-    "output_tokens": 8500,
-    "model": "claude-sonnet-4-20250514"
-  }
-}
-```
-
-How each harness captures usage:
-
-| Harness | Source | Notes |
-|---|---|---|
-| SDK (TypeScript) | Agent SDK `query()` returns messages with `usage` fields. Sum `input_tokens` and `output_tokens` across all messages. | The SDK tracks cumulative usage automatically. |
-| CLI (Claude Code) | `--output-format stream-json` emits JSON events with usage. Parse the final event for cumulative totals. | The `--bare` flag ensures clean JSON output. |
-| CLI (OpenCode, local LLM) | Not available — local LLM servers don't report token usage in a standard format. | Usage fields are null. Cost is recorded as zero. |
-
-The `model` field in usage captures the actual model used (e.g., `claude-sonnet-4-20250514`) which may include the full version string. The orchestrator normalizes this to match the pricing table keys.
-
-### Model Pricing
-
-Default pricing is hardcoded in the orchestrator and can be overridden via the Settings UI. Stored in the `settings` table as a JSON value under the key `model_pricing`:
-
-```json
-{
-  "claude-sonnet-4": { "input_per_mtok": 3.00, "output_per_mtok": 15.00 },
-  "claude-opus-4": { "input_per_mtok": 5.00, "output_per_mtok": 25.00 },
-  "claude-haiku-4": { "input_per_mtok": 1.00, "output_per_mtok": 5.00 }
-}
-```
-
-Keys use the model family name without the date suffix (e.g., `claude-sonnet-4` not `claude-sonnet-4-20250514`). The orchestrator strips the date suffix from the `usage.model` field when looking up pricing. If no match is found, cost is recorded as zero with a warning logged.
-
-Pricing is non-secret configuration, so storing it in the `settings` table is appropriate.
-
-### Cost Calculation
-
-After each agent container exits, the orchestrator computes cost from the usage and pricing:
-
-```
-record_attempt_cost(task, result):
-  if result.usage AND result.usage.input_tokens:
-    model_key = normalize_model_name(result.usage.model)
-      # "claude-sonnet-4-20250514" → "claude-sonnet-4"
-    pricing = get_model_pricing(model_key)
-
-    if pricing is null:
-      log warn "task={task.issue_id} event=unknown_model_pricing model={result.usage.model}"
-      cost_usd = 0
-    else:
-      cost_usd = (result.usage.input_tokens * pricing.input_per_mtok / 1_000_000)
-               + (result.usage.output_tokens * pricing.output_per_mtok / 1_000_000)
-
-    db.update_attempt(task.current_attempt_id,
-      input_tokens: result.usage.input_tokens,
-      output_tokens: result.usage.output_tokens,
-      model: result.usage.model,
-      cost_usd: cost_usd
-    )
-```
-
-### Cost Queries
-
-```sql
--- Total cost for a task (all attempts)
-SELECT SUM(cost_usd) FROM attempts WHERE task_id = ?
-
--- Daily cost
-SELECT SUM(cost_usd) FROM attempts WHERE date(completed_at) = date('now')
-
--- Cost by model (for the settings/analytics view)
-SELECT model, SUM(input_tokens) as total_input, SUM(output_tokens) as total_output,
-       SUM(cost_usd) as total_cost
-FROM attempts WHERE date(completed_at) = date('now') GROUP BY model
-```
+Removed in schema v14. Background: the harness layer recorded
+`meta.json.model` (the user's intended model alias, e.g. `'sonnet'`) rather
+than the actual model id reported by the agent's stream (e.g.
+`claude-sonnet-4-20250514`). The pricing lookup keyed on the latter, so
+every lookup missed and `cost_usd` was always 0 on default installs.
+Rather than fix the harness bug + maintain a model-pricing table that
+needs hand-updating whenever Anthropic publishes new prices, the whole
+cost-tracking feature was dropped: the `model_pricing` setting, the
+`attempts.cost_usd / input_tokens / output_tokens` columns, the dashboard
+daily-cost tile, and the per-attempt cost/token displays. The Anthropic
+console is the source of truth for spend.
 
 ## Post-Agent Flows
 
@@ -1194,33 +1148,38 @@ Note: the agent token appears in `.git/config` within the workspace directory. T
 
 ### Agent tool credentials (container environment variables)
 
-LLM API keys and agent tool configuration are injected as container environment variables. The env assembly is handled by the scheduler's `buildEnv` method (the caller of `createAgentContainer`), which passes the assembled `env` array via `CreateContainerOptions.env`. This keeps the Docker manager decoupled from credential resolution:
+LLM API keys and agent tool configuration are injected as container environment variables. The env assembly is handled by the scheduler's `buildEnv` method (the caller of `createAgentContainer`), which passes the assembled `env` array via `CreateContainerOptions.env`. This keeps the Docker manager decoupled from credential resolution.
+
+Schema v9 dropped per-tool credential declarations (`auth_type`, `auth_config`). The orchestrator now forwards a fixed set of well-known LLM provider keys from its host env into every container, and whichever underlying CLI/SDK the tool uses picks up the key it needs.
+
+Schema v10 split the previous dual-purpose `env_vars` JSON: it is now flat key/value only, and the per-tool entries override `FORWARDED_KEYS` host defaults on collision (Docker keeps the LAST value when a key appears more than once in the Env array, so the tool's entry wins). Structured config files moved to `config_file_path` + `config_file_content` and are written by `writeAgentConfigFile` before the container starts (see `workspace.ts`).
 
 ```typescript
-function buildEnv(task: Task, repo: Repo, tool: AgentTool): string[] {
-  // tool is already resolved: task.agent_tool || repo.agent_tool
+import { FORWARDED_KEYS } from './credentials';
+// ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY',
+//  'GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY',
+//  'MISTRAL_API_KEY']
+
+function buildEnv(tool: AgentTool): string[] {
   const env: string[] = [];
 
-  // Static env vars from tool config (non-secret, stored in DB)
-  for (const [key, value] of Object.entries(tool.env_vars)) {
-    env.push(`${key}=${value}`);
+  // Provider credentials — forwarded from the orchestrator's host env. Pushed
+  // first so per-tool env_vars (below) can override on collision.
+  for (const key of FORWARDED_KEYS) {
+    const value = process.env[key];
+    if (value) env.push(`${key}=${value}`);
   }
 
-  // Auth credentials — read from process.env, never from DB
-  if (tool.auth_type === 'api-key') {
-    const envVarName = tool.auth_config.env_var;  // e.g., "ANTHROPIC_API_KEY"
-    const key = process.env[envVarName];           // read from environment, not DB
-    if (key) {
-      env.push(`${envVarName}=${key}`);
-    } else if (!tool.auth_config.optional) {
-      log warn `event=missing_api_key env_var=${envVarName} tool=${tool.id}`;
-    }
-    // If optional and missing, skip silently
+  // Per-tool env_vars: flat key/value (schema v10). Pushed last so it wins
+  // on collision and arbitrary extras get added.
+  for (const [key, value] of Object.entries(JSON.parse(tool.env_vars))) {
+    env.push(`${key}=${value}`);
   }
-  // auth_type === 'none': no credentials injected
 
   return env;
 }
 ```
 
-Container environment variables are visible via `docker inspect`. This is inherent to Docker and represents the same trust boundary as Machine B filesystem access.
+To add a new provider, append to `FORWARDED_KEYS` in `packages/server/src/credentials.ts`. Container environment variables are visible via `docker inspect`. This is inherent to Docker and represents the same trust boundary as Machine B filesystem access.
+
+**Note on per-tool overrides storing secrets in the DB:** when an operator overrides a forwarded key on a specific tool (e.g. a different `ANTHROPIC_API_KEY` for an experimental account), the value is stored in `agent_tools.env_vars`. Database backups contain those values; treat the SQLite file as sensitive accordingly.

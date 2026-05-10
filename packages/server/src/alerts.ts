@@ -1,7 +1,17 @@
-import { getTasks, getSettingInt, getActiveTaskCount, getQueuedTasks } from './db.js';
+import {
+  getTasks,
+  getQueuedTasks,
+  getRepo,
+  getAgentTool,
+} from './db.js';
+import { getActiveResources } from './queue.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
-import { ensureDiskCache, getDiskCache } from './disk-usage.js';
+import {
+  DEFAULT_MAX_ATTEMPTS,
+  STUCK_TASK_TIMEOUT_MULTIPLIER,
+} from './constants.js';
+import { getSettingInt } from './db.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 interface Alert {
@@ -19,7 +29,7 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   // 1. Task failed after max attempts
   const failedTasks = getTasks({ status: 'failed' });
   for (const task of failedTasks) {
-    const maxAttempts = task.max_attempts ?? 3;
+    const maxAttempts = task.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
     if (task.attempt >= maxAttempts && task.completed_at) {
       // Only alert for recently failed tasks (last hour)
       const completedAt = new Date(task.completed_at).getTime();
@@ -32,57 +42,52 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
     }
   }
 
-  // 2. Task stuck (running > 2x timeout)
-  const timeoutMinutes = getSettingInt('agent_timeout_minutes') || 30;
-  const stuckThresholdMs = timeoutMinutes * 2 * 60 * 1000;
+  // 2. Task stuck (running > STUCK_TASK_TIMEOUT_MULTIPLIER × tool timeout).
+  // Per-tool timeout (NOT NULL since v17): look up the task's effective
+  // tool, multiply, compare against elapsed.
   const activeTasks = getTasks().filter(
     (t) => !TERMINAL_STATUSES.has(t.status) && t.status !== 'queued'
   );
   for (const task of activeTasks) {
-    if (task.started_at) {
-      const elapsed = Date.now() - new Date(task.started_at).getTime();
-      if (elapsed > stuckThresholdMs) {
-        alerts.push({
-          level: 'warning',
-          message: `Task #${task.issue_id} appears stuck (running ${Math.floor(elapsed / 60000)}m, timeout is ${timeoutMinutes}m)`,
-        });
-      }
+    if (!task.started_at) continue;
+    const repo = getRepo(task.repo_id);
+    const toolId = task.agent_tool ?? repo?.agent_tool;
+    const tool = toolId ? getAgentTool(toolId) : undefined;
+    if (!tool) continue; // tool was deleted; can't determine threshold
+    const stuckThresholdMs =
+      tool.timeout_minutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
+    const elapsed = Date.now() - new Date(task.started_at).getTime();
+    if (elapsed > stuckThresholdMs) {
+      alerts.push({
+        level: 'warning',
+        message: `Task #${task.issue_id} appears stuck (running ${Math.floor(elapsed / 60000)}m, ${tool.id} timeout is ${tool.timeout_minutes}m)`,
+      });
     }
   }
 
-  // 3. All slots full, queue growing
-  const activeCount = getActiveTaskCount();
-  const maxConcurrency = getSettingInt('max_concurrency');
+  // 3. Host resource pool saturated, queue growing. Either dimension at
+  // its cap means no new candidate can launch. Worth surfacing because
+  // the operator's options are: raise the pool, lower per-repo container
+  // sizing, or wait for active tasks to finish.
+  const used = getActiveResources();
+  const memTotal = getSettingInt('max_agent_memory_mb');
+  const cpuTotal = getSettingInt('max_agent_cpu_cores');
   const queueDepth = getQueuedTasks().length;
-  if (activeCount >= maxConcurrency && queueDepth > 0) {
+  const memSaturated = used.memoryMb >= memTotal;
+  const cpuSaturated = used.cpuCores >= cpuTotal;
+  if ((memSaturated || cpuSaturated) && queueDepth > 0) {
+    const which = memSaturated && cpuSaturated
+      ? `memory (${used.memoryMb}/${memTotal} MB) and CPU (${used.cpuCores}/${cpuTotal} cores)`
+      : memSaturated
+      ? `memory (${used.memoryMb}/${memTotal} MB)`
+      : `CPU (${used.cpuCores}/${cpuTotal} cores)`;
     alerts.push({
       level: 'info',
-      message: `All ${maxConcurrency} slots in use, ${queueDepth} tasks queued`,
+      message: `Host resource pool saturated on ${which}; ${queueDepth} task${queueDepth === 1 ? '' : 's'} waiting`,
     });
   }
 
-  // 4. Disk usage exceeds threshold — served from the shared stale-while-
-  // revalidate cache in disk-usage.ts so the scan never blocks the event loop.
-  // On the very first tick after boot the cache may not be populated yet; in
-  // that case we skip the disk alert for this cycle rather than blocking.
-  const thresholdBytes = getSettingInt('disk_threshold_bytes');
-  if (thresholdBytes > 0) {
-    ensureDiskCache();
-    const disk = getDiskCache();
-    if (disk) {
-      const totalBytes = disk.workspaces + disk.caches;
-      if (totalBytes > thresholdBytes) {
-        const totalGb = (totalBytes / (1024 * 1024 * 1024)).toFixed(1);
-        const thresholdGb = (thresholdBytes / (1024 * 1024 * 1024)).toFixed(1);
-        alerts.push({
-          level: 'warning',
-          message: `Disk usage (${totalGb} GB) exceeds threshold (${thresholdGb} GB)`,
-        });
-      }
-    }
-  }
-
-  // 5. Tasks awaiting human action for extended period
+  // 4. Tasks awaiting human action for extended period
   const humanTasks = getTasks().filter((t) =>
     ['awaiting-human-merge', 'awaiting-human-review', 'needs-human-review'].includes(t.status)
   );

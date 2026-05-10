@@ -1,8 +1,10 @@
 import type { Task, AgentTool, Provider, Repo } from '@orchestrator/shared';
 
 /** Synthetic provider id used internally to represent "no provider assigned".
- *  Tasks whose tool has `provider_id === null` are bucketed under this key for
- *  bookkeeping but their slot use is only bounded by global max_concurrency. */
+ *  Tasks whose tool has `provider_id === null` are bucketed under this key
+ *  for bookkeeping; their launch is only constrained by the host resource
+ *  pool (settings.max_agent_memory_mb / max_agent_cpu_cores), not by any
+ *  provider concurrency_limit. */
 export const NO_PROVIDER_KEY = '__none__';
 
 /** Given a task and its resolved tool + repo, return the provider id the task
@@ -34,30 +36,30 @@ export function countActiveByProvider(
   return counts;
 }
 
-/** Decide whether a candidate task is launchable right now. Pure — call it
- *  once per candidate, decrementing remainingGlobal and incrementing
- *  activeByProvider[key] on each actual launch.
+/** Decide whether a candidate task's provider pool would permit a launch
+ *  right now. Pure — call it once per candidate, incrementing
+ *  activeByProvider[key] on each actual launch. The host resource pool
+ *  (memory / CPU) is checked separately by the scheduler — see queue.ts
+ *  fitsInPool / getAvailableResources.
  *
  *  Rules:
- *   - Global ceiling (settings.max_concurrency) is absolute. Once remaining
- *     global slots hit 0, nothing launches regardless of provider headroom.
- *   - For tasks with a provider assigned: active-on-provider must be strictly
- *     less than provider.concurrency_limit. A limit of 0 means "paused" —
- *     no task with this provider ever launches.
- *   - For tasks with no provider: only the global ceiling applies.
- *   - Unknown provider (tool points at a deleted provider): treat as unlimited
- *     within the global ceiling. ON DELETE SET NULL should make this rare. */
+ *   - For tasks with a provider assigned: active-on-provider must be
+ *     strictly less than provider.concurrency_limit. A limit of 0 means
+ *     "paused" — no task with this provider ever launches.
+ *   - For tasks with no provider (NO_PROVIDER_KEY): no provider-side
+ *     constraint; the host resource pool is the only gate.
+ *   - Unknown provider (tool points at a deleted provider): treated as
+ *     unlimited from this layer's perspective. ON DELETE SET NULL on
+ *     agent_tools.provider_id should make this rare. */
 export function canLaunchInPool(
   providerKey: string,
   activeByProvider: Map<string, number>,
-  limitByProvider: Map<string, number>,
-  remainingGlobal: number
+  limitByProvider: Map<string, number>
 ): boolean {
-  if (remainingGlobal <= 0) return false;
   if (providerKey === NO_PROVIDER_KEY) return true;
   const active = activeByProvider.get(providerKey) ?? 0;
   const limit = limitByProvider.get(providerKey);
-  if (limit === undefined) return true; // provider row missing; fall back to global-only
+  if (limit === undefined) return true; // provider row missing
   return active < limit;
 }
 

@@ -31,8 +31,8 @@ PATCH  /api/tools/:id      — update a tool
 
 > **Verify the invocation before enabling a CLI tool.** OpenCode's flags and
 > subcommands change between releases. Run `opencode --help` and
-> `opencode run --help` inside the agent base image (`docker run --rm -it
-> orchestrator-agent-base:latest opencode run --help`) and adjust
+> `opencode run --help` inside the agent image (`docker run --rm -it
+> orchestrator-agent:latest opencode run --help`) and adjust
 > `command_template` to match. The examples below use `opencode run` with the
 > prompt piped in, which avoids shell-quoting issues.
 
@@ -48,9 +48,7 @@ PATCH  /api/tools/:id      — update a tool
     "OPENCODE_PROVIDER": "openai-compatible",
     "OPENCODE_MODEL": "devstral-small-2:latest",
     "OPENCODE_BASE_URL": "http://host.docker.internal:11434/v1"
-  },
-  "auth_type": "none",
-  "auth_config": {}
+  }
 }
 ```
 
@@ -65,17 +63,15 @@ PATCH  /api/tools/:id      — update a tool
   "env_vars": {
     "OPENCODE_PROVIDER": "anthropic",
     "OPENCODE_MODEL": "claude-sonnet-4-20250514"
-  },
-  "auth_type": "api-key",
-  "auth_config": { "env_var": "ANTHROPIC_API_KEY" }
+  }
 }
 ```
 
 ### pi with local Ollama
 
 > **Verify the invocation before enabling pi.** pi's flags change between
-> releases. Run `pi --help` inside the agent base image (`docker run --rm -it
-> orchestrator-agent-base:latest pi --help`) and adjust `command_template` to
+> releases. Run `pi --help` inside the agent image (`docker run --rm -it
+> orchestrator-agent:latest pi --help`) and adjust `command_template` to
 > match. The examples below target `@mariozechner/pi-coding-agent@0.68.x`.
 
 pi does not expose Ollama through a CLI flag or a dedicated env var — custom
@@ -90,9 +86,7 @@ model you've pulled on your Ollama server.
   "display_name": "pi (Local Ollama)",
   "type": "cli",
   "command_template": "mkdir -p ~/.pi/agent && printf '%s' '{\"providers\":{\"ollama\":{\"baseUrl\":\"http://host.docker.internal:11434/v1\",\"api\":\"openai-completions\",\"apiKey\":\"ollama\",\"compat\":{\"supportsDeveloperRole\":false,\"supportsReasoningEffort\":false},\"models\":[{\"id\":\"qwen2.5-coder:14b\"}]}}}' > ~/.pi/agent/models.json && pi -p --mode json --no-session --model ollama/qwen2.5-coder:14b @{{PROMPT_FILE}}",
-  "env_vars": {},
-  "auth_type": "none",
-  "auth_config": {}
+  "env_vars": {}
 }
 ```
 
@@ -112,9 +106,7 @@ file or env-var remapping is required.
   "display_name": "pi (Anthropic API)",
   "type": "cli",
   "command_template": "pi -p --mode json --no-session --model anthropic/claude-sonnet-4-5 @{{PROMPT_FILE}}",
-  "env_vars": {},
-  "auth_type": "api-key",
-  "auth_config": { "env_var": "ANTHROPIC_API_KEY" }
+  "env_vars": {}
 }
 ```
 
@@ -126,9 +118,7 @@ file or env-var remapping is required.
   "display_name": "Claude Code CLI",
   "type": "cli",
   "command_template": "claude --print --dangerously-skip-permissions < {{PROMPT_FILE}}",
-  "env_vars": {},
-  "auth_type": "api-key",
-  "auth_config": { "env_var": "ANTHROPIC_API_KEY" }
+  "env_vars": {}
 }
 ```
 
@@ -140,9 +130,7 @@ file or env-var remapping is required.
   "display_name": "Claude Agent SDK",
   "type": "sdk",
   "command_template": null,
-  "env_vars": {},
-  "auth_type": "api-key",
-  "auth_config": { "env_var": "ANTHROPIC_API_KEY" }
+  "env_vars": {}
 }
 ```
 
@@ -156,4 +144,4 @@ Agent containers run in Docker. To reach services on the host machine (e.g., Oll
 
 ## Credentials
 
-Secret values (API keys) are never stored in the database. They live in the orchestrator's `.env` file and are injected into containers at launch time based on the tool's `auth_config.env_var` setting. The **Settings > Credentials** tab shows which env vars are configured.
+Secret values (API keys) are never stored in the database. They live in the orchestrator's `.env` file. The orchestrator forwards a fixed list of well-known LLM provider keys (`FORWARDED_KEYS` in `packages/server/src/credentials.ts`) into every agent container at launch — currently `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`. Whichever the tool's underlying CLI/SDK reads gets used; unused keys sit harmlessly. The **Settings > Credentials** tab shows which keys are set in the orchestrator's `.env`.

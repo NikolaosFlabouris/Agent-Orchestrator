@@ -8,10 +8,10 @@ import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 import { insertTaskEvent } from './db.js';
+import { WORKSPACES_ROOT, CACHES_ROOT } from './constants.js';
 
 const execFileP = promisify(execFile);
 
-const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? '/workspaces';
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 const AGENT_TOKEN = process.env.FORGEJO_AGENT_TOKEN ?? '';
 
@@ -68,10 +68,7 @@ export function getOutputDir(task: Task): string {
 }
 
 export function getCacheDir(repoOwner: string, repoName: string): string {
-  return path.join(
-    process.env.CACHES_ROOT ?? '/caches',
-    `${repoOwner}-${repoName}`
-  );
+  return path.join(CACHES_ROOT, `${repoOwner}-${repoName}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -371,36 +368,46 @@ async function writeLocalGitExclude(
 // Agent tool config-file injection
 // ---------------------------------------------------------------------------
 //
-// Some agent tools (notably OpenCode) take their provider/model/permission
-// config from a JSON file (opencode.json), NOT from environment variables. The
-// orchestrator's agent_tools.env_vars column accepts a JSON object; if that
-// object looks like an OpenCode config (top-level `provider` or `permission`
-// key), write it to /repo/opencode.json so OpenCode picks it up. The file is
-// in the local git exclude list so it never enters a commit.
+// Some agent tools (OpenCode is the day-one consumer) take their config from
+// a file rather than env vars or CLI flags. The tool's `config_file_path`
+// and `config_file_content` columns describe the path (relative to /repo,
+// the workspace root inside the container) and the file's content. The
+// orchestrator writes the file before the agent container starts; the file
+// is added to .git/info/exclude so it never enters a commit.
 //
-// This is a per-tool concern but lives in workspace.ts so the file lands
-// before the agent container starts. Called from the scheduler.
+// Path is restricted to relative paths under /repo. The orchestrator writes
+// from outside the container into the bind-mounted workspace, so we cannot
+// reach `/home/agent/...` from here. Tools needing a file outside /repo
+// (e.g. pi's ~/.pi/agent/models.json) continue to inline their write into
+// `command_template`.
 
 export async function writeAgentConfigFile(
   task: Task,
   tool: AgentTool,
   log: FastifyBaseLogger
 ): Promise<void> {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(tool.env_vars || '{}');
-  } catch {
+  const relPath = tool.config_file_path?.trim();
+  const content = tool.config_file_content;
+  if (!relPath || content === null || content === undefined) return;
+
+  // Reject absolute paths and traversal — the file must land inside /repo.
+  if (relPath.startsWith('/') || relPath.split(/[\\/]/).includes('..')) {
+    log.warn(
+      {
+        event: 'agent_config_invalid_path',
+        task_id: task.id,
+        tool_id: tool.id,
+        path: relPath,
+      },
+      'Rejecting config_file_path: must be a relative path under /repo'
+    );
     return;
   }
-  const looksLikeOpenCodeConfig =
-    typeof parsed === 'object' &&
-    parsed !== null &&
-    ('provider' in parsed || 'permission' in parsed || 'agent' in parsed);
-  if (!looksLikeOpenCodeConfig) return;
 
-  const target = path.join(getWorkdir(task), 'opencode.json');
+  const target = path.join(getWorkdir(task), relPath);
   try {
-    await fsp.writeFile(target, JSON.stringify(parsed, null, 2));
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(target, content);
     if (process.platform === 'linux') {
       try {
         await fsp.chown(target, 1000, 1000);
@@ -408,14 +415,22 @@ export async function writeAgentConfigFile(
         /* best effort */
       }
     }
+    // Make sure the file isn't swept into a salvage commit by `git add -A`.
+    // .git/info/exclude is local-only so this never lands in upstream config.
+    await writeLocalGitExclude(getWorkdir(task), [relPath]);
     log.info(
-      { event: 'agent_config_written', task_id: task.id, tool_id: tool.id, path: target },
-      'Wrote OpenCode config from tool env_vars'
+      {
+        event: 'agent_config_written',
+        task_id: task.id,
+        tool_id: tool.id,
+        path: target,
+      },
+      'Wrote agent tool config file'
     );
   } catch (err) {
     log.warn(
       { event: 'agent_config_write_failed', task_id: task.id, err },
-      'Failed to write OpenCode config'
+      'Failed to write agent tool config file'
     );
   }
 }

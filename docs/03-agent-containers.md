@@ -18,23 +18,12 @@ The alternative — a shared dev container per repo using git worktrees — was 
 
 ## Dev Image Strategy
 
-A small set of **language-runtime images** rather than per-repo images. This balances specificity with maintainability.
+A **single agent image** — `orchestrator-agent:latest` — ships all three language toolchains (Node, Python, Go) plus the harnesses and agent CLIs. Every repo runs in the same image; polyglot repos work without configuration. Earlier versions of the orchestrator built a four-image hierarchy (`base`, `node`, `python`, `go`) and selected per-repo via `repos.image_type`; that column was removed in schema v8 because the per-language partitioning added a forced choice without buying meaningful isolation.
 
-### Image Hierarchy
-
-```
-orchestrator-agent-base
-├── orchestrator-agent-node
-├── orchestrator-agent-python
-└── orchestrator-agent-go
-```
-
-### Base Image
-
-All runtime images extend from a common base that includes the agent harness and tooling:
+### Single Image
 
 ```dockerfile
-# images/base/Dockerfile
+# images/agent/Dockerfile
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
@@ -45,29 +34,34 @@ RUN apt-get update && apt-get install -y \
     gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js is required for Claude Agent SDK regardless of project language
+# Node.js (required by the Agent SDK harness, also serves as the Node toolchain)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install agent tools (as root, before switching user)
-RUN npm install -g @anthropic-ai/claude-code
-# OpenCode (Go binary)
-RUN curl -fsSL https://get.opencode.ai | bash
+# Python toolchain
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Agent SDK for TypeScript harness
-RUN npm install -g @anthropic-ai/claude-agent-sdk
+# Go toolchain
+RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
+ENV GOPATH="/home/agent/go"
+
+# Agent CLIs and SDK (npm-distributed)
+RUN npm install -g @anthropic-ai/claude-code \
+    && npm install -g opencode-ai \
+    && npm install -g @mariozechner/pi-coding-agent \
+    && npm install -g @anthropic-ai/claude-agent-sdk
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts
 COPY harness/harness-cli.sh /usr/local/bin/harness-cli
 RUN chmod +x /usr/local/bin/harness-cli
 
-# Create non-root agent user
-# UID/GID 1000 aligns with the default first user on most Linux systems,
-# which simplifies file ownership on bind-mounted volumes.
+# Non-root agent user (UID/GID 1000)
 RUN groupadd -g 1000 agent && \
     useradd -u 1000 -g agent -m -s /bin/bash agent
-
 USER agent
 WORKDIR /repo
 # No ENTRYPOINT — the orchestrator sets the entrypoint at container creation
@@ -104,38 +98,9 @@ await fs.chown(task.outputDir, 1000, 1000);
 
 For shared cache directories, ownership is set once at creation and persists across container runs since the volume is long-lived.
 
-### Language Runtime Images
-
-```dockerfile
-# images/node/Dockerfile
-FROM orchestrator-agent-base:latest
-# Node.js already present from base (required for Agent SDK)
-# This image exists for clarity and future Node-specific tooling
-```
-
-```dockerfile
-# images/python/Dockerfile
-FROM orchestrator-agent-base:latest
-
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-```
-
-```dockerfile
-# images/go/Dockerfile
-FROM orchestrator-agent-base:latest
-
-RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
-ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
-ENV GOPATH="/home/agent/go"
-```
-
 ### Repository Configuration
 
-Each repository is configured with an image type, default agent tool, and pre-agent script via the Settings UI. The `image_type` determines the Docker image (language runtime) and is always repo-level. The `agent_tool` determines the LLM tool and harness type and can be overridden per task. See [04 - Agent Harness](./04-agent-harness.md) for tool configuration and the resolution order.
+Each repository is configured with a default agent tool and an optional pre-agent script via the Settings UI. The `agent_tool` determines the LLM tool and harness type and can be overridden per task. See [04 - Agent Harness](./04-agent-harness.md) for tool configuration and the resolution order.
 
 ## Dependency Caching
 
@@ -153,13 +118,13 @@ Since dependencies are installed at container startup (not baked into the image)
 
 ### Cache Mount Strategy
 
-The orchestrator mounts language-specific cache directories based on the repo's `image_type`:
+All three language cache buckets are mounted on every container — empty buckets cost ~0 bytes, and the polyglot agent image makes per-language gating pointless:
 
-| Image Type | Cache Mounts |
-|-----------|--------------|
-| `node` | `node_modules → /repo/node_modules`, `npm-cache → /home/agent/.npm` |
-| `python` | `venv → /repo/.venv`, `pip-cache → /home/agent/.cache/pip` |
-| `go` | `go-mod-cache → /home/agent/go/pkg/mod`, `go-build-cache → /home/agent/.cache/go-build` |
+| Bucket | Mounts |
+|---|---|
+| Node | `node_modules → /repo/node_modules`, `npm-cache → /home/agent/.npm` |
+| Python | `venv → /repo/.venv`, `pip-cache → /home/agent/.cache/pip` |
+| Go | `go-mod-cache → /home/agent/go/pkg/mod`, `go-build-cache → /home/agent/.cache/go-build` |
 
 ### Concurrent Cache Safety
 
@@ -189,19 +154,16 @@ async function createAgentContainer(opts: CreateContainerOptions) {
     `${taskDir}:/task`,
     `${outputDir}:/output`,
     `${cacheDir}:/cache`,             // shared cache root (lock file lives here)
+    // All three language cache buckets — the unified agent image runs any
+    // language, so we don't gate cache mounts on the repo's language. Empty
+    // buckets cost ~0 bytes until something writes to them.
+    `${cacheDir}/node_modules:/repo/node_modules`,
+    `${cacheDir}/npm-cache:/home/agent/.npm`,
+    `${cacheDir}/venv:/repo/.venv`,
+    `${cacheDir}/pip-cache:/home/agent/.cache/pip`,
+    `${cacheDir}/go-mod-cache:/home/agent/go/pkg/mod`,
+    `${cacheDir}/go-build-cache:/home/agent/.cache/go-build`,
   ];
-
-  // Language-specific cache mounts (paths match non-root agent user home)
-  if (repo.image_type === 'node') {
-    mounts.push(`${cacheDir}/node_modules:/repo/node_modules`);
-    mounts.push(`${cacheDir}/npm-cache:/home/agent/.npm`);
-  } else if (repo.image_type === 'python') {
-    mounts.push(`${cacheDir}/venv:/repo/.venv`);
-    mounts.push(`${cacheDir}/pip-cache:/home/agent/.cache/pip`);
-  } else if (repo.image_type === 'go') {
-    mounts.push(`${cacheDir}/go-mod-cache:/home/agent/go/pkg/mod`);
-    mounts.push(`${cacheDir}/go-build-cache:/home/agent/.cache/go-build`);
-  }
 
   // Entrypoint determined by tool type (sdk → TypeScript harness, cli → bash harness)
   const entrypoint = tool.type === 'sdk'
@@ -209,11 +171,13 @@ async function createAgentContainer(opts: CreateContainerOptions) {
     : ['/usr/local/bin/harness-cli'];
 
   // Resource limits — per-repo override or global default from settings
-  const memoryMb = repo.container_memory_mb ?? getSettingInt('default_container_memory_mb');
-  const cpuCores = repo.container_cpu_cores ?? getSettingInt('default_container_cpu_cores');
+  // Per-repo override or compile-time default (constants.ts:
+  // DEFAULT_CONTAINER_MEMORY_MB / DEFAULT_CONTAINER_CPU_CORES, 4096/2).
+  const memoryMb = repo.container_memory_mb ?? DEFAULT_CONTAINER_MEMORY_MB;
+  const cpuCores = repo.container_cpu_cores ?? DEFAULT_CONTAINER_CPU_CORES;
 
   return docker.createContainer({
-    Image: `orchestrator-agent-${repo.image_type}:latest`,  // image from repo (language runtime)
+    Image: 'orchestrator-agent:latest',                      // single image for all repos
     Entrypoint: entrypoint,                                  // harness from tool type (sdk vs cli)
     Labels: {
       'managed-by': 'orchestrator',

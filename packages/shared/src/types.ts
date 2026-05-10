@@ -45,10 +45,7 @@ export interface Attempt {
   completed_at: string | null;
   log_path: string | null;
   feedback: string | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
   model: string | null;
-  cost_usd: number | null;
 }
 
 export type AttemptRole = 'develop' | 'review';
@@ -59,31 +56,84 @@ export interface Repo {
   owner: string;
   name: string;
   base_branch: string;
-  image_type: string;
   agent_tool: string;
-  pre_agent_script: string | null;
-  model: string | null;
-  max_turns: number | null;
-  timeout_minutes: number | null;
+  /** Ordered list of dependency-install steps the harness runs (sequentially,
+   *  under a single `flock` on the shared cache mount) before the agent
+   *  starts. Empty array = no install. Each entry is one of:
+   *    - A typed package-manager step (npm-ci, pnpm-install, etc.) that the
+   *      harness maps to a hardcoded command. No shell injection surface.
+   *    - A `script` step pointing at a path inside the repo. Only honoured
+   *      when this repo's `allow_script_steps` is true; the harness runs
+   *      `bash <path>` with full container env. */
+  install_steps: InstallStep[];
+  /** Per-repo opt-in for the `script` install-step kind. Default false. The
+   *  operator must flip this to allow committers to influence what runs at
+   *  pre-agent time, since the script inherits the agent container's env
+   *  including FORWARDED_KEYS. */
+  allow_script_steps: boolean;
   container_memory_mb: number | null;
   container_cpu_cores: number | null;
+  /** Operator's preferred PR merge strategy. Honoured at merge time only
+   *  if the repo's Forgejo-side allowed strategies include it; otherwise
+   *  the orchestrator falls back to the first allowed style. */
+  merge_strategy: 'squash' | 'merge' | 'rebase';
  }
+
+/** Typed install steps. Most map to a fixed package-manager command; the
+ *  `script` variant is the deliberately-gated escape hatch. */
+export type InstallStep =
+  | { kind: InstallStepKind; cwd?: string }
+  | { kind: 'script'; path: string; cwd?: string };
+
+export type InstallStepKind =
+  | 'npm-ci'
+  | 'npm-install'
+  | 'yarn-install'
+  | 'pnpm-install'
+  | 'pip-requirements'
+  | 'pip-pyproject'
+  | 'uv-sync'
+  | 'cargo-fetch'
+  | 'go-mod-download';
+
+/** Set of safe (non-script) step kinds, for runtime validation. */
+export const INSTALL_STEP_KINDS: readonly InstallStepKind[] = [
+  'npm-ci',
+  'npm-install',
+  'yarn-install',
+  'pnpm-install',
+  'pip-requirements',
+  'pip-pyproject',
+  'uv-sync',
+  'cargo-fetch',
+  'go-mod-download',
+] as const;
 
 export interface AgentTool {
   id: string;
   display_name: string;
   type: AgentToolType;
   command_template: string | null;
+  /** Flat key/value JSON. Forwarded as container env vars at launch. Keys
+   *  that collide with FORWARDED_KEYS override the orchestrator's host
+   *  values; arbitrary other keys are added to the container env. */
   env_vars: string;
-  auth_type: string;
-  auth_config: string;
-  /** Per-tool runtime cap in minutes. Resolution order:
-   *  task (not yet supported) > tool.timeout_minutes > repo.timeout_minutes >
-   *  settings.agent_timeout_minutes. Null means "fall through". */
-  timeout_minutes: number | null;
+  /** Optional config file path, relative to /repo (the workspace root inside
+   *  the container). Set together with config_file_content. */
+  config_file_path: string | null;
+  /** Optional config file content (raw text). Set together with
+   *  config_file_path. The orchestrator writes this to /repo/${path} before
+   *  the agent container starts. */
+  config_file_content: string | null;
+  /** Per-tool wall-clock timeout (minutes). Required since schema v17 — no
+   *  longer fall through to repo or global. The orchestrator passes this
+   *  verbatim to the harness's container-lifetime guard. Form pre-fill for
+   *  new tools is 2880 (48 h); seeded paid tools use 120 (2 h). */
+  timeout_minutes: number;
   /** Concurrency pool this tool belongs to. Tools sharing a provider_id
    *  serialise against that provider's concurrency_limit; tools with null
-   *  provider_id count against settings.max_concurrency only. */
+   *  provider_id only have to fit in the host resource pool
+   *  (settings.max_agent_memory_mb / max_agent_cpu_cores). */
   provider_id: string | null;
 }
 
@@ -98,25 +148,23 @@ export interface Provider {
   display_name: string;
   /** Max simultaneous agent containers that can use this provider.
    *  0 = paused (no tasks using this provider launch).
-   *  Respected in addition to settings.max_concurrency (absolute ceiling). */
+   *  Respected in addition to the host resource pool
+   *  (settings.max_agent_memory_mb / max_agent_cpu_cores). */
   concurrency_limit: number;
   notes: string | null;
 }
 
 export interface Settings {
   schema_version: string;
-  max_concurrency: string;
-  default_max_attempts: string;
-  agent_timeout_minutes: string;
+  /** Max simultaneous agent-container memory (MB). Resource-pool layer
+   *  for host capacity — sums each active container's
+   *  `repos.container_memory_mb ?? DEFAULT_CONTAINER_MEMORY_MB`; a
+   *  candidate launches only if its own size fits in the remaining pool. */
+  max_agent_memory_mb: string;
+  /** Max simultaneous agent-container CPU cores. Same composition as
+   *  `max_agent_memory_mb` but for CPU. Both must allow launch. */
+  max_agent_cpu_cores: string;
   default_model: string;
-  default_max_turns: string;
-  poll_interval_seconds: string;
-  merge_strategy: string;
-  model_pricing: string;
-  workspace_retention_days: string;
-  disk_threshold_bytes: string;
-  default_container_memory_mb: string;
-  default_container_cpu_cores: string;
   last_shutdown: string;
 }
 

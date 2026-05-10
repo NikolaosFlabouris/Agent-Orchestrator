@@ -248,7 +248,7 @@ No ORM, no state management framework, no API schema generator, no CSS-in-JS.
 
 The `tasks.status` column stores the label name without the `status/` prefix (e.g., `queued`, `preparing`, `in-progress`, `in-review`, `merged`). This matches the Forgejo label suffix exactly, so converting between DB status and Forgejo label is: `'status/' + task.status`.
 
-The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields (`owner`, `name`, `base_branch`, `image_type`, `agent_tool`) are accessed via: `repo = db.getRepo(task.repo_id)`. The pseudocode in other documents uses `repo.base_branch`, `repo.owner`, `repo.name` etc. — these always come from the joined `repos` row.
+The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields (`owner`, `name`, `base_branch`, `agent_tool`) are accessed via: `repo = db.getRepo(task.repo_id)`. The pseudocode in other documents uses `repo.base_branch`, `repo.owner`, `repo.name` etc. — these always come from the joined `repos` row.
 
 The issue `title` is not stored in the `tasks` table. The REST API populates `issue_title` from the Forgejo API when practical (single-task endpoints like `GET /api/tasks/:id`), and falls back to a placeholder (`Issue #N`) in list responses to avoid N Forgejo API calls. This avoids stale data if the issue title is edited in Forgejo, at the cost of titles only appearing after the Forgejo API is reachable. The UI can fetch updated titles client-side for display purposes.
 
@@ -295,10 +295,13 @@ CREATE TABLE attempts (
   completed_at TEXT,
   log_path TEXT,
   feedback TEXT,
-  input_tokens INTEGER,
-  output_tokens INTEGER,
-  model TEXT,
-  cost_usd REAL
+  model TEXT
+  -- Cost tracking (input_tokens, output_tokens, cost_usd) was removed in
+  -- schema v14. The harness layer recorded the user's intended model alias
+  -- rather than the actual model id reported by the agent's stream, so the
+  -- pricing lookup missed every time and cost was always 0. Rather than fix
+  -- the bug + maintain a pricing table, the whole cost-tracking feature is
+  -- gone. Use Anthropic's console for spend visibility.
 );
 
 CREATE INDEX idx_attempts_task_id ON attempts(task_id);
@@ -313,14 +316,11 @@ CREATE TABLE repos (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   base_branch TEXT DEFAULT 'main',
-  image_type TEXT NOT NULL,
   agent_tool TEXT NOT NULL,
-  pre_agent_script TEXT,
-  model TEXT,                    -- per-repo override; NULL = use global default_model
-  max_turns INTEGER,             -- per-repo override; NULL = use global default_max_turns
-  timeout_minutes INTEGER,       -- per-repo override; NULL = use global agent_timeout_minutes
-  container_memory_mb INTEGER,   -- per-repo override; NULL = use global default_container_memory_mb
-  container_cpu_cores INTEGER,   -- per-repo override; NULL = use global default_container_cpu_cores
+  install_steps TEXT NOT NULL DEFAULT '[]',   -- JSON array of typed { kind, cwd?, path? } entries; see InstallStep
+  allow_script_steps INTEGER NOT NULL DEFAULT 0,  -- 1 = repo opted in to the `script` install-step kind
+  container_memory_mb INTEGER,   -- per-repo override; NULL = use DEFAULT_CONTAINER_MEMORY_MB constant (4096)
+  container_cpu_cores INTEGER,   -- per-repo override; NULL = use DEFAULT_CONTAINER_CPU_CORES constant (2)
   UNIQUE(owner, name)     -- one config per repo
 );
 
@@ -329,9 +329,17 @@ CREATE TABLE agent_tools (
   display_name TEXT NOT NULL,
   type TEXT NOT NULL,
   command_template TEXT,
+  -- Flat key/value JSON. Forwarded as container env vars at launch on top
+  -- of FORWARDED_KEYS so per-tool entries override host defaults on collision.
   env_vars TEXT NOT NULL DEFAULT '{}',
-  auth_type TEXT NOT NULL,
-  auth_config TEXT NOT NULL DEFAULT '{}'
+  -- Optional config file dropped into /repo before the agent runs. Both set
+  -- together or both null. Used by tools (e.g. OpenCode) that read structured
+  -- config from a file rather than env vars.
+  config_file_path TEXT,
+  config_file_content TEXT
+  -- Provider credentials are forwarded from the orchestrator's host env into
+  -- every container via a fixed FORWARDED_KEYS list (see credentials.ts).
+  -- Tools no longer declare their own credentials.
 );
 ```
 
@@ -368,19 +376,22 @@ All settings keys, their types, and defaults. Seeded on first run by `seedDefaul
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `schema_version` | integer | `1` | Schema migration version |
-| `max_concurrency` | integer | `5` | Maximum active slots |
-| `default_max_attempts` | integer | `3` | Default max attempts per task |
-| `agent_timeout_minutes` | integer | `30` | Default container timeout |
+| `max_agent_memory_mb` | integer | `20480` | Host memory pool (MB) — sum of per-repo `container_memory_mb` across active tasks may not exceed this |
+| `max_agent_cpu_cores` | integer | `10` | Host CPU pool (cores) — sum of per-repo `container_cpu_cores` across active tasks may not exceed this |
 | `default_model` | string | `sonnet` | Default LLM model for agent tools |
-| `default_max_turns` | integer | `100` | Default max turns per agent session |
-| `poll_interval_seconds` | integer | `60` | Fallback poll interval |
-| `merge_strategy` | string | `squash` | PR merge type: squash, merge, or rebase |
-| `model_pricing` | JSON string | `{"claude-sonnet-4":{"input_per_mtok":3,"output_per_mtok":15},"claude-opus-4":{"input_per_mtok":5,"output_per_mtok":25},"claude-haiku-4":{"input_per_mtok":1,"output_per_mtok":5}}` | Model pricing for cost calculation |
-| `workspace_retention_days` | integer | `7` | Days to retain failed task workspaces |
-| `disk_threshold_bytes` | integer | `53687091200` | Disk usage warning threshold (50 GB) |
-| `default_container_memory_mb` | integer | `4096` | Default container memory limit |
-| `default_container_cpu_cores` | integer | `2` | Default container CPU limit |
 | `last_shutdown` | string | `''` | Records how the orchestrator last exited (`graceful` or empty). Used by startup recovery to distinguish clean shutdown from crash. |
+
+Compile-time constants (live in `packages/server/src/constants.ts` — not editable per-install):
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `POLL_INTERVAL_SECONDS` | `60` | Fallback reconciliation tick / Forgejo poll cadence. Webhooks drive the real-time path. |
+| `DEFAULT_MAX_ATTEMPTS` | `7` | Default cap on dev/review cycles before a task is marked `failed`. Per-task override is editable from the Task Detail page. |
+| `WORKSPACE_RETENTION_DAYS` | `7` | How long workspaces stick around after a task hits a terminal state, and how long an orphan workspace (no task row) must persist before the orphan-sweep deletes it. |
+| `DRAIN_TIMEOUT_MINUTES` | `30` | Hard cap on how long the orchestrator's graceful shutdown waits for in-flight agent containers. Long-running tasks (per-tool timeouts can be 48 h) get SIGKILL'd at the cap; recovery handles them on the next boot. Must align with `stop_grace_period` in docker-compose.yml. |
+| `STUCK_TASK_TIMEOUT_MULTIPLIER` | `2` | Multiplier on a task's per-tool timeout above which the alerts pass flags it as stuck. |
+| `DEFAULT_CONTAINER_MEMORY_MB` | `4096` | Default agent container memory limit when a repo doesn't override it via `repos.container_memory_mb`. Heavy workloads (Rust, large Next.js, Bazel) need the per-repo override. |
+| `DEFAULT_CONTAINER_CPU_CORES` | `2` | Default agent container CPU quota when a repo doesn't override it via `repos.container_cpu_cores`. |
 
 Each migration is idempotent and runs inside the startup sequence before the scheduler starts. No external migration framework is needed — the schema is small enough that a sequential version check covers all foreseeable changes.
 

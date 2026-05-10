@@ -8,7 +8,6 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "dev": "npm run dev --workspace=packages/server",
     "test": "npm test --workspace=packages/server",
     "test:e2e": "TEST_E2E=1 npm test --workspace=packages/server -- --run src/__tests__/e2e",
     "seed:tools": "docker exec orchestrator npx tsx scripts/seed-agent-tools.ts",

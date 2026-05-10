@@ -89,9 +89,6 @@ RUN npm run build -w packages/ui
 COPY packages/server ./packages/server
 RUN npm run build -w packages/server
 
-ENV UI_STATIC_PATH=/app/packages/ui/dist
-ENV DATA_DIR=/data
-
 EXPOSE 8080
 
 CMD ["node", "packages/server/dist/index.js"]
@@ -164,21 +161,21 @@ Network isolation is not practical given these requirements. An `--internal` Doc
 
 Security is enforced through credential scoping and Forgejo branch protection instead (see [01 - Forgejo Setup](./01-forgejo-setup.md) for details on token scopes and branch protection configuration).
 
-## Agent Base Images
+## Agent Image
 
-Build agent base images on Machine B:
+Build the unified agent image on Machine B:
 
 ```bash
-# Build base image
-docker build -t orchestrator-agent-base:latest -f images/base/Dockerfile .
-
-# Build runtime images
-docker build -t orchestrator-agent-node:latest -f images/node/Dockerfile .
-docker build -t orchestrator-agent-python:latest -f images/python/Dockerfile .
-docker build -t orchestrator-agent-go:latest -f images/go/Dockerfile .
+docker build -t orchestrator-agent:latest -f images/agent/Dockerfile .
 ```
 
-Images can also be pushed to Forgejo's built-in container registry for versioning.
+Or use the wrapper script (also creates the `agent-network` bridge):
+
+```bash
+./scripts/build-agent-images.sh
+```
+
+The image ships Node, Python, and Go toolchains together so a repo doesn't have to pick a language. Earlier orchestrator versions built a four-image hierarchy (`base`, `node`, `python`, `go`); a single image is simpler to maintain and supports polyglot repos. Images can be pushed to Forgejo's built-in container registry for versioning.
 
 ## Backup Strategy
 
@@ -200,31 +197,29 @@ The workspaces and caches volumes are transient and do not need backup.
 
 ### Workspace Cleanup Policy
 
-Workspaces (`/workspaces/issue-{id}/`) accumulate as tasks are processed. The orchestrator cleans them up based on task state:
+Workspaces (`/workspaces/issue-{id}/`) accumulate as tasks are processed. The orchestrator runs a two-pass cleanup on every poll cycle, governed by the `WORKSPACE_RETENTION_DAYS` constant in `packages/server/src/constants.ts` (default: 7 days).
 
-| Task state | Cleanup action |
-|---|---|
-| `merged` | Workspace deleted immediately after merge |
-| `failed` | Workspace retained for `workspace_retention_days` (default: 7), then deleted |
-| `cancelled` | Workspace deleted immediately on cancellation |
-| `awaiting-human-merge` | Workspace retained until the human merges or the task is cancelled |
-| `awaiting-human-review` | Workspace retained until review completes |
+**Pass 1 — task-driven sweep:** for any task in a terminal state (`merged`, `failed`, `cancelled`, `reset`, `awaiting-human-*`, `needs-human-review`) whose `completed_at` is older than the retention window, the corresponding `/workspaces/issue-N/` directory is deleted. Same window applies uniformly to all terminal states — there is no "keep merged forever" carve-out.
 
-A background cleanup job runs on the scheduler tick:
+**Pass 2 — orphan sweep:** lists `/workspaces/` for `issue-N` directories whose N has no matching task row. If the directory's mtime is older than the retention window, it is deleted. Catches stranded workspaces from manual DB intervention, restored backups, or test runs. The mtime + retention buffer guarantees a freshly-launched workspace can't be swept (workspaces are mkdir'd after the task row is inserted).
 
 ```
 cleanup_workspaces():
+  cutoff = now - WORKSPACE_RETENTION_DAYS
+
+  # Pass 1: task-driven
+  for task in db.tasks where task.status in TERMINAL_STATUSES:
+    if task.completed_at < cutoff:
+      rm -rf /workspaces/issue-{task.issue_id}/
+
+  # Pass 2: orphan sweep
   for dir in /workspaces/issue-*/:
     issue_id = extract from dir name
-    task = db.get_task_by_issue(issue_id)
-
-    if task is null:
-      # Orphaned workspace (task deleted or unknown) — remove
-      rm -rf dir
-
-    if task.status == 'failed' AND task.completed_at < now - workspace_retention_days:
+    if no task in db with that issue_id AND dir.mtime < cutoff:
       rm -rf dir
 ```
+
+Resumption cost on a deleted workspace is one fresh `git clone` (~30s for a typical repo, plus a warm-cache dependency install since the per-repo `/caches/...` directory is shared and persists). No state is lost: the branch and PR live on Forgejo; the task row in the DB carries everything else.
 
 ### Dependency Cache Cleanup
 
@@ -242,12 +237,12 @@ The orchestrator tracks disk usage of the workspaces and caches volumes and expo
     "caches_bytes": 2147483648,
     "caches_human": "2.0 GB",
     "total_bytes": 7516192768,
-    "total_human": "7.0 GB",
-    "threshold_bytes": 53687091200,
-    "threshold_human": "50 GB"
+    "total_human": "7.0 GB"
   }
 }
 ```
+
+The orchestrator no longer raises an alert when these totals cross a threshold. Use OS-level disk monitoring (e.g. `df`, Prometheus node_exporter) for that — it measures actual filesystem free space, not just the orchestrator's two subdirectories.
 
 The usage is checked on each scheduler tick by reading the volume mount sizes:
 
@@ -277,9 +272,9 @@ This is no longer possible. The harness now accepts only the `{{PROMPT_FILE}}` p
 
 ### Docker Compose stop_grace_period coupling (Issue 12)
 
-The `stop_grace_period` in docker-compose.yml is a static value (e.g., `35m`). The orchestrator's graceful shutdown drain timeout is dynamic: `agent_timeout_minutes + 5 minutes`, read from the settings table. If the admin increases `agent_timeout_minutes` via the UI without updating `stop_grace_period`, Docker Compose will SIGKILL the orchestrator before the drain completes, killing running agents.
+The `stop_grace_period` in docker-compose.yml is a static value (e.g., `35m`). The orchestrator's graceful shutdown drain timeout is the `DRAIN_TIMEOUT_MINUTES` constant in `packages/server/src/constants.ts` (default 30 min). They must be aligned — `stop_grace_period` should be `(DRAIN_TIMEOUT_MINUTES + 5)m` to give the drain a small buffer before Docker SIGKILLs the orchestrator.
 
-**Action required:** when changing `agent_timeout_minutes`, also update `stop_grace_period` in docker-compose.yml to `(new timeout + 5)m` and run `docker compose up -d` to apply.
+If you raise `DRAIN_TIMEOUT_MINUTES`, also raise `stop_grace_period` in docker-compose.yml and run `docker compose up -d` to apply. Per-tool `timeout_minutes` (which can go up to 48 h on free local servers) does NOT extend the drain — the drain is hard-capped at `DRAIN_TIMEOUT_MINUTES` and any agent still running at the cap gets SIGKILL'd. Startup recovery handles them on the next boot.
 
 ### Forgejo comment/label failure strategy (Issue 15)
 
@@ -347,8 +342,6 @@ Every log line is a single JSON object for machine parsing. Fields present on ev
 | `warn` | `prep_failed_transient` | Workspace preparation failed, task re-queued (includes `error`, `retry_count`) |
 | `warn` | `webhook_duplicate` | Duplicate webhook event skipped (includes `issue_id`, `existing_status`) |
 | `warn` | `unexpected_branch` | Agent pushed to a branch name that doesn't match the expected name |
-| `warn` | `disk_threshold` | Disk usage approaching or exceeding configured threshold (includes `usage_bytes`, `threshold_bytes`) |
-| `warn` | `pre_agent_script_unusual` | Pre-agent script doesn't match known safe patterns |
 | `error` | `container_oom` | Agent container killed by OOM (includes `container_id`, `memory_limit`) |
 | `error` | `forgejo_unreachable` | Forgejo API call failed (includes `endpoint`, `error`) |
 | `error` | `push_failed` | Git push failed after retry (includes `branch`, `error`) |

@@ -332,6 +332,42 @@ export function createTaskRoutes(
 
         }
 
+        // Direct field update: max_attempts (no action required).
+        // Forbidden in terminal states — use the `extend` action for `failed`,
+        // or `requeue` for `cancelled`/`reset`. Cannot drop below the current
+        // attempt count (use `force_fail` if you want to terminate early).
+        if ('max_attempts' in body) {
+          if (TERMINAL_STATUSES.has(task.status)) {
+            return reply.status(409).send({
+              error: `Cannot edit max_attempts on a task in terminal state '${task.status}'. Use 'extend' on failed tasks or 'requeue' on cancelled/reset tasks.`,
+            });
+          }
+          const raw = body.max_attempts;
+          if (
+            typeof raw !== 'number' ||
+            !Number.isInteger(raw) ||
+            raw < 1
+          ) {
+            return reply
+              .status(400)
+              .send({ error: 'max_attempts must be a positive integer' });
+          }
+          if (raw < task.attempt) {
+            return reply.status(400).send({
+              error: `Cannot set max_attempts below current attempt count of ${task.attempt}`,
+            });
+          }
+          const oldMax = task.max_attempts;
+          updateTaskWithSync(task.id, { max_attempts: raw });
+          recordTaskEvent(
+            task.id,
+            'max_attempts_changed',
+            `Max attempts changed from ${oldMax} to ${raw}`
+          );
+          const updated = getTask(id)!;
+          return enrichTask(updated);
+        }
+
         const action = body?.action as string;
 
         switch (action) {
@@ -535,7 +571,6 @@ export function resolveEffectiveAgentTool(
 function enrichTask(task: Task, ctx: EnrichContext = {}) {
   const repo = getRepo(task.repo_id);
   const attempts = getAttempts(task.id);
-  const totalCost = attempts.reduce((sum, a) => sum + (a.cost_usd ?? 0), 0);
 
   const runningAttempt = findRunningAttempt(attempts);
   const health = ctx.managedIds
@@ -558,7 +593,6 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     ...task,
     issue_title: task.issue_title ?? `Issue #${task.issue_id}`,
     repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name } : null,
-    total_cost_usd: Math.round(totalCost * 100) / 100,
     blocked_by: [] as number[],
     runtime_status: task.status as TaskStatus,
     health,

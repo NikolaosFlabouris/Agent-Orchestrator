@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
-import { getTasks, getSettingInt, updateSetting } from './db.js';
+import { getTasks, updateSetting } from './db.js';
 import {
   getContainer,
   inspectContainer,
@@ -9,6 +9,7 @@ import {
   removeContainer,
 } from './docker.js';
 import { getOutputDir, getTaskDir } from './workspace.js';
+import { DRAIN_TIMEOUT_MINUTES } from './constants.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
 
@@ -16,11 +17,6 @@ interface AgentResult {
   status: 'success' | 'failure' | 'timeout';
   exit_code?: number;
   error_message?: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-    model: string;
-  };
 }
 
 /**
@@ -39,9 +35,11 @@ export async function gracefulShutdown(
   scheduler.pause();
   scheduler.stop();
 
-  // 2. Set drain deadline
-  const timeoutMinutes = getSettingInt('agent_timeout_minutes') || 30;
-  const drainTimeoutMs = (timeoutMinutes + 5) * 60 * 1000;
+  // 2. Set drain deadline. Capped at DRAIN_TIMEOUT_MINUTES regardless of
+  // any individual tool's timeout — see constants.ts. Long-running tasks
+  // mid-flight get SIGKILL'd at the deadline; recovery handles them next
+  // boot.
+  const drainTimeoutMs = DRAIN_TIMEOUT_MINUTES * 60 * 1000;
   const deadline = Date.now() + drainTimeoutMs;
 
   // 3. Find running tasks

@@ -3,11 +3,14 @@ import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import {
   getTasks,
   getQueuedTasks,
-  getActiveTaskCount,
   getRepo,
   getSettingInt,
   updateTask,
 } from './db.js';
+import {
+  DEFAULT_CONTAINER_MEMORY_MB,
+  DEFAULT_CONTAINER_CPU_CORES,
+} from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 
@@ -105,11 +108,63 @@ export async function checkDependenciesMet(
   return true;
 }
 
-/**
- * Get the number of available slots.
- */
-export function getAvailableSlots(): number {
-  const maxConcurrency = getSettingInt('max_concurrency');
-  const activeCount = getActiveTaskCount();
-  return Math.max(0, maxConcurrency - activeCount);
+/** Per-task host-resource footprint. */
+export interface TaskResources {
+  memoryMb: number;
+  cpuCores: number;
+}
+
+/** Compute a task's claim on the host resource pool from its repo's
+ *  container size overrides (or the constants when null). */
+export function getTaskResources(task: Task): TaskResources {
+  const repo = getRepo(task.repo_id);
+  return {
+    memoryMb: repo?.container_memory_mb ?? DEFAULT_CONTAINER_MEMORY_MB,
+    cpuCores: repo?.container_cpu_cores ?? DEFAULT_CONTAINER_CPU_CORES,
+  };
+}
+
+/** Aggregate resource use of all currently-active (container_id non-null)
+ *  agent tasks. Pure read of DB state — no side effects. */
+export function getActiveResources(): TaskResources {
+  const active = [
+    ...getTasks({ status: 'preparing' }),
+    ...getTasks({ status: 'in-progress' }),
+    ...getTasks({ status: 'in-review' }),
+  ].filter((t) => t.container_id !== null);
+
+  let memoryMb = 0;
+  let cpuCores = 0;
+  for (const task of active) {
+    const r = getTaskResources(task);
+    memoryMb += r.memoryMb;
+    cpuCores += r.cpuCores;
+  }
+  return { memoryMb, cpuCores };
+}
+
+/** Headroom in the host resource pool. Used by the scheduler to gate
+ *  candidate launches; values can be 0 or negative if a config change
+ *  shrinks the pool below current usage (existing containers keep
+ *  running; just no new launches until usage drops). */
+export function getAvailableResources(): TaskResources {
+  const used = getActiveResources();
+  return {
+    memoryMb: Math.max(
+      0,
+      getSettingInt('max_agent_memory_mb') - used.memoryMb
+    ),
+    cpuCores: Math.max(
+      0,
+      getSettingInt('max_agent_cpu_cores') - used.cpuCores
+    ),
+  };
+}
+
+/** Whether a candidate task fits in the remaining host pool. */
+export function fitsInPool(
+  need: TaskResources,
+  available: TaskResources
+): boolean {
+  return need.memoryMb <= available.memoryMb && need.cpuCores <= available.cpuCores;
 }

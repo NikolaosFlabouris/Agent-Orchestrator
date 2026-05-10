@@ -2,11 +2,21 @@ import type { Task } from './types.js';
 
 /** WebSocket event types for the dashboard stream. */
 
+/** Host resource pool utilisation. Replaces the old count-based slot
+ *  metric — see schema v19. Each container's actual size (per-repo
+ *  override or DEFAULT_CONTAINER_*) sums into `*_used_*`; cap is the
+ *  global `max_agent_memory_mb` / `max_agent_cpu_cores` setting. */
+export interface HostPool {
+  memory_used_mb: number;
+  memory_total_mb: number;
+  cpu_used_cores: number;
+  cpu_total_cores: number;
+}
+
 export interface DashboardSnapshot {
   type: 'snapshot';
   tasks: Task[];
-  activeCount: number;
-  maxConcurrency: number;
+  hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
 }
@@ -29,7 +39,7 @@ export interface TaskRemovedEvent {
 export interface StatusChangedEvent {
   type: 'status_changed';
   paused: boolean;
-  activeCount: number;
+  hostPool: HostPool;
   queueDepth: number;
 }
 

@@ -171,7 +171,7 @@ A dedicated test image that simulates agent behavior without calling any LLM:
 
 ```dockerfile
 # images/test-mock/Dockerfile
-FROM orchestrator-agent-base:latest
+FROM orchestrator-agent:latest
 
 COPY test/mock-harness.sh /usr/local/bin/mock-harness
 RUN chmod +x /usr/local/bin/mock-harness
@@ -194,9 +194,7 @@ This mock image is configured as an agent tool in test environments:
   "display_name": "Mock Agent (Testing)",
   "type": "cli",
   "command_template": "/usr/local/bin/mock-harness",
-  "env_vars": {},
-  "auth_type": "none",
-  "auth_config": {}
+  "env_vars": {}
 }
 ```
 

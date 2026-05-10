@@ -1,7 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
-import { getTasks, getActiveTaskCount, getQueuedTasks, getSettingInt, getDb } from '../db.js';
-import type { DashboardSnapshot, DashboardEvent } from '@orchestrator/shared';
+import { getTasks, getQueuedTasks, getSettingInt } from '../db.js';
+import { getActiveResources } from '../queue.js';
+import type {
+  DashboardSnapshot,
+  DashboardEvent,
+  HostPool,
+} from '@orchestrator/shared';
 
 const clients = new Set<WebSocket>();
 
@@ -35,18 +40,25 @@ export function broadcastDashboardEvent(event: DashboardEvent): void {
   }
 }
 
-function buildSnapshot(): DashboardSnapshot {
-  const tasks = getTasks();
-  const activeCount = getActiveTaskCount();
-  const maxConcurrency = getSettingInt('max_concurrency');
-  const queueDepth = getQueuedTasks().length;
+/** Snapshot of the host resource pool — used by snapshot + status_changed
+ *  events. Pulled from the same source the scheduler gates against, so
+ *  the dashboard never disagrees with the scheduler's view. */
+export function buildHostPool(): HostPool {
+  const used = getActiveResources();
+  return {
+    memory_used_mb: used.memoryMb,
+    memory_total_mb: getSettingInt('max_agent_memory_mb'),
+    cpu_used_cores: used.cpuCores,
+    cpu_total_cores: getSettingInt('max_agent_cpu_cores'),
+  };
+}
 
+function buildSnapshot(): DashboardSnapshot {
   return {
     type: 'snapshot',
-    tasks,
-    activeCount,
-    maxConcurrency,
-    queueDepth,
+    tasks: getTasks(),
+    hostPool: buildHostPool(),
+    queueDepth: getQueuedTasks().length,
     paused: false,
   };
 }

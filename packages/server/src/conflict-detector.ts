@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { getRepo, getTask, getTasks } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
+import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
 /** The three outcomes the detector decides between. Extracted so the decision
  *  is a pure function that can be unit-tested without mocking the DB/API.
@@ -80,7 +81,7 @@ export async function checkHumanMergeConflict(
     return false;
   }
 
-  const maxAttempts = fresh.max_attempts ?? 3;
+  const maxAttempts = fresh.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
   const action = decideConflictAction(mergeable, fresh.attempt, maxAttempts);
   if (action === 'none') return false;
 

@@ -1,4 +1,5 @@
 import fsp from "node:fs/promises";
+import { WORKSPACES_ROOT, CACHES_ROOT } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Disk-usage cache (stale-while-revalidate)
@@ -17,9 +18,6 @@ import fsp from "node:fs/promises";
 // 60 s, and serve from cache even while a background refresh is in flight.
 // First call after boot returns null until the first refresh completes;
 // every subsequent call is instant.
-
-const WORKSPACES_ROOT = process.env.WORKSPACES_ROOT ?? "/workspaces";
-const CACHES_ROOT = process.env.CACHES_ROOT ?? "/caches";
 
 const DISK_CACHE_TTL_MS = 60_000;
 

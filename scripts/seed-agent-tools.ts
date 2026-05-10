@@ -24,12 +24,11 @@
  * file), invoke directly: `npx tsx scripts/seed-agent-tools.ts`.
  */
 import Database from 'better-sqlite3';
-import path from 'node:path';
 
 interface ProviderSeed {
   id: string;
   display_name: string;
-  /** 0 = paused. Respected in addition to settings.max_concurrency. */
+  /** 0 = paused. Independent from the host resource pool. */
   concurrency_limit: number;
   notes: string | null;
 }
@@ -39,19 +38,26 @@ interface ToolSeed {
   display_name: string;
   type: 'sdk' | 'cli';
   command_template: string | null;
-  env_vars: Record<string, string> | Record<string, unknown>;
-  auth_type: 'api-key' | 'none';
-  auth_config: { env_var?: string; required?: boolean; optional?: boolean };
-  /** Per-tool runtime cap (minutes). Null = fall through to repo/global. */
-  timeout_minutes: number | null;
-  /** Provider this tool pools against. Null = no pool (global ceiling only). */
+  /** Flat env-var key/value map. Forwarded as container env vars at launch
+   *  on top of FORWARDED_KEYS (so collisions override the host default). */
+  env_vars: Record<string, string>;
+  /** Optional config file dropped into /repo before the agent runs. Both
+   *  fields set together or both null. */
+  config_file_path: string | null;
+  config_file_content: string | null;
+  /** Per-tool wall-clock timeout (minutes). Required since schema v17. */
+  timeout_minutes: number;
+  /** Provider this tool pools against. Null = no provider gating; only the
+   *  host resource pool gates the launch. */
   provider_id: string | null;
 }
 
 // Providers represent upstream resources with their own concurrency budgets:
 // an API key's rate-limit bucket, a specific Ollama server, etc. Tools
 // assigned to the same provider serialise against its concurrency_limit;
-// tools on different providers run in parallel up to settings.max_concurrency.
+// tools on different providers run in parallel. The host resource pool
+// (settings.max_agent_memory_mb / max_agent_cpu_cores) is a separate gate
+// that always applies.
 const DEFAULT_PROVIDERS: ProviderSeed[] = [
   {
     id: 'anthropic-api',
@@ -77,10 +83,11 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     type: 'sdk',
     command_template: null,
     env_vars: {},
-    auth_type: 'api-key',
-    auth_config: { env_var: 'ANTHROPIC_API_KEY', required: true },
-    // Paid API — keep a sane budget cap.
-    timeout_minutes: null,
+    config_file_path: null,
+    config_file_content: null,
+    // Paid API — 2 hours (120 min). Caps token-burn on a runaway agent
+    // while still allowing legitimately long, multi-step work to finish.
+    timeout_minutes: 120,
     provider_id: 'anthropic-api',
   },
   {
@@ -96,9 +103,10 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     command_template:
       'claude --print --verbose --dangerously-skip-permissions --output-format stream-json --max-turns 100 < {{PROMPT_FILE}}',
     env_vars: {},
-    auth_type: 'api-key',
-    auth_config: { env_var: 'ANTHROPIC_API_KEY', required: true },
-    timeout_minutes: null,
+    config_file_path: null,
+    config_file_content: null,
+    // Paid API — 2 hours.
+    timeout_minutes: 120,
     provider_id: 'anthropic-api',
   },
   {
@@ -116,35 +124,40 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     command_template:
       'opencode run "$(cat {{PROMPT_FILE}})" --model anthropic/claude-sonnet-4-20250514 --format json --dangerously-skip-permissions --print-logs',
     env_vars: {},
-    auth_type: 'api-key',
-    auth_config: { env_var: 'ANTHROPIC_API_KEY', required: true },
-    timeout_minutes: null,
+    config_file_path: null,
+    config_file_content: null,
+    // Paid API — 2 hours.
+    timeout_minutes: 120,
     provider_id: 'anthropic-api',
   },
   {
     id: 'opencode-local',
     display_name: 'OpenCode (Local Ollama)',
     type: 'cli',
-    // Edit --model to match a model installed on your Ollama server. Ollama
-    // host can be configured via OLLAMA_HOST env var; defaults to host.docker.internal:11434.
-    // env_vars here is the OpenCode config shape (written to /repo/opencode.json
-    // by the orchestrator when it contains a top-level `provider` key).
+    // Edit --model to match a model installed on your Ollama server. The
+    // ollama provider definition lives in config_file_content below; the
+    // orchestrator writes it to /repo/opencode.json before the container
+    // starts so OpenCode picks it up at boot.
     command_template:
       'opencode run "$(cat {{PROMPT_FILE}})" --model ollama/qwen2.5-coder:14b --format json --dangerously-skip-permissions --print-logs',
-    env_vars: {
-      $schema: 'https://opencode.ai/config.json',
-      provider: {
-        ollama: {
-          npm: '@ai-sdk/openai-compatible',
-          name: 'Ollama',
-          options: { baseURL: 'http://host.docker.internal:11434/v1' },
-          models: { 'qwen2.5-coder:14b': { name: 'Qwen2.5 Coder 14B' } },
+    env_vars: {},
+    config_file_path: 'opencode.json',
+    config_file_content: JSON.stringify(
+      {
+        $schema: 'https://opencode.ai/config.json',
+        provider: {
+          ollama: {
+            npm: '@ai-sdk/openai-compatible',
+            name: 'Ollama',
+            options: { baseURL: 'http://host.docker.internal:11434/v1' },
+            models: { 'qwen2.5-coder:14b': { name: 'Qwen2.5 Coder 14B' } },
+          },
         },
+        permission: { '*': 'allow' },
       },
-      permission: { '*': 'allow' },
-    },
-    auth_type: 'none',
-    auth_config: { env_var: 'OPENCODE_API_KEY', optional: true },
+      null,
+      2
+    ),
     // Local/free — allow long-running tasks. Single generation on a large model
     // can take minutes, and a full task may need dozens of tool-call rounds.
     timeout_minutes: 2880, // 48 hours
@@ -169,10 +182,10 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     command_template:
       'pi -p --mode json --no-session --model anthropic/claude-sonnet-4-5 @{{PROMPT_FILE}}',
     env_vars: {},
-    auth_type: 'api-key',
-    auth_config: { env_var: 'ANTHROPIC_API_KEY', required: true },
-    // Paid API — fall through to repo/global default.
-    timeout_minutes: null,
+    config_file_path: null,
+    config_file_content: null,
+    // Paid API — 2 hours.
+    timeout_minutes: 120,
     provider_id: 'anthropic-api',
   },
   {
@@ -189,8 +202,12 @@ const DEFAULT_TOOLS: ToolSeed[] = [
     command_template:
       'mkdir -p ~/.pi/agent && printf \'%s\' \'{"providers":{"ollama":{"baseUrl":"http://host.docker.internal:11434/v1","api":"openai-completions","apiKey":"ollama","compat":{"supportsDeveloperRole":false,"supportsReasoningEffort":false},"models":[{"id":"qwen2.5-coder:14b"}]}}}\' > ~/.pi/agent/models.json && pi -p --mode json --no-session --model ollama/qwen2.5-coder:14b @{{PROMPT_FILE}}',
     env_vars: {},
-    auth_type: 'none',
-    auth_config: {},
+    // pi reads its provider config from ~/.pi/agent/models.json which lives
+    // outside /repo. The orchestrator can only drop config files into
+    // /repo (the bind-mounted workspace), so pi-ollama writes its config
+    // inline via command_template above instead of using config_file_*.
+    config_file_path: null,
+    config_file_content: null,
     // Local/free — same long-running cap as opencode-local.
     timeout_minutes: 2880, // 48 hours
     provider_id: 'ollama-local',
@@ -206,8 +223,10 @@ function tableExists(db: Database.Database, name: string): boolean {
 
 function main(): void {
   const force = process.argv.includes('--force');
-  const dataDir = process.env.DATA_DIR ?? process.cwd();
-  const dbPath = process.env.DB_PATH ?? path.join(dataDir, 'orchestrator.db');
+  // Must match the path the orchestrator opens (server/src/index.ts).
+  // The seed script runs via `docker exec` into the orchestrator container,
+  // so it sees the same /data persistence mount.
+  const dbPath = '/data/orchestrator.db';
 
   console.log(`Opening database at ${dbPath}`);
   const db = new Database(dbPath);
@@ -250,7 +269,7 @@ function main(): void {
 
   console.log('\nSeeding agent tools...');
   const toolStmt = db.prepare(
-    `${verb} INTO agent_tools (id, display_name, type, command_template, env_vars, auth_type, auth_config, timeout_minutes, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `${verb} INTO agent_tools (id, display_name, type, command_template, env_vars, config_file_path, config_file_content, timeout_minutes, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   let toolsInserted = 0;
   let toolsSkipped = 0;
@@ -261,8 +280,8 @@ function main(): void {
       tool.type,
       tool.command_template,
       JSON.stringify(tool.env_vars),
-      tool.auth_type,
-      JSON.stringify(tool.auth_config),
+      tool.config_file_path,
+      tool.config_file_content,
       tool.timeout_minutes,
       tool.provider_id
     );

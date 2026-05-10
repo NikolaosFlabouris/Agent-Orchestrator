@@ -11,6 +11,7 @@ import {
 } from './docker.js';
 import { getWorkdir } from './workspace.js';
 import type { Scheduler } from './scheduler.js';
+import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -244,7 +245,7 @@ export async function extendTask(
   additionalAttempts: number,
 ): Promise<void> {
   const repo = getRepo(task.repo_id);
-  const oldMaxAttempts = task.max_attempts ?? 3;
+  const oldMaxAttempts = task.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
   const newMaxAttempts = oldMaxAttempts + additionalAttempts;
 
   // 1. Record event

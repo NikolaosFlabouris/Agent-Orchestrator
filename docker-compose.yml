@@ -1,6 +1,6 @@
 # Before first boot:
 #   1. cp .env.example .env  and fill in tokens / API keys
-#   2. ./scripts/build-agent-images.sh   (builds orchestrator-agent-{base,node,python,go}:latest)
+#   2. ./scripts/build-agent-images.sh   (builds orchestrator-agent:latest)
 #   3. docker compose up -d              (boots orchestrator; first boot creates the DB schema)
 #   4. npm run seed:tools                (docker-execs into orchestrator and seeds providers + agent_tools)
 # See docs/quick-start.md for the full bring-up procedure.

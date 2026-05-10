@@ -281,47 +281,78 @@ function AgentToolsSection() {
         version of the CLI, update this field — no code change needed.
       </p>
 
+      <SubHeading>Provider credentials</SubHeading>
+      <p className="text-sm text-gray-300">
+        The orchestrator forwards a fixed set of well-known LLM provider keys
+        (<Code>ANTHROPIC_API_KEY</Code>, <Code>CLAUDE_CODE_OAUTH_TOKEN</Code>,{' '}
+        <Code>OPENAI_API_KEY</Code>, <Code>GEMINI_API_KEY</Code>,{' '}
+        <Code>OPENROUTER_API_KEY</Code>, <Code>DEEPSEEK_API_KEY</Code>,{' '}
+        <Code>MISTRAL_API_KEY</Code>) from its own <Code>.env</Code> into every
+        agent container at launch. The underlying CLI/SDK picks up whichever
+        key it needs; unused keys sit harmlessly. Set credentials in the
+        orchestrator's <Code>.env</Code> file and check status under{' '}
+        <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+          Settings &gt; Credentials
+        </Link>
+        .
+      </p>
+
       <SubHeading>env_vars</SubHeading>
       <p className="text-sm text-gray-300">
-        JSON object. Two shapes are supported:
+        Per-tool environment variables. The Agent Tools form splits this into
+        two views:
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
-          <strong>Plain key/value</strong> — strings are passed through to the
-          container. Example:
-          <CodeBlock>{`{
-  "OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1",
-  "OPENCODE_MODEL": "qwen2.5-coder:32b"
-}`}</CodeBlock>
+          <strong>Provider credential overrides</strong> — for each forwarded
+          key, leave blank to use the orchestrator's <Code>.env</Code> default
+          or set a tool-specific value (e.g. a different{' '}
+          <Code>ANTHROPIC_API_KEY</Code> for an experimental account, or a{' '}
+          <Code>OPENAI_BASE_URL</Code> pointing at a per-tool LLM server).
+          Values typed here are stored in the database.
         </li>
         <li>
-          <strong>Structured OpenCode config</strong> — when a value is an object,
-          it is serialized to JSON and written as an OpenCode config file inside
-          the container. Used for multi-provider or multi-model OpenCode setups.
+          <strong>Other environment variables</strong> — arbitrary KEY/VALUE
+          rows for anything not in the forwarded-keys list (e.g. provider
+          model names, log levels, custom flags read from env).
         </li>
       </ul>
-
-      <SubHeading>auth_config</SubHeading>
-      <p className="text-sm text-gray-300">
-        JSON describing how this tool gets credentials. Typical shape:
-      </p>
-      <CodeBlock>{`{ "env_var": "ANTHROPIC_API_KEY", "optional": false }`}</CodeBlock>
       <p className="text-sm text-gray-300 mt-2">
-        The orchestrator checks that <Code>env_var</Code> is present in its own
-        environment (loaded from <Code>.env</Code>) and forwards it into the agent
-        container. If <Code>optional</Code> is true, the status shows{' '}
-        <span className="text-gray-400">not required</span> rather than{' '}
-        <span className="text-red-400">missing</span> when unset — useful for{' '}
-        <Code>opencode-local</Code> where no API key is needed.
+        Per-tool values override the orchestrator's defaults on collision and
+        add anything else to the container's environment. Stored as a flat
+        JSON object on the tool row.
+      </p>
+
+      <SubHeading>config_file</SubHeading>
+      <p className="text-sm text-gray-300">
+        Optional. Some agent tools (notably OpenCode for non-built-in
+        providers like Ollama, vLLM, LM Studio) read their configuration from
+        a file rather than env vars or CLI flags. Setting{' '}
+        <Code>config_file_path</Code> + <Code>config_file_content</Code>{' '}
+        causes the orchestrator to write the content to{' '}
+        <Code>/repo/&lt;path&gt;</Code> inside the container before the agent
+        runs. The file is added to <Code>.git/info/exclude</Code> so it never
+        lands in a commit.
+      </p>
+      <p className="text-sm text-gray-300 mt-2">
+        Path must be relative — anchored under <Code>/repo</Code>. Tools that
+        need a file outside the workspace (e.g.{' '}
+        <Code>~/.pi/agent/models.json</Code>) inline the file write into{' '}
+        <Code>command_template</Code> instead. The form provides a starter
+        templates dropdown for common cases (OpenCode + Ollama, OpenCode +
+        vLLM, OpenCode + LM Studio).
       </p>
 
       <SubHeading>timeout_minutes</SubHeading>
       <p className="text-sm text-gray-300">
-        Per-tool timeout override. Leave blank to use the repo's timeout (or the
-        global default if the repo also has no override). Useful bumped high
-        (e.g. 2880 = 48h) for free or local tools where a slow run is cheap; keep
-        it low (default 120) for expensive API-backed tools so a runaway agent
-        can't burn tokens for hours.
+        Required wall-clock timeout (minutes) for any agent attempt using
+        this tool. Schema v17 made this a per-tool concern only — there is
+        no longer a global or per-repo fallback. The form pre-fills new
+        tools with <Code>2880</Code> (48 hours); operators are expected to
+        type their actual budget. Typical values:{' '}
+        <Code>120</Code> (2 h) for paid APIs to cap token-burn on a runaway
+        agent, <Code>2880</Code> (48 h) for free local servers where a slow
+        generation is cheap.
       </p>
     </section>
   );
@@ -358,25 +389,28 @@ function RepositoriesSection() {
       <SubHeading>Field reference</SubHeading>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2">
         <li>
-          <Code>image_type</Code> (node / python / go) — picks which of the
-          pre-built <Code>orchestrator-agent-*</Code> images the container will
-          run in. Choose the one whose toolchain matches the repo's language.
-        </li>
-        <li>
           <Code>agent_tool</Code> — the default agent tool for this repo. Must
           reference an existing entry from Agent Tools. Can be overridden
           per-task when queueing.
         </li>
         <li>
-          <Code>pre_agent_script</Code> — a single shell command run inside the
-          container before the agent starts. Typical values: <Code>npm ci</Code>,{' '}
-          <Code>pip install -r requirements.txt</Code>. Commands that don't match
-          a known safe pattern show a warning: this script has full shell access
-          including your API keys.
+          <Code>install_steps</Code> — ordered list of typed dependency-install
+          steps the harness runs sequentially before the agent starts, under a
+          single <Code>flock</Code> against the shared cache mount. Each step
+          picks a kind from the dropdown (<Code>npm-ci</Code>,{' '}
+          <Code>pnpm-install</Code>, <Code>pip-requirements</Code>,{' '}
+          <Code>cargo-fetch</Code>, etc.) and an optional <Code>cwd</Code>{' '}
+          relative to <Code>/repo</Code>. The orchestrator maps each kind to a
+          hardcoded command — operators can't inject shell here. For monorepos
+          add multiple steps with different <Code>cwd</Code> values.
         </li>
         <li>
-          <Code>model</Code> override — leave blank to use the global default
-          model.
+          <Code>allow_script_steps</Code> — per-repo toggle that enables the{' '}
+          <Code>script</Code> install-step kind, which runs{' '}
+          <Code>bash &lt;path&gt;</Code> against a path inside the repo. The
+          script inherits the agent container env (provider keys, agent git
+          token), so anyone with commit access to the repo can change what
+          runs. Default off; flip on consciously per repo.
         </li>
         <li>
           <Code>timeout_minutes</Code> override — cap on agent wall-clock time
@@ -384,8 +418,20 @@ function RepositoriesSection() {
           global default.
         </li>
         <li>
-          <Code>max_turns</Code>, memory (MB), CPU cores — all have the same
-          "blank = use global default" behaviour.
+          <Code>merge_strategy</Code> — your preferred PR merge style
+          (squash / merge / rebase). Defaults to <Code>squash</Code>. At
+          merge time the orchestrator queries the repo's Forgejo-side
+          allowed strategies and uses your preference if it's permitted;
+          otherwise it falls back to the first allowed style (priority:
+          squash &gt; merge &gt; rebase &gt; rebase-merge &gt;
+          fast-forward-only). If the repo only allows one strategy, that one
+          is used regardless of your preference.
+        </li>
+        <li>
+          Memory (MB) and CPU cores — leave blank to use the compile-time
+          defaults (4096 MB, 2 cores in <Code>constants.ts</Code>). Set
+          per-repo when a heavy workload (Rust workspace, large Next.js
+          build, Bazel) needs more headroom.
         </li>
       </ul>
 
@@ -425,42 +471,43 @@ function GlobalSettingsSection() {
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2 mt-2">
         <li>
-          <Code>max_concurrency</Code> — how many agent containers may run
-          simultaneously. The Dashboard shows{' '}
-          <Code>Slots: active/max_concurrency</Code> in the header. Lower this
-          if your host is CPU/memory constrained; raise it if tasks are stacking
-          up and you have headroom.
+          <Code>max_agent_memory_mb</Code> and <Code>max_agent_cpu_cores</Code>{' '}
+          — the host resource pool. The orchestrator launches a candidate task
+          only when its repo's <Code>container_memory_mb</Code> /{' '}
+          <Code>container_cpu_cores</Code> both fit in the remaining pool. The
+          Dashboard header shows live utilisation as{' '}
+          <Code>Mem: used/total GB · CPU: used/total</Code>. Lower the pool if
+          the host is constrained; raise it (and per-repo container sizing) if
+          the queue stacks up despite headroom.
         </li>
         <li>
-          <Code>agent_timeout_minutes</Code> — default wall-clock limit for any
-          single agent attempt. Hit the limit and the container is killed and
-          the attempt marked <Code>timeout</Code>. Overridden by the repo's or
-          tool's timeout if set.
-        </li>
-        <li>
-          <Code>model_pricing</Code> (JSON) — maps model IDs to{' '}
-          <Code>input</Code> / <Code>output</Code> per-million-token prices.
-          Used to calculate the cost numbers shown in Task Detail and on the
-          Dashboard daily total. Update when Anthropic publishes new rates or
-          when you add a new model.
-        </li>
-        <li>
-          <Code>default_max_turns</Code> — upper bound on agent turns per
-          attempt when the tool/repo doesn't override it. Prevents a runaway
-          agent from looping forever.
-        </li>
-        <li>
-          <Code>poll_interval_seconds</Code> — how often the orchestrator polls
-          Forgejo for new <Code>status/queued</Code> issues as a fallback to
-          webhooks. 60s is a reasonable default; lower it if you don't have
-          webhooks wired up, raise it to reduce API load.
-        </li>
-        <li>
-          Also on this screen: <Code>default_max_attempts</Code>,{' '}
-          <Code>default_model</Code>, <Code>merge_strategy</Code>,{' '}
-          <Code>workspace_retention_days</Code>, default container memory / CPU.
+          Also on this screen: <Code>default_model</Code>.
         </li>
       </ul>
+      <p className="text-xs text-gray-500 mt-3">
+        Wall-clock timeout is now a per-tool concern only — see{' '}
+        <Code>timeout_minutes</Code> on each agent tool. The orchestrator
+        no longer carries a global default; every tool must set its own
+        budget. CLI tools also encode an internal per-turn flag in{' '}
+        <Code>command_template</Code> (e.g. claude-code's{' '}
+        <Code>--max-turns 100</Code>); the SDK harness uses its own
+        default. The wall-clock timeout is the lifetime safety net that
+        kills the container regardless of turn count.
+      </p>
+      <p className="text-xs text-gray-500 mt-3">
+        Several defaults are compile-time constants in{' '}
+        <Code>packages/server/src/constants.ts</Code> rather than UI settings,
+        because they have no real per-install tuning case:{' '}
+        <Code>POLL_INTERVAL_SECONDS</Code> (60s fallback poll cadence),{' '}
+        <Code>DEFAULT_MAX_ATTEMPTS</Code> (7 — overrideable per-task at
+        creation and from the Task Detail page),{' '}
+        <Code>WORKSPACE_RETENTION_DAYS</Code> (7 — applied uniformly to all
+        terminal-state workspaces and to orphan workspaces with no task row),
+        and{' '}
+        <Code>DEFAULT_CONTAINER_MEMORY_MB</Code> /{' '}
+        <Code>DEFAULT_CONTAINER_CPU_CORES</Code> (4096 / 2 — overrideable
+        per-repo for heavy workloads).
+      </p>
     </section>
   );
 }
@@ -477,9 +524,8 @@ function RunningTasks() {
           <strong>Label an existing Forgejo issue</strong> with{' '}
           <Code>status/queued</Code>. This is the lowest-friction path — write
           the task as a normal issue in Forgejo, add the label, done. The
-          orchestrator picks it up within one poll cycle
-          (<Code>poll_interval_seconds</Code>) or immediately if webhooks are
-          wired up.
+          orchestrator picks it up within one poll cycle (60s) or immediately
+          if webhooks are wired up.
         </li>
         <li>
           <strong>Create Task button</strong> (+ Add task on the Dashboard, or
@@ -588,8 +634,8 @@ function CommonIssues() {
         </li>
         <li>
           <strong>Container never starts</strong> — on the host, check{' '}
-          <Code>docker images</Code> for the four{' '}
-          <Code>orchestrator-agent-*:latest</Code> images, and{' '}
+          <Code>docker images</Code> for the{' '}
+          <Code>orchestrator-agent:latest</Code> image, and{' '}
           <Code>docker network ls</Code> for <Code>agent-network</Code>. Check
           orchestrator logs for <Code>docker_connection_failed</Code>.
         </li>
@@ -597,7 +643,7 @@ function CommonIssues() {
           <strong>Container runs but agent errors immediately</strong> — the
           CLI flags in the tool's <Code>command_template</Code> probably don't
           match the installed version. Exec into the image to confirm:{' '}
-          <Code>docker run --rm -it orchestrator-agent-base:latest bash</Code>,
+          <Code>docker run --rm -it orchestrator-agent:latest bash</Code>,
           then <Code>opencode --help</Code> or <Code>claude --help</Code>.
           Update the template in{' '}
           <Link to="/settings" className="text-blue-400 hover:text-blue-300">
@@ -615,8 +661,7 @@ function CommonIssues() {
           <strong>Webhook events not arriving</strong> — verify{' '}
           <Code>ORCHESTRATOR_URL</Code> is reachable from the Forgejo host and
           that the webhook secret matches <Code>FORGEJO_WEBHOOK_SECRET</Code>.
-          In the meantime, polling will still pick up label changes every{' '}
-          <Code>poll_interval_seconds</Code>.
+          In the meantime, polling will still pick up label changes every 60s.
         </li>
       </ul>
       <p className="text-sm text-gray-400 mt-6">

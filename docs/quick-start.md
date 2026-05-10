@@ -45,9 +45,9 @@ Fill in at minimum:
  
 For transparency, the detailed step-by-step sequence follows:
 
-## 3. Build the agent container images
+## 3. Build the agent container image
 
-These images are NOT built by docker-compose (they are pulled on demand by the orchestrator, keyed by each repo's `image_type`). The build script also creates the `agent-network` bridge that `docker compose up` attaches to (declared `external: true` in the compose file). Build them once:
+This image is NOT built by docker-compose — the orchestrator pulls it on demand for every task. A single `orchestrator-agent:latest` image ships the Node, Python, and Go toolchains plus the harnesses and agent CLIs. The build script also creates the `agent-network` bridge that `docker compose up` attaches to (declared `external: true` in the compose file). Build it once:
 
 ```bash
 ./scripts/build-agent-images.sh
@@ -56,11 +56,8 @@ These images are NOT built by docker-compose (they are pulled on demand by the o
 Verify:
 
 ```bash
-docker images --filter "reference=orchestrator-agent-*"
-# orchestrator-agent-base    latest
-# orchestrator-agent-node    latest
-# orchestrator-agent-python  latest
-# orchestrator-agent-go      latest
+docker images --filter "reference=orchestrator-agent"
+# orchestrator-agent  latest
 
 docker network inspect agent-network --format '{{.Name}}: {{.Driver}}'
 # agent-network: bridge
@@ -106,7 +103,7 @@ Tools inserted:
 - `opencode-anthropic` (CLI, Anthropic API)
 - `opencode-local` (CLI, no auth, local LLM)
 
-Review and adjust in the UI under **Settings > Agent Tools**. Verify each tool's `command_template` matches the flags of the actually-installed version of the CLI inside the image (run `docker run --rm -it orchestrator-agent-base:latest opencode run --help`).
+Review and adjust in the UI under **Settings > Agent Tools**. Verify each tool's `command_template` matches the flags of the actually-installed version of the CLI inside the image (run `docker run --rm -it orchestrator-agent:latest opencode run --help`).
 
 ## 6. Register a repository
 
@@ -114,7 +111,7 @@ In the UI:
 
 1. **Settings > Repositories > Add Repository**.
 2. Select a repo from the dropdown (populated from Forgejo via `/api/repos/available`).
-3. Set `image_type` (node / python / go), `agent_tool` (default for this repo), and optionally a `pre_agent_script` (e.g. `npm ci`).
+3. Set `agent_tool` (default for this repo), and optionally one or more install steps from the dropdown (e.g. `npm-ci`, `pnpm-install`, `pip-requirements`). Each step takes an optional `cwd` relative to `/repo`, so monorepos can install in multiple sub-folders. The agent image already ships Node, Python, and Go — no language selection. If your repo needs a custom bootstrap, flip "Allow custom setup scripts" and add a `script` step pointing at a path inside the repo (`bash <path>`); the script inherits the agent container env, so only enable for repos whose committers you trust.
 4. Save. The orchestrator will clone the repo into `/workspaces/` on its first task.
 
 Then register a webhook in Forgejo for this repo:
@@ -136,8 +133,8 @@ Track progress in the UI:
 ## Troubleshooting
 
 - **"Agent tool 'X' not found"** — you didn't run the seed script, or the repo's `agent_tool` field references an ID that doesn't exist. Seed or edit via the UI.
-- **Container never starts** — check `docker images` for the four `orchestrator-agent-*:latest` images. Check `docker network ls` for `agent-network`. Check orchestrator logs for `docker_connection_failed`.
-- **Container runs but agent errors immediately** — exec into the image and run the tool manually: `docker run --rm -it orchestrator-agent-base:latest bash` then `opencode --help` or `claude --help`. If the CLI flags differ, update the tool's `command_template` via the UI.
+- **Container never starts** — check `docker images` for the `orchestrator-agent:latest` image. Check `docker network ls` for `agent-network`. Check orchestrator logs for `docker_connection_failed`.
+- **Container runs but agent errors immediately** — exec into the image and run the tool manually: `docker run --rm -it orchestrator-agent:latest bash` then `opencode --help` or `claude --help`. If the CLI flags differ, update the tool's `command_template` via the UI.
 - **Agent pushes branch but no PR appears** — the orchestrator's Forgejo token may be missing `write:repository`. Check logs for `forgejo_api_error`.
 - **Webhook events not arriving** — verify `ORCHESTRATOR_URL` is reachable from the Forgejo host, and that the webhook secret matches.
 

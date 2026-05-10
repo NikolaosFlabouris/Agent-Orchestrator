@@ -38,14 +38,12 @@ describe.skipIf(SKIP)("ForgejoClient integration", () => {
       owner: FORGEJO_USER,
       name: testRepoName,
       base_branch: "main",
-      image_type: "node",
       agent_tool: "mock",
-      pre_agent_script: null,
-      model: null,
-      max_turns: null,
-      timeout_minutes: null,
+      install_steps: [],
+      allow_script_steps: false,
       container_memory_mb: null,
       container_cpu_cores: null,
+      merge_strategy: 'squash',
     };
   });
 

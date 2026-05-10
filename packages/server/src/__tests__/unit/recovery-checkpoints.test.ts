@@ -114,8 +114,8 @@ beforeEach(() => {
   // Fresh in-memory DB so checkpoint rows don't bleed across tests.
   const db = initDatabase(':memory:');
   db.prepare(
-    `INSERT INTO repos (id, owner, name, image_type, agent_tool)
-     VALUES (1, 'owner', 'repo', 'default', 'tool')`
+    `INSERT INTO repos (id, owner, name, agent_tool)
+     VALUES (1, 'owner', 'repo', 'tool')`
   ).run();
   db.prepare(
     `INSERT INTO tasks (id, issue_id, repo_id, status, queue_position, max_attempts, prep_failure_count)
@@ -128,7 +128,6 @@ beforeEach(() => {
     owner: 'owner',
     name: 'repo',
     base_branch: 'main',
-    image_type: 'default',
     agent_tool: 'tool',
   });
   mocks.updateTask.mockReturnValue(undefined);

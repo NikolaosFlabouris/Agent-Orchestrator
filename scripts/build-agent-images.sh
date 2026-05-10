@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Build the agent container images used by the orchestrator.
+# Build the agent container image used by the orchestrator.
 #
-# Image hierarchy (see docs/03-agent-containers.md):
-#   orchestrator-agent-base       <- Ubuntu + Node 22 + Claude Code + OpenCode + Agent SDK + harnesses
-#     orchestrator-agent-node     <- base (Node-specific customizations go here)
-#     orchestrator-agent-python   <- base + python3, pip, venv
-#     orchestrator-agent-go       <- base + Go toolchain
+# A single image — orchestrator-agent:latest — ships the Node, Python, and Go
+# toolchains plus the harnesses and agent CLIs (see images/agent/Dockerfile).
+# This replaces the previous orchestrator-agent-{base,node,python,go} hierarchy
+# so adding a repo no longer requires picking a language image.
 #
 # Run from the repo root. Idempotent — Docker's layer cache handles re-runs.
 
@@ -21,20 +20,12 @@ if ! docker network inspect agent-network >/dev/null 2>&1; then
   docker network create --driver bridge agent-network
 fi
 
-echo "==> Building orchestrator-agent-base:latest"
+echo "==> Building orchestrator-agent:latest"
 docker build \
-  -t orchestrator-agent-base:latest \
-  -f images/base/Dockerfile \
+  -t orchestrator-agent:latest \
+  -f images/agent/Dockerfile \
   .
 
-for lang in node python go; do
-  echo "==> Building orchestrator-agent-${lang}:latest"
-  docker build \
-    -t "orchestrator-agent-${lang}:latest" \
-    -f "images/${lang}/Dockerfile" \
-    "images/${lang}"
-done
-
 echo
-echo "Agent images built:"
-docker images --filter "reference=orchestrator-agent-*" --format "  {{.Repository}}:{{.Tag}}  {{.Size}}"
+echo "Agent image built:"
+docker images --filter "reference=orchestrator-agent" --format "  {{.Repository}}:{{.Tag}}  {{.Size}}"

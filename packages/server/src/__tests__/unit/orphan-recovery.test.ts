@@ -95,10 +95,7 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     completed_at: null,
     log_path: null,
     feedback: null,
-    input_tokens: null,
-    output_tokens: null,
     model: null,
-    cost_usd: null,
     ...overrides,
   };
 }

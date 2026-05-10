@@ -4,7 +4,7 @@ import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
 import { connectDashboardWs } from '../ws.js';
-import type { DashboardWsEvent } from '../ws.js';
+import type { DashboardWsEvent, HostPool } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
 import { QueueList } from '../components/QueueList.js';
 
@@ -21,14 +21,19 @@ export function Dashboard() {
   const [repos, setRepos] = useState<RepoResponse[]>([]);
  
   useEffect(() => {
-    // Pull status immediately and every 5 s. Daily cost/completions come from
-    // the same payload; providers are sampled often so the Pools row stays
-    // close to live. Cost is cheap (single SQL query + one JSON serialisation).
+    // Pull status immediately and every 5 s. Daily completions come from the
+    // same payload; providers are sampled often so the Pools row stays close
+    // to live.
     const refresh = () => {
         api.getStatus().then((s) => {
-          store.setDailyCost(s.daily_cost_usd);
           store.setDailyCompletions(s.daily_completions);
           store.setForgejoBaseUrl(s.forgejo_base_url);
+          store.setHostPool({
+            memory_used_mb: s.host_pool.memory_used_mb,
+            memory_total_mb: s.host_pool.memory_total_mb,
+            cpu_used_cores: s.host_pool.cpu_used_cores,
+            cpu_total_cores: s.host_pool.cpu_total_cores,
+          });
           setPools(s.providers ?? []);
         }).catch(() => {});
     };
@@ -112,20 +117,17 @@ export function Dashboard() {
             <span className={store.paused ? 'text-yellow-400' : 'text-green-400'}>
               {store.paused ? 'Paused' : 'Running'}
             </span>
-            <span>
-              Slots: {store.activeCount}/{store.maxConcurrency}
-            </span>
+            <HostPoolDisplay pool={store.hostPool} />
             <span>Queue: {store.queueDepth}</span>
             <span>Today: {store.dailyCompletions} tasks</span>
-            <span>${store.dailyCostUsd.toFixed(2)}</span>
             <button
               onClick={async () => {
                 if (store.paused) {
                   await api.resume();
-                  store.setStatus({ paused: false, activeCount: store.activeCount, queueDepth: store.queueDepth });
+                  store.setStatus({ paused: false, hostPool: store.hostPool, queueDepth: store.queueDepth });
                 } else {
                   await api.pause();
-                  store.setStatus({ paused: true, activeCount: store.activeCount, queueDepth: store.queueDepth });
+                  store.setStatus({ paused: true, hostPool: store.hostPool, queueDepth: store.queueDepth });
                 }
               }}
               className={`px-3 py-1 rounded text-xs font-medium ${
@@ -429,6 +431,26 @@ function CompletedItem({ task }: { task: TaskResponse }) {
         )}
       </div>
     </div>
+  );
+}
+
+function HostPoolDisplay({ pool }: { pool: HostPool }) {
+  const memPct = pool.memory_total_mb > 0
+    ? Math.round((pool.memory_used_mb / pool.memory_total_mb) * 100)
+    : 0;
+  const cpuPct = pool.cpu_total_cores > 0
+    ? Math.round((pool.cpu_used_cores / pool.cpu_total_cores) * 100)
+    : 0;
+  const memColor = memPct >= 100 ? 'text-orange-400' : memPct >= 80 ? 'text-yellow-400' : '';
+  const cpuColor = cpuPct >= 100 ? 'text-orange-400' : cpuPct >= 80 ? 'text-yellow-400' : '';
+  const memGb = (pool.memory_total_mb / 1024).toFixed(1);
+  const usedGb = (pool.memory_used_mb / 1024).toFixed(1);
+  return (
+    <span title={`Host resource pool: memory ${pool.memory_used_mb}/${pool.memory_total_mb} MB · CPU ${pool.cpu_used_cores}/${pool.cpu_total_cores} cores`}>
+      <span className={memColor}>Mem: {usedGb}/{memGb} GB</span>
+      <span className="text-gray-600 mx-2">·</span>
+      <span className={cpuColor}>CPU: {pool.cpu_used_cores}/{pool.cpu_total_cores}</span>
+    </span>
   );
 }
 

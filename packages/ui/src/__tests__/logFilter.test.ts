@@ -161,15 +161,10 @@ describe('Claude Code stream-json compaction', () => {
   });
 
   it('compacts result event', () => {
-    const event = {
-      type: 'result',
-      num_turns: 5,
-      total_cost_usd: 0.0123,
-      usage: { input_tokens: 1000, output_tokens: 500 },
-    };
+    const event = { type: 'result', num_turns: 5 };
     const result = classifyLogLine(JSON.stringify(event));
     expect(result.show).toBe(true);
-    expect(result.content).toBe('[result] turns=5 cost=$0.0123 input=1000 output=500');
+    expect(result.content).toBe('[result] turns=5');
   });
 });
 
@@ -192,13 +187,7 @@ describe('Error lines always visible', () => {
   });
 
   it('always shows an error even if the JSON is otherwise compactable', () => {
-    const event = {
-      type: 'result',
-      ERROR: true,
-      num_turns: 1,
-      total_cost_usd: 0,
-      usage: { input_tokens: 0, output_tokens: 0 },
-    };
+    const event = { type: 'result', ERROR: true, num_turns: 1 };
     const line = JSON.stringify(event);
     // Line contains "ERROR" as a key — rule 1 fires first
     const result = classifyLogLine(line);

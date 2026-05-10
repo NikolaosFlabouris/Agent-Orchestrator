@@ -17,12 +17,12 @@ import {
   getTaskByIssue,
   getTasks,
   getTask,
-  getSettingInt,
   insertTask,
   updateTask,
 } from './db.js';
 import { checkAlerts } from './alerts.js';
 import { cleanupOldWorkspaces } from './cleanup.js';
+import { POLL_INTERVAL_SECONDS } from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -53,7 +53,7 @@ export class Poller {
     if (this.running) return;
     this.running = true;
 
-    const intervalMs = (getSettingInt('poll_interval_seconds') || 60) * 1000;
+    const intervalMs = POLL_INTERVAL_SECONDS * 1000;
     this.timer = setInterval(() => {
       this.poll().catch((err) => {
         this.log.error({ event: 'poll_error', err }, 'Fallback poll failed');
