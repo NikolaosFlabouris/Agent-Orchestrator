@@ -1,11 +1,19 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Task, Repo, AgentTool } from '@orchestrator/shared';
+import type {
+  Task,
+  Repo,
+  Provider,
+  Model,
+  AgentProfile,
+} from '@orchestrator/shared';
 import {
   getTask,
   getRepo,
-  getAgentTool,
+  getAgentProfile,
+  getModel,
+  getProvider,
   getProviders,
   getSetting,
   updateTask,
@@ -46,7 +54,7 @@ import {
   getOutputDir,
   getCacheDir,
   generateBranchName,
-  writeAgentConfigFile,
+  writeHarnessConfigFiles,
 } from './workspace.js';
 import { postDevAgent, handleDevFailure } from './agents/develop.js';
 import {
@@ -56,9 +64,10 @@ import {
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import { runOrphanSweep } from './orphan-recovery.js';
-import { FORWARDED_KEYS } from './credentials.js';
 import { DEFAULT_MAX_ATTEMPTS, POLL_INTERVAL_SECONDS } from './constants.js';
 import { INSTALL_STEP_COMMANDS } from './install-steps.js';
+import { getHarness, type HarnessSpec, type HarnessInvocation } from './harnesses/index.js';
+import { buildProviderEnv } from './providers/kinds.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 // ---------------------------------------------------------------------------
@@ -79,13 +88,25 @@ interface TaskMeta {
   attempt: number;
   role: 'develop' | 'review';
   pr_number: number | null;
+  /** Resolved model identifier the harness invocation will pass to its
+   *  inference endpoint. For SDK harnesses the in-container script reads
+   *  this and passes it to the SDK call. For CLI harnesses the value is
+   *  audit-only — the model is already baked into `agent_command`. */
   model: string;
+  /** Snapshot of the harness id at attempt-launch time. Audit field —
+   *  the harness implementation is selected at task-launch by the
+   *  scheduler, not by this string. */
+  harness_id: string;
+  /** Snapshot of the agent profile id at attempt-launch time. Audit. */
+  agent_profile_id: string;
   /** Resolved install commands the harness runs sequentially under flock
    *  before the agent. Each entry is the literal shell command to exec.
    *  The orchestrator builds these from the repo's typed install_steps so
    *  the harness never sees free-text input from the operator. */
   install_commands: InstallCommand[];
-  agent_tool: string;
+  /** Literal shell command for CLI harnesses. Empty string for SDK
+   *  harnesses (the SDK script reads `meta.model` and runs the SDK call
+   *  directly). */
   agent_command: string;
 }
 
@@ -406,10 +427,8 @@ export class Scheduler {
       ...getTasks({ status: 'in-review' }),
     ].filter((t) => t.container_id !== null);
 
-    const activeByProvider = countActiveByProvider(
-      active,
-      (t) => this.toolForTask(t),
-      (t) => getRepo(t.repo_id)
+    const activeByProvider = countActiveByProvider(active, (t) =>
+      this.providerIdForTask(t)
     );
     const limitByProvider = limitMapFromProviders(getProviders());
 
@@ -442,8 +461,7 @@ export class Scheduler {
 
       // Provider pool check — skip if this candidate's pool is saturated.
       // A later candidate on a different (idle) provider can still launch.
-      const tool = this.toolForTask(task);
-      const providerKey = resolveProviderKey(task, tool, getRepo(task.repo_id));
+      const providerKey = resolveProviderKey(task, this.providerIdForTask(task));
       if (!canLaunchInPool(providerKey, activeByProvider, limitByProvider)) {
         continue;
       }
@@ -528,7 +546,7 @@ export class Scheduler {
     const repo = getRepo(task.repo_id);
     if (!repo) throw new Error(`Repo not found for task ${task.id}`);
 
-    const tool = this.resolveTool(task, repo);
+    const ctx = this.resolveLaunchContext(task, repo);
     let issue: { title: string; body: string };
     try {
       issue = await this.forgejo.getIssue(repo, task.issue_id);
@@ -561,20 +579,17 @@ export class Scheduler {
     await prepareWorkspace(task, this.log);
 
     // Write task files
-    await this.writeTaskFiles(task, repo, tool, issue, feedback);
+    await this.writeTaskFiles(task, repo, ctx, issue, feedback);
 
-    // Write tool-specific config file (e.g. opencode.json) into the workspace
-    await writeAgentConfigFile(task, tool, this.log);
-
-    // Resolve config
-    const effective = this.resolveConfig(task, repo, tool);
+    // Write harness-generated config files (e.g. opencode.json) into /repo
+    await writeHarnessConfigFiles(task, ctx.invocation.config_files, ctx.harness.id, this.log);
 
     // Create and start container
-    const env = this.buildEnv(tool);
+    const env = this.buildEnv(ctx.provider, ctx.invocation);
     const container = await createAgentContainer({
       task,
       repo,
-      tool,
+      harnessRuntime: ctx.harness.runtime,
       workdir,
       taskDir,
       outputDir,
@@ -602,13 +617,14 @@ export class Scheduler {
       /* best effort */
     }
 
-    // Record attempt
+    // Record attempt with snapshot of harness + model used
     const attempt = insertAttempt({
       task_id: task.id,
       attempt_number: task.attempt,
       role: 'develop',
       status: 'running',
-      model: effective.model,
+      model_id: ctx.invocation.resolved_model,
+      harness_id: ctx.harness.id,
     });
     activeState.set(task.id, {
       currentAttemptId: attempt.id,
@@ -630,7 +646,7 @@ export class Scheduler {
     const repo = getRepo(task.repo_id);
     if (!repo) throw new Error(`Repo not found for task ${task.id}`);
 
-    const tool = this.resolveTool(task, repo);
+    const ctx = this.resolveLaunchContext(task, repo);
     let issue: { title: string; body: string };
     try {
       issue = await this.forgejo.getIssue(repo, task.issue_id);
@@ -659,20 +675,17 @@ export class Scheduler {
     }
 
     // Write task files
-    await this.writeTaskFiles(task, repo, tool, issue, null, 'review');
+    await this.writeTaskFiles(task, repo, ctx, issue, null, 'review');
 
-    // Write tool-specific config file (e.g. opencode.json) into the workspace
-    await writeAgentConfigFile(task, tool, this.log);
-
-    // Resolve config
-    const effective = this.resolveConfig(task, repo, tool);
+    // Write harness-generated config files (e.g. opencode.json) into /repo
+    await writeHarnessConfigFiles(task, ctx.invocation.config_files, ctx.harness.id, this.log);
 
     // Create and start container
-    const env = this.buildEnv(tool);
+    const env = this.buildEnv(ctx.provider, ctx.invocation);
     const container = await createAgentContainer({
       task,
       repo,
-      tool,
+      harnessRuntime: ctx.harness.runtime,
       workdir,
       taskDir,
       outputDir,
@@ -699,13 +712,14 @@ export class Scheduler {
       /* best effort */
     }
 
-    // Record attempt
+    // Record attempt with snapshot of harness + model used
     const attempt = insertAttempt({
       task_id: task.id,
       attempt_number: task.attempt,
       role: 'review',
       status: 'running',
-      model: effective.model,
+      model_id: ctx.invocation.resolved_model,
+      harness_id: ctx.harness.id,
     });
     const state = activeState.get(task.id) ?? {
       currentAttemptId: 0,
@@ -1029,92 +1043,132 @@ export class Scheduler {
 
   // ---- Config resolution helpers ----
 
-  private resolveTool(task: Task, repo: Repo): AgentTool {
-    const toolId = task.agent_tool ?? repo.agent_tool;
-    const tool = getAgentTool(toolId);
-    if (!tool) {
-      throw new Error(`Agent tool '${toolId}' not found`);
+  /** Resolve the agent profile for a task. Chain:
+   *    task.agent_profile_id → repo.agent_profile_id → settings.default_agent_profile_id
+   *  Throws with a clear message if every level is null/missing. */
+  private resolveProfile(task: Task, repo: Repo): AgentProfile {
+    const profileId =
+      task.agent_profile_id ??
+      repo.agent_profile_id ??
+      getSetting('default_agent_profile_id');
+    if (!profileId) {
+      throw new Error(
+        `Cannot launch task ${task.id}: no agent profile configured. ` +
+        `Task, repo (${repo.owner}/${repo.name}), and settings.default_agent_profile_id are all unset.`
+      );
     }
-    return tool;
+    const profile = getAgentProfile(profileId);
+    if (!profile) {
+      throw new Error(
+        `Agent profile '${profileId}' not found (referenced by ` +
+        `${task.agent_profile_id ? `task ${task.id}` : repo.agent_profile_id ? `repo ${repo.owner}/${repo.name}` : 'settings.default_agent_profile_id'}). ` +
+        `The profile may have been deleted; reconfigure or restore.`
+      );
+    }
+    return profile;
   }
 
-  /** Best-effort tool lookup for a task, used by bookkeeping paths that
-   *  should not throw when a tool row has been deleted. Returns undefined
-   *  if the repo or tool is missing. */
-  private toolForTask(task: Task): AgentTool | undefined {
+  /** Build the full (profile, harness, model, provider, invocation)
+   *  bundle for a task launch. Throws on missing rows or harness mismatch
+   *  (the harness's buildInvocation throws if its supported_provider_kinds
+   *  doesn't include the resolved provider's kind). */
+  private resolveLaunchContext(
+    task: Task,
+    repo: Repo
+  ): {
+    profile: AgentProfile;
+    harness: HarnessSpec;
+    model: Model;
+    provider: Provider;
+    invocation: HarnessInvocation;
+  } {
+    const profile = this.resolveProfile(task, repo);
+    const model = getModel(profile.model_pk);
+    if (!model) {
+      throw new Error(
+        `Model with id ${profile.model_pk} (referenced by profile '${profile.id}') not found. ` +
+        `It may have been deleted; reconfigure the profile.`
+      );
+    }
+    const provider = getProvider(model.provider_id);
+    if (!provider) {
+      throw new Error(
+        `Provider '${model.provider_id}' (referenced by model id ${model.id}) not found. ` +
+        `It may have been deleted; reconfigure the provider or pick a different model.`
+      );
+    }
+    const harness = getHarness(profile.harness_id);
+    const invocation = harness.buildInvocation({
+      profile,
+      model,
+      provider,
+      promptFilePath: '/task/prompt.md',
+    });
+    return { profile, harness, model, provider, invocation };
+  }
+
+  /** Best-effort profile lookup for a task, for bookkeeping paths that
+   *  should not throw when a profile/repo is missing. Returns undefined
+   *  if any link in the chain is broken. */
+  private profileForTask(task: Task): AgentProfile | undefined {
     const repo = getRepo(task.repo_id);
     if (!repo) return undefined;
-    const toolId = task.agent_tool ?? repo.agent_tool;
-    return getAgentTool(toolId);
+    const profileId =
+      task.agent_profile_id ??
+      repo.agent_profile_id ??
+      getSetting('default_agent_profile_id');
+    if (!profileId) return undefined;
+    return getAgentProfile(profileId);
   }
 
-  private resolveConfig(
-    _task: Task,
-    _repo: Repo,
-    tool: AgentTool
-  ): { model: string; timeout: number; command: string } {
-    // Schema v17 collapsed the timeout chain — `tool.timeout_minutes` is
-    // NOT NULL and the only source. Per-repo and global overrides are gone.
-    // Model resolution is per-task → global default; max-turns isn't
-    // surfaced (CLI tools encode their own cap in command_template; the
-    // SDK harness uses its own default — wall-clock timeout is the
-    // lifetime safety net).
-    return {
-      model: _task.model ?? getSetting('default_model') ?? 'sonnet',
-      timeout: tool.timeout_minutes,
-      command: tool.command_template ?? '',
-    };
+  /** Best-effort provider-id lookup for a task, used by the scheduler
+   *  pool gating. Walks task → profile → model → provider_id. Returns
+   *  null if any link is missing — the scheduler treats these as
+   *  unconstrained-by-provider (host pool still gates). */
+  private providerIdForTask(task: Task): string | null {
+    const profile = this.profileForTask(task);
+    if (!profile) return null;
+    const model = getModel(profile.model_pk);
+    if (!model) return null;
+    return model.provider_id;
   }
 
-  private buildEnv(tool: AgentTool): string[] {
+  /** Build the env-var array for a Docker container launch. Combines the
+   *  provider's resolved credential (under the kind's standard name, via
+   *  buildProviderEnv) with any harness-specific extras. */
+  private buildEnv(provider: Provider, invocation: HarnessInvocation): string[] {
     const env: string[] = [];
-
-    // Order matters: Docker keeps the LAST value when a key appears more than
-    // once in Env. Push FORWARDED_KEYS first (host defaults from .env), then
-    // the tool's env_vars on top so per-tool overrides win on collision and
-    // arbitrary extras get added.
-
-    // Provider credentials — forwarded from the orchestrator's host env into
-    // every container. The tool's underlying CLI/SDK picks up whichever key
-    // it reads; unused keys sit harmlessly.
-    for (const key of FORWARDED_KEYS) {
-      const value = process.env[key];
-      if (value) {
-        env.push(`${key}=${value}`);
-      }
+    // Provider credential under the standard env-var name for its kind
+    // (e.g. ANTHROPIC_API_KEY for kind=anthropic). May be empty if the
+    // provider is self-hosted with no auth or if the configured env-var
+    // pointer isn't set in the orchestrator's environment.
+    const providerEnv = buildProviderEnv(provider);
+    for (const [k, v] of Object.entries(providerEnv)) {
+      env.push(`${k}=${v}`);
     }
-
-    // Per-tool env_vars: flat key/value (schema v10 split the dual-purpose
-    // JSON; structured config files live in tool.config_file_path/content).
-    // Stored as a JSON object string in the DB.
-    try {
-      const envVars = JSON.parse(tool.env_vars || '{}');
-      if (envVars && typeof envVars === 'object') {
-        for (const [key, value] of Object.entries(envVars)) {
-          if (typeof value === 'string') {
-            env.push(`${key}=${value}`);
-          }
-        }
-      }
-    } catch {
-      // Invalid JSON in env_vars — skip silently.
+    // Harness-specific extras (typically empty).
+    for (const [k, v] of Object.entries(invocation.extra_env)) {
+      env.push(`${k}=${v}`);
     }
-
     return env;
   }
 
   private async writeTaskFiles(
     task: Task,
     repo: Repo,
-    tool: AgentTool,
+    ctx: {
+      profile: AgentProfile;
+      harness: HarnessSpec;
+      model: Model;
+      provider: Provider;
+      invocation: HarnessInvocation;
+    },
     issue: { title: string; body: string },
     feedback: string | null = null,
     role: 'develop' | 'review' = 'develop'
   ): Promise<void> {
     const taskDir = getTaskDir(task);
     await fsp.mkdir(taskDir, { recursive: true });
-
-    const effective = this.resolveConfig(task, repo, tool);
 
     // Write prompt.md using templates from doc 04
     const promptPath = path.join(taskDir, 'prompt.md');
@@ -1132,14 +1186,15 @@ export class Scheduler {
       issue_id: task.issue_id,
       branch_name: task.branch_name!,
       base_branch: repo.base_branch,
-      max_runtime_minutes: effective.timeout,
+      max_runtime_minutes: ctx.profile.timeout_minutes,
       attempt: task.attempt,
       role,
       pr_number: task.pr_number,
-      model: effective.model,
+      model: ctx.invocation.resolved_model,
+      harness_id: ctx.harness.id,
+      agent_profile_id: ctx.profile.id,
       install_commands: buildInstallCommands(repo),
-      agent_tool: task.agent_tool ?? repo.agent_tool,
-      agent_command: effective.command,
+      agent_command: ctx.invocation.agent_command ?? '',
     };
     await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
   }

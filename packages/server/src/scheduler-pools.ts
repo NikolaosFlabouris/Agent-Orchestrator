@@ -1,36 +1,36 @@
-import type { Task, AgentTool, Provider, Repo } from '@orchestrator/shared';
+import type { Task, Provider } from '@orchestrator/shared';
 
-/** Synthetic provider id used internally to represent "no provider assigned".
- *  Tasks whose tool has `provider_id === null` are bucketed under this key
- *  for bookkeeping; their launch is only constrained by the host resource
- *  pool (settings.max_agent_memory_mb / max_agent_cpu_cores), not by any
- *  provider concurrency_limit. */
+/** Synthetic provider id used internally to represent "no provider
+ *  resolvable for this task". Tasks bucketed under this key are not
+ *  subject to per-provider concurrency limits — only the host resource
+ *  pool gates their launch. */
 export const NO_PROVIDER_KEY = '__none__';
 
-/** Given a task and its resolved tool + repo, return the provider id the task
- *  occupies a slot against. Null tool.provider_id → NO_PROVIDER_KEY. */
+/** Map a task to its current provider id by walking
+ *  task → profile → model → provider_id. The caller supplies a single
+ *  function that performs the lookup so the helper stays pure (no DB
+ *  access of its own; trivially testable).
+ *
+ *  Returns NO_PROVIDER_KEY when any link in the chain is missing
+ *  (profile deleted, model deleted, etc.) — those tasks won't crash the
+ *  scheduler but also won't be subject to provider-pool gating. */
 export function resolveProviderKey(
   task: Task,
-  tool: AgentTool | undefined,
-  _repo: Repo | undefined
+  resolvedProviderId: string | null | undefined
 ): string {
-  // _repo is unused today but kept in the signature for future extension
-  // (e.g. per-repo provider overrides) without churning call sites.
-  return tool?.provider_id ?? NO_PROVIDER_KEY;
+  return resolvedProviderId ?? NO_PROVIDER_KEY;
 }
 
-/** Count currently-active (holding-a-slot) tasks per provider, given a list
- *  of active tasks and a way to look up each one's tool. Pure — no DB reads. */
+/** Count currently-active (holding-a-slot) tasks per provider. The
+ *  caller supplies the task→provider_id resolver so this stays pure.
+ *  Pure — no DB reads. */
 export function countActiveByProvider(
   activeTasks: Task[],
-  resolveTool: (task: Task) => AgentTool | undefined,
-  resolveRepo: (task: Task) => Repo | undefined
+  resolveProviderId: (task: Task) => string | null | undefined
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const task of activeTasks) {
-    const tool = resolveTool(task);
-    const repo = resolveRepo(task);
-    const key = resolveProviderKey(task, tool, repo);
+    const key = resolveProviderKey(task, resolveProviderId(task));
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
@@ -43,14 +43,15 @@ export function countActiveByProvider(
  *  fitsInPool / getAvailableResources.
  *
  *  Rules:
- *   - For tasks with a provider assigned: active-on-provider must be
- *     strictly less than provider.concurrency_limit. A limit of 0 means
- *     "paused" — no task with this provider ever launches.
- *   - For tasks with no provider (NO_PROVIDER_KEY): no provider-side
- *     constraint; the host resource pool is the only gate.
- *   - Unknown provider (tool points at a deleted provider): treated as
- *     unlimited from this layer's perspective. ON DELETE SET NULL on
- *     agent_tools.provider_id should make this rare. */
+ *   - Tasks with a resolvable provider: active-on-provider must be
+ *     strictly less than provider.concurrency_limit. Limit of 0 means
+ *     "paused" — no task ever launches against this provider.
+ *   - Tasks with NO_PROVIDER_KEY (profile/model/provider chain broken):
+ *     no provider-side constraint; the host pool is the only gate.
+ *   - Unknown provider key (provider row deleted between tool-row
+ *     refresh and now): treated as unlimited from this layer's
+ *     perspective. ON DELETE RESTRICT on agent_profiles.model_pk and
+ *     models.provider_id should make this rare. */
 export function canLaunchInPool(
   providerKey: string,
   activeByProvider: Map<string, number>,

@@ -8,7 +8,8 @@ import {
   getTaskEvents,
   insertTask,
   updateTask,
-  getAgentTool,
+  getAgentProfile,
+  getSetting,
 } from '../db.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
@@ -221,8 +222,7 @@ export function createTaskRoutes(
         repo_id: repoId,
         status: 'queued',
         max_attempts: (body.max_attempts as number) ?? undefined,
-        agent_tool: (body.agent_tool as string) ?? null,
-        model: (body.model as string) ?? null,
+        agent_profile_id: (body.agent_profile_id as string) ?? null,
       });
 
       notifyTaskCreated(task);
@@ -270,8 +270,7 @@ export function createTaskRoutes(
         repo_id: repoId,
         status: 'queued',
         max_attempts: (body.max_attempts as number) ?? undefined,
-        agent_tool: (body.agent_tool as string) ?? null,
-        model: (body.model as string) ?? null,
+        agent_profile_id: (body.agent_profile_id as string) ?? null,
       });
 
       notifyTaskCreated(task);
@@ -289,47 +288,49 @@ export function createTaskRoutes(
 
         const body = request.body as Record<string, unknown>;
 
-        // Direct field update: agent_tool (no action required).
-        // null clears the override and reverts to the repo default.
-        if ('agent_tool' in body) {
-          const rawTool = body.agent_tool;
-          if (rawTool !== null && typeof rawTool !== 'string') {
-            return reply.status(400).send({ error: 'agent_tool must be a string or null' });
+        // Direct field update: agent_profile_id (no action required).
+        // null clears the override and reverts to the repo default
+        // (or, transitively, the global default).
+        if ('agent_profile_id' in body) {
+          const raw = body.agent_profile_id;
+          if (raw !== null && typeof raw !== 'string') {
+            return reply.status(400).send({
+              error: 'agent_profile_id must be a string or null',
+            });
           }
-          const newTool = rawTool as string | null;
+          const newProfile = raw as string | null;
 
-          const validation = validateAgentTool(newTool, getAgentTool);
+          const validation = validateAgentProfile(newProfile, getAgentProfile);
           if (!validation.valid) {
             return reply.status(400).send({ error: validation.error });
           }
 
-           const oldTool = task.agent_tool;
-           updateTaskWithSync(task.id, { agent_tool: newTool });
- 
-           const fromLabel = oldTool ?? '(repo default)';
-           const toLabel = newTool ?? '(repo default)';
-           recordTaskEvent(
-             task.id,
-             'agent_tool_changed',
-             `Agent tool changed from ${fromLabel} to ${toLabel}`
-           );
- 
-           const repo = getRepo(task.repo_id);
-           if (repo) {
-             try {
-               await forgejo.commentOnIssue(
-                 repo,
-                 task.issue_id,
-                 `Agent tool changed to \`${newTool ?? 'repo default'}\` — takes effect on next attempt.`
-               );
-             } catch {
-               // Best effort
-             }
-           }
- 
-           const updated = getTask(id)!;
-           return enrichTask(updated);
+          const oldProfile = task.agent_profile_id;
+          updateTaskWithSync(task.id, { agent_profile_id: newProfile });
 
+          const fromLabel = oldProfile ?? '(inherit)';
+          const toLabel = newProfile ?? '(inherit)';
+          recordTaskEvent(
+            task.id,
+            'agent_profile_changed',
+            `Agent profile changed from ${fromLabel} to ${toLabel}`
+          );
+
+          const repo = getRepo(task.repo_id);
+          if (repo) {
+            try {
+              await forgejo.commentOnIssue(
+                repo,
+                task.issue_id,
+                `Agent profile changed to \`${newProfile ?? 'inherit'}\` — takes effect on next attempt.`
+              );
+            } catch {
+              // Best effort
+            }
+          }
+
+          const updated = getTask(id)!;
+          return enrichTask(updated);
         }
 
         // Direct field update: max_attempts (no action required).
@@ -537,35 +538,56 @@ interface EnrichContext {
 }
 
 /**
- * Validate an agent_tool value for the PATCH handler.
+ * Validate an agent_profile_id value for the PATCH handler.
  * null is always valid (clears the override). A string must exist in the
- * agent_tools table. Exported so the unit tests exercise the same logic as
- * the route handler.
+ * agent_profiles table. Exported so the unit tests exercise the same logic
+ * as the route handler.
  */
-export function validateAgentTool(
-  toolId: string | null,
-  getAgentToolFn: (id: string) => { id: string } | undefined
+export function validateAgentProfile(
+  profileId: string | null,
+  getAgentProfileFn: (id: string) => { id: string } | undefined
 ): { valid: true } | { valid: false; error: string } {
-  if (toolId === null) return { valid: true };
-  const tool = getAgentToolFn(toolId);
-  if (!tool) return { valid: false, error: `Unknown agent_tool: ${toolId}` };
+  if (profileId === null) return { valid: true };
+  const profile = getAgentProfileFn(profileId);
+  if (!profile) {
+    return { valid: false, error: `Unknown agent_profile_id: ${profileId}` };
+  }
   return { valid: true };
 }
 
 /**
- * Resolve the effective agent tool id and its source.
- * task.agent_tool (per-task override) takes precedence over repo.agent_tool
- * (repository default). Exported for unit tests — the authoritative
- * launch-time resolution lives in scheduler.resolveTool().
+ * Resolve the effective agent profile id and its source for a task.
+ * Three-tier chain: task.agent_profile_id → repo.agent_profile_id →
+ * settings.default_agent_profile_id. Exported for unit tests; the
+ * authoritative launch-time resolution lives in scheduler.resolveProfile().
  */
-export function resolveEffectiveAgentTool(
-  taskAgentTool: string | null,
-  repoAgentTool: string | null
-): { effective_agent_tool_id: string | null; agent_tool_source: 'task' | 'repo' } {
-  if (taskAgentTool !== null) {
-    return { effective_agent_tool_id: taskAgentTool, agent_tool_source: 'task' };
+export function resolveEffectiveAgentProfile(
+  taskAgentProfile: string | null,
+  repoAgentProfile: string | null,
+  globalDefaultProfile: string | null
+): {
+  effective_agent_profile_id: string | null;
+  agent_profile_source: 'task' | 'repo' | 'global' | 'none';
+} {
+  if (taskAgentProfile !== null) {
+    return {
+      effective_agent_profile_id: taskAgentProfile,
+      agent_profile_source: 'task',
+    };
   }
-  return { effective_agent_tool_id: repoAgentTool, agent_tool_source: 'repo' };
+  if (repoAgentProfile !== null) {
+    return {
+      effective_agent_profile_id: repoAgentProfile,
+      agent_profile_source: 'repo',
+    };
+  }
+  if (globalDefaultProfile !== null) {
+    return {
+      effective_agent_profile_id: globalDefaultProfile,
+      agent_profile_source: 'global',
+    };
+  }
+  return { effective_agent_profile_id: null, agent_profile_source: 'none' };
 }
 
 function enrichTask(task: Task, ctx: EnrichContext = {}) {
@@ -577,17 +599,17 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
     : deriveHealthWithoutDocker(task, runningAttempt);
 
-  // Preferred enrichment: surface effective tool and its source so the UI can
-  // display and distinguish task-level overrides from repo defaults without a
-  // second round-trip. task.agent_tool wins; falls back to repo.agent_tool.
-  // repo_agent_tool is always included separately so the UI can show the repo
-  // default name in the "Use repo default" select option even when an override
-  // is active (agent_tool_source === 'task').
-  const repoAgentTool = repo?.agent_tool ?? null;
-  const { effective_agent_tool_id, agent_tool_source } = resolveEffectiveAgentTool(
-    task.agent_tool,
-    repoAgentTool
-  );
+  // Surface the effective profile id and which tier it came from so the UI
+  // can render the override / inherit chain without a second round-trip.
+  // Task-level override wins, then repo default, then the global default.
+  const repoProfileId = repo?.agent_profile_id ?? null;
+  const globalDefault = getSetting('default_agent_profile_id') ?? null;
+  const { effective_agent_profile_id, agent_profile_source } =
+    resolveEffectiveAgentProfile(
+      task.agent_profile_id,
+      repoProfileId,
+      globalDefault
+    );
 
   return {
     ...task,
@@ -597,9 +619,10 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     runtime_status: task.status as TaskStatus,
     health,
     container_name: ctx.containerName ?? null,
-    effective_agent_tool_id,
-    agent_tool_source,
-    repo_agent_tool: repoAgentTool,
+    effective_agent_profile_id,
+    agent_profile_source,
+    repo_agent_profile_id: repoProfileId,
+    global_agent_profile_id: globalDefault,
   };
 }
 

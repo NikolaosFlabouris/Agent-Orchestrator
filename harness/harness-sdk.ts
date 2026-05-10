@@ -11,8 +11,14 @@ interface Meta {
   role: 'develop' | 'review';
   pr_number: number | null;
   model: string;
+  /** Audit snapshot of the harness id resolved at attempt-launch time. */
+  harness_id: string;
+  /** Audit snapshot of the agent profile id resolved at attempt-launch time. */
+  agent_profile_id: string;
   install_commands: InstallCommand[];
-  agent_tool: string;
+  /** Empty string for SDK harnesses (this script reads `model` directly
+   *  and runs the SDK call). Populated for CLI harnesses, which use
+   *  harness-cli.sh instead. */
   agent_command: string;
 }
 

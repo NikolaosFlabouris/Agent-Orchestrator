@@ -33,19 +33,16 @@ if [ "$INSTALL_COUNT" -gt 0 ]; then
 fi
 
 # prompt.md is the complete prompt — including review feedback on rework cycles.
-# The orchestrator assembles the full prompt before the container starts.
-PROMPT="$TASK_DIR/prompt.md"
-
-# Prompt substitution: {{PROMPT_FILE}} is replaced with the literal path
-# /task/prompt.md. The agent tool reads the file itself (e.g. via
-# `"$(cat {{PROMPT_FILE}})"`), so prompt content never reaches the shell as
-# code — safe against shell metacharacters in user-authored issue bodies.
-RESOLVED_COMMAND="${AGENT_COMMAND//\{\{PROMPT_FILE\}\}/$PROMPT}"
+# The orchestrator assembles the full prompt before the container starts. The
+# harness module that produced AGENT_COMMAND already embeds the literal
+# /task/prompt.md path (via `< /task/prompt.md`, `@/task/prompt.md`, or
+# `"$(cat /task/prompt.md)"` depending on the binary). The agent reads the
+# file itself, so prompt content never reaches the shell as code.
 
 # Run agent with timeout
 AGENT_EXIT=0
 timeout --foreground --kill-after=30s "${MAX_MINUTES}m" \
-  bash -c "$RESOLVED_COMMAND" \
+  bash -c "$AGENT_COMMAND" \
   > "$AGENT_LOG" 2>&1 \
   || AGENT_EXIT=$?
 

@@ -3,10 +3,12 @@ import {
   getQueuedTasks,
   getDb,
   getSettingInt,
+  getSetting,
   getProviders,
   getTasks,
   getRepo,
-  getAgentTool,
+  getAgentProfile,
+  getModel,
 } from "../db.js";
 import { getActiveResources } from "../queue.js";
 import type { Scheduler } from "../scheduler.js";
@@ -14,8 +16,9 @@ import type { Poller } from "../polling.js";
 import { checkAlerts } from "../alerts.js";
 import { ensureDiskCache, getDiskCache } from "../disk-usage.js";
 import { resolveProviderKey } from "../scheduler-pools.js";
-import { FORWARDED_KEYS } from "../credentials.js";
 import { detectHostCapacity } from "../host-capacity.js";
+import { listProviderKinds } from "../providers/kinds.js";
+import { ORCHESTRATOR_ENV_VARS } from "../credentials.js";
 
 const startTime = Date.now();
 
@@ -49,6 +52,9 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
       const cachesBytes = disk?.caches ?? 0;
 
       // Per-provider slot accounting — drives the Pools row on the dashboard.
+      // Resolution: task → profile → model → provider_id. Same chain the
+      // scheduler uses; missing-link tasks bucket under NO_PROVIDER_KEY
+      // and don't count against any provider's limit.
       const activeTasks = [
         ...getTasks({ status: 'preparing' }),
         ...getTasks({ status: 'in-progress' }),
@@ -57,14 +63,19 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
       const activePerProvider = new Map<string, number>();
       for (const task of activeTasks) {
         const repo = getRepo(task.repo_id);
-        const toolId = task.agent_tool ?? repo?.agent_tool;
-        const tool = toolId ? getAgentTool(toolId) : undefined;
-        const key = resolveProviderKey(task, tool, repo);
+        const profileId =
+          task.agent_profile_id ??
+          repo?.agent_profile_id ??
+          getSetting('default_agent_profile_id');
+        const profile = profileId ? getAgentProfile(profileId) : undefined;
+        const model = profile ? getModel(profile.model_pk) : undefined;
+        const key = resolveProviderKey(task, model?.provider_id);
         activePerProvider.set(key, (activePerProvider.get(key) ?? 0) + 1);
       }
       const providers = getProviders().map((p) => ({
         id: p.id,
         display_name: p.display_name,
+        kind: p.kind,
         concurrency_limit: p.concurrency_limit,
         active_slots: activePerProvider.get(p.id) ?? 0,
       }));
@@ -107,34 +118,44 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
       return await detectHostCapacity();
     });
 
-    // GET /api/status/credentials — read-only credential status
+    // GET /api/status/credentials — read-only credential status. The
+    // orchestrator-only secrets (Forgejo + OAuth) are listed from a
+    // hardcoded constant. Provider-side credentials are derived from the
+    // providers table — for each provider row that points at an env var
+    // (`api_key_env_var`), report its configured/missing status. Inline
+    // `auth_token` rows are not surfaced here since they're managed
+    // inline in the provider edit form.
     app.get("/api/status/credentials", async () => {
-      // Orchestrator-side env vars (used by the orchestrator process itself,
-      // never forwarded to agent containers).
-      const orchestratorVars = [
-        "FORGEJO_ORCHESTRATOR_TOKEN",
-        "FORGEJO_AGENT_TOKEN",
-        "FORGEJO_OAUTH_CLIENT_ID",
-        "FORGEJO_OAUTH_CLIENT_SECRET",
-        "FORGEJO_WEBHOOK_SECRET",
-        "ORCHESTRATOR_URL",
-      ];
+      type CredentialEntry = {
+        name: string;
+        configured: boolean;
+        scope: 'orchestrator' | 'provider';
+        provider_id: string | null;
+      };
+      const credentials: CredentialEntry[] = ORCHESTRATOR_ENV_VARS.map(
+        (name) => ({
+          name,
+          configured: !!process.env[name],
+          scope: 'orchestrator',
+          provider_id: null,
+        })
+      );
 
-      // Each entry carries a `scope` so the UI can split orchestrator-only
-      // secrets from provider keys forwarded to agent containers (the latter
-      // are what the per-tool env_vars override form lists).
-      const credentials = [
-        ...orchestratorVars.map((name) => ({
-          name,
-          configured: !!process.env[name],
-          scope: 'orchestrator' as const,
-        })),
-        ...FORWARDED_KEYS.map((name) => ({
-          name,
-          configured: !!process.env[name],
-          scope: 'forwarded' as const,
-        })),
-      ];
+      // Walk providers, dedupe env-var names (multiple providers may
+      // share `ANTHROPIC_API_KEY`), and report status. Providers using
+      // inline auth_token are excluded.
+      const seenEnvVars = new Set<string>();
+      for (const p of getProviders()) {
+        if (!p.api_key_env_var) continue;
+        if (seenEnvVars.has(p.api_key_env_var)) continue;
+        seenEnvVars.add(p.api_key_env_var);
+        credentials.push({
+          name: p.api_key_env_var,
+          configured: !!process.env[p.api_key_env_var],
+          scope: 'provider',
+          provider_id: p.id,
+        });
+      }
 
       return { credentials };
     });

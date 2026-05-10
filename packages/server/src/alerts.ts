@@ -2,7 +2,8 @@ import {
   getTasks,
   getQueuedTasks,
   getRepo,
-  getAgentTool,
+  getAgentProfile,
+  getSetting,
 } from './db.js';
 import { getActiveResources } from './queue.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
@@ -42,25 +43,29 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
     }
   }
 
-  // 2. Task stuck (running > STUCK_TASK_TIMEOUT_MULTIPLIER × tool timeout).
-  // Per-tool timeout (NOT NULL since v17): look up the task's effective
-  // tool, multiply, compare against elapsed.
+  // 2. Task stuck (running > STUCK_TASK_TIMEOUT_MULTIPLIER × profile
+  // timeout). Resolution chain matches the scheduler:
+  // task.agent_profile_id → repo.agent_profile_id → settings.default.
+  // If none resolves we can't determine a threshold; skip the task.
   const activeTasks = getTasks().filter(
     (t) => !TERMINAL_STATUSES.has(t.status) && t.status !== 'queued'
   );
   for (const task of activeTasks) {
     if (!task.started_at) continue;
     const repo = getRepo(task.repo_id);
-    const toolId = task.agent_tool ?? repo?.agent_tool;
-    const tool = toolId ? getAgentTool(toolId) : undefined;
-    if (!tool) continue; // tool was deleted; can't determine threshold
+    const profileId =
+      task.agent_profile_id ??
+      repo?.agent_profile_id ??
+      getSetting('default_agent_profile_id');
+    const profile = profileId ? getAgentProfile(profileId) : undefined;
+    if (!profile) continue; // profile gone; can't determine threshold
     const stuckThresholdMs =
-      tool.timeout_minutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
+      profile.timeout_minutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
     const elapsed = Date.now() - new Date(task.started_at).getTime();
     if (elapsed > stuckThresholdMs) {
       alerts.push({
         level: 'warning',
-        message: `Task #${task.issue_id} appears stuck (running ${Math.floor(elapsed / 60000)}m, ${tool.id} timeout is ${tool.timeout_minutes}m)`,
+        message: `Task #${task.issue_id} appears stuck (running ${Math.floor(elapsed / 60000)}m, profile '${profile.id}' timeout is ${profile.timeout_minutes}m)`,
       });
     }
   }

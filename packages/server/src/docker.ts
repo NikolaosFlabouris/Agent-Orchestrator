@@ -1,7 +1,7 @@
 import Docker from 'dockerode';
 import os from 'node:os';
 import fs from 'node:fs';
-import type { Task, Repo, AgentTool } from '@orchestrator/shared';
+import type { Task, Repo } from '@orchestrator/shared';
 import {
   DEFAULT_CONTAINER_MEMORY_MB,
   DEFAULT_CONTAINER_CPU_CORES,
@@ -103,7 +103,9 @@ const LABEL_TASK_ID = 'task-id';
 export interface CreateContainerOptions {
   task: Task;
   repo: Repo;
-  tool: AgentTool;
+  /** Whether the harness runs the SDK script or the CLI script inside
+   *  the container. Determines the entrypoint binary. */
+  harnessRuntime: 'sdk' | 'cli';
   workdir: string;
   taskDir: string;
   outputDir: string;
@@ -114,7 +116,7 @@ export interface CreateContainerOptions {
 export async function createAgentContainer(
   opts: CreateContainerOptions
 ): Promise<Docker.Container> {
-  const { task, repo, tool, workdir, taskDir, outputDir, cacheDir, env } = opts;
+  const { task, repo, harnessRuntime, workdir, taskDir, outputDir, cacheDir, env } = opts;
 
   // The orchestrator passes in paths as they appear INSIDE its own container.
   // The Docker daemon interprets bind-mount sources as HOST paths, so translate
@@ -145,9 +147,9 @@ export async function createAgentContainer(
     `${cacheDirHost}/go-build-cache:/home/agent/.cache/go-build`,
   ];
 
-  // Entrypoint determined by tool type
+  // Entrypoint determined by harness runtime
   const entrypoint =
-    tool.type === 'sdk'
+    harnessRuntime === 'sdk'
       ? ['npx', 'tsx', '/usr/local/bin/harness-sdk.ts']
       : ['/usr/local/bin/harness-cli'];
 

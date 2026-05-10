@@ -38,10 +38,10 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
     // POST /api/repos
     app.post('/api/repos', async (request, reply) => {
       const body = request.body as Record<string, unknown>;
-      if (!body?.owner || !body?.name || !body?.agent_tool) {
+      if (!body?.owner || !body?.name) {
         return reply
           .status(400)
-          .send({ error: 'Required: owner, name, agent_tool' });
+          .send({ error: 'Required: owner, name' });
       }
 
       const allowScriptSteps = body.allow_script_steps === true || body.allow_script_steps === 1;
@@ -54,16 +54,23 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
           .send({ error: err instanceof Error ? err.message : String(err) });
       }
 
+      // agent_profile_id is nullable: null → inherit from
+      // settings.default_agent_profile_id at task-launch time.
+      const agentProfileId =
+        typeof body.agent_profile_id === 'string' && body.agent_profile_id
+          ? body.agent_profile_id
+          : null;
+
       const result = getDb()
         .prepare(
-          `INSERT INTO repos (owner, name, base_branch, agent_tool, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
+          `INSERT INTO repos (owner, name, base_branch, agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           body.owner,
           body.name,
           body.base_branch ?? 'main',
-          body.agent_tool,
+          agentProfileId,
           JSON.stringify(installSteps),
           allowScriptSteps ? 1 : 0,
           body.container_memory_mb ?? null,
@@ -95,7 +102,7 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
 
         const body = request.body as Record<string, unknown>;
         const updatable = [
-          'base_branch', 'agent_tool',
+          'base_branch', 'agent_profile_id',
           'container_memory_mb', 'container_cpu_cores',
           'merge_strategy',
         ];
@@ -105,7 +112,10 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
         for (const key of updatable) {
           if (key in body) {
             sets.push(`${key} = ?`);
-            params.push(body[key] ?? null);
+            // agent_profile_id: empty string → null (inherit). Numbers
+            // and booleans pass through as-is.
+            const v = body[key];
+            params.push(v === '' || v === undefined ? null : v ?? null);
           }
         }
 

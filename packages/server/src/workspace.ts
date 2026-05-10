@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Task, AgentTool } from '@orchestrator/shared';
+import type { Task } from '@orchestrator/shared';
+import type { HarnessConfigFile } from './harnesses/types.js';
 import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -365,73 +366,90 @@ async function writeLocalGitExclude(
 }
 
 // ---------------------------------------------------------------------------
-// Agent tool config-file injection
+// Harness config-file injection
 // ---------------------------------------------------------------------------
 //
-// Some agent tools (OpenCode is the day-one consumer) take their config from
-// a file rather than env vars or CLI flags. The tool's `config_file_path`
-// and `config_file_content` columns describe the path (relative to /repo,
-// the workspace root inside the container) and the file's content. The
-// orchestrator writes the file before the agent container starts; the file
-// is added to .git/info/exclude so it never enters a commit.
+// Some harnesses (OpenCode) need a config file (`opencode.json`) dropped
+// into the workspace before the agent starts. The harness module computes
+// the file's path and content as part of its `buildInvocation` output;
+// the scheduler hands the resulting list to this writer.
 //
-// Path is restricted to relative paths under /repo. The orchestrator writes
-// from outside the container into the bind-mounted workspace, so we cannot
-// reach `/home/agent/...` from here. Tools needing a file outside /repo
-// (e.g. pi's ~/.pi/agent/models.json) continue to inline their write into
-// `command_template`.
+// Paths must be absolute under `/repo/`. Files at other locations (e.g.
+// pi's `~/.pi/agent/models.json`) are not expressible here — the orchestrator
+// has no path into the agent container's home — and those harnesses bake
+// the file creation into their `agent_command` instead. See harnesses/pi.ts.
 
-export async function writeAgentConfigFile(
+const REPO_ROOT_PREFIX = '/repo/';
+
+export async function writeHarnessConfigFiles(
   task: Task,
-  tool: AgentTool,
+  files: HarnessConfigFile[],
+  harnessId: string,
   log: FastifyBaseLogger
 ): Promise<void> {
-  const relPath = tool.config_file_path?.trim();
-  const content = tool.config_file_content;
-  if (!relPath || content === null || content === undefined) return;
+  if (files.length === 0) return;
 
-  // Reject absolute paths and traversal — the file must land inside /repo.
-  if (relPath.startsWith('/') || relPath.split(/[\\/]/).includes('..')) {
-    log.warn(
-      {
-        event: 'agent_config_invalid_path',
-        task_id: task.id,
-        tool_id: tool.id,
-        path: relPath,
-      },
-      'Rejecting config_file_path: must be a relative path under /repo'
-    );
-    return;
+  const repoExcludeEntries: string[] = [];
+  for (const file of files) {
+    if (!file.path.startsWith(REPO_ROOT_PREFIX)) {
+      log.warn(
+        {
+          event: 'harness_config_invalid_path',
+          task_id: task.id,
+          harness_id: harnessId,
+          path: file.path,
+        },
+        'Rejecting harness config file: path must be absolute under /repo/'
+      );
+      continue;
+    }
+    const rel = file.path.slice(REPO_ROOT_PREFIX.length);
+    if (rel.split(/[\\/]/).includes('..')) {
+      log.warn(
+        {
+          event: 'harness_config_invalid_path',
+          task_id: task.id,
+          harness_id: harnessId,
+          path: file.path,
+        },
+        'Rejecting harness config file: path must not contain ..'
+      );
+      continue;
+    }
+    const target = path.join(getWorkdir(task), rel);
+    try {
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(target, file.content);
+      if (process.platform === 'linux') {
+        try {
+          await fsp.chown(target, 1000, 1000);
+        } catch {
+          /* best effort */
+        }
+      }
+      repoExcludeEntries.push(rel);
+      log.info(
+        {
+          event: 'harness_config_written',
+          task_id: task.id,
+          harness_id: harnessId,
+          path: target,
+        },
+        'Wrote harness config file'
+      );
+    } catch (err) {
+      log.warn(
+        { event: 'harness_config_write_failed', task_id: task.id, err },
+        'Failed to write harness config file'
+      );
+    }
   }
 
-  const target = path.join(getWorkdir(task), relPath);
-  try {
-    await fsp.mkdir(path.dirname(target), { recursive: true });
-    await fsp.writeFile(target, content);
-    if (process.platform === 'linux') {
-      try {
-        await fsp.chown(target, 1000, 1000);
-      } catch {
-        /* best effort */
-      }
-    }
-    // Make sure the file isn't swept into a salvage commit by `git add -A`.
-    // .git/info/exclude is local-only so this never lands in upstream config.
-    await writeLocalGitExclude(getWorkdir(task), [relPath]);
-    log.info(
-      {
-        event: 'agent_config_written',
-        task_id: task.id,
-        tool_id: tool.id,
-        path: target,
-      },
-      'Wrote agent tool config file'
-    );
-  } catch (err) {
-    log.warn(
-      { event: 'agent_config_write_failed', task_id: task.id, err },
-      'Failed to write agent tool config file'
-    );
+  // Append all written paths to .git/info/exclude in a single pass so a
+  // salvage `git add -A` doesn't sweep them into a commit. Local-only
+  // file; never lands in upstream config.
+  if (repoExcludeEntries.length > 0) {
+    await writeLocalGitExclude(getWorkdir(task), repoExcludeEntries);
   }
 }
 

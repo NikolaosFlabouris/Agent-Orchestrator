@@ -21,8 +21,8 @@ import { verifyWebhooks } from "./webhooks.js";
 import { createTaskRoutes } from "./routes/tasks.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { createRepoRoutes } from "./routes/repos.js";
-import { toolRoutes } from "./routes/tools.js";
 import { providerRoutes } from "./routes/providers.js";
+import { agentProfileRoutes } from "./routes/agent-profiles.js";
 import { createStatusRoutes } from "./routes/status.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
 import { dashboardWs } from "./ws/dashboard.js";
@@ -155,8 +155,8 @@ async function main() {
   await app.register(createTaskRoutes(forgejo, scheduler));
   await app.register(settingsRoutes);
   await app.register(createRepoRoutes(forgejo));
-  await app.register(toolRoutes);
   await app.register(providerRoutes);
+  await app.register(agentProfileRoutes);
   // Poller created here so status routes can access lastPollAt
   const poller = new Poller(forgejo, scheduler, log);
   await app.register(createStatusRoutes(scheduler, poller));
