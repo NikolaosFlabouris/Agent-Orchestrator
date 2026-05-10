@@ -6,57 +6,53 @@ import {
   limitMapFromProviders,
   resolveProviderKey,
 } from '../../scheduler-pools.js';
-import type { Task, AgentTool, Provider } from '@orchestrator/shared';
+import type { Task, Provider } from '@orchestrator/shared';
 
 // ---------------------------------------------------------------------------
 // Test fixtures — minimal shapes; cast through `as unknown` to avoid filling
 // in fields that these pure helpers don't touch.
 // ---------------------------------------------------------------------------
 
-function mkTool(id: string, provider: string | null): AgentTool {
-  return { id, provider_id: provider } as unknown as AgentTool;
-}
 function mkTask(id: number): Task {
   return { id } as unknown as Task;
 }
 function mkProvider(id: string, limit: number): Provider {
-  return { id, display_name: id, concurrency_limit: limit, notes: null };
+  return {
+    id,
+    display_name: id,
+    kind: 'anthropic',
+    concurrency_limit: limit,
+    base_url: null,
+    auth_token: null,
+    api_key_env_var: null,
+    notes: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
 
 describe('resolveProviderKey', () => {
-  it('returns the tool provider_id when set', () => {
-    expect(resolveProviderKey(mkTask(1), mkTool('t', 'ollama-a'), undefined)).toBe(
-      'ollama-a'
-    );
+  it('returns the supplied provider id when set', () => {
+    expect(resolveProviderKey(mkTask(1), 'ollama-a')).toBe('ollama-a');
   });
-  it('returns NO_PROVIDER_KEY when tool provider_id is null', () => {
-    expect(resolveProviderKey(mkTask(1), mkTool('t', null), undefined)).toBe(
-      NO_PROVIDER_KEY
-    );
+  it('returns NO_PROVIDER_KEY when null', () => {
+    expect(resolveProviderKey(mkTask(1), null)).toBe(NO_PROVIDER_KEY);
   });
-  it('returns NO_PROVIDER_KEY when the tool itself is missing', () => {
-    expect(resolveProviderKey(mkTask(1), undefined, undefined)).toBe(
-      NO_PROVIDER_KEY
-    );
+  it('returns NO_PROVIDER_KEY when undefined', () => {
+    expect(resolveProviderKey(mkTask(1), undefined)).toBe(NO_PROVIDER_KEY);
   });
 });
 
 describe('countActiveByProvider', () => {
-  it('buckets tasks by their tool.provider_id', () => {
+  it('buckets tasks by their resolved provider_id', () => {
     const tasks = [mkTask(1), mkTask(2), mkTask(3), mkTask(4)];
-    const toolByTask: Record<number, AgentTool> = {
-      1: mkTool('claude', 'anthropic'),
-      2: mkTool('claude', 'anthropic'),
-      3: mkTool('ollama', 'ollama-a'),
-      4: mkTool('ollama-local', null),
+    const providerByTask: Record<number, string | null> = {
+      1: 'anthropic',
+      2: 'anthropic',
+      3: 'ollama-a',
+      4: null,
     };
-    const counts = countActiveByProvider(
-      tasks,
-      (t) => toolByTask[t.id],
-      () => undefined
-    );
+    const counts = countActiveByProvider(tasks, (t) => providerByTask[t.id]);
     expect(counts.get('anthropic')).toBe(2);
     expect(counts.get('ollama-a')).toBe(1);
     expect(counts.get(NO_PROVIDER_KEY)).toBe(1);
@@ -90,9 +86,9 @@ describe('canLaunchInPool', () => {
   });
 
   it('treats an unknown provider key (row deleted) as unlimited from this layer', () => {
-    // After ON DELETE SET NULL, tools lose their provider_id — but between
-    // the migration dropping the row and the tool row cache refreshing, a
-    // task might still reference the old provider. Don't block it.
+    // After ON DELETE RESTRICT, the FK should prevent this — but a stale
+    // resolution mid-migration is still possible. Don't block it; the
+    // missing limit row defaults to "unconstrained from this layer".
     expect(canLaunchInPool('gone', new Map(), limits)).toBe(true);
   });
 });

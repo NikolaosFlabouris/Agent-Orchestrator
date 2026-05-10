@@ -25,7 +25,7 @@ The OAuth2 session is purely for UI access — the orchestrator's own Forgejo AP
 
 The main view shows system state at a glance. Designed to be left open on a monitor.
 
-**Header bar:** orchestrator status (running/paused), slot usage (N/M active), queue depth, daily completion count, daily cost (sum of all attempt costs today), pause/resume button, settings link.
+**Header bar:** orchestrator status (running/paused), host pool usage (`Mem: used/total GB · CPU: used/total`), queue depth, daily completion count, pause/resume button, settings link.
 
 **Active tasks section:** each active task shows issue number and title, target repository, current phase (implementing/reviewing), attempt number, elapsed time, and a stop button.
 
@@ -45,9 +45,7 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Agent output panel:** live-streaming terminal-like display of agent output during execution. For completed tasks, shows the stored log.
 
-**Attempt history:** for tasks with multiple attempts, shows each attempt's duration, role (develop/review), result, token usage (input/output), cost, and review feedback received.
-
-**Cost summary:** total cost for this task across all attempts (sum of per-attempt costs).
+**Attempt history:** for tasks with multiple attempts, shows each attempt's duration, role (develop/review), result, the snapshotted `harness_id` and `model_id`, and review feedback received.
 
 **Links:** direct links to the Forgejo issue, PR, and raw agent log file.
 
@@ -57,27 +55,25 @@ The orchestrator only acts on issues that have the `status/queued` label. Issues
 
 Two modes:
 
-**Queue existing issue:** select repository, browse open issues that don't have any `status/*` label (i.e., not already queued or in progress). Selecting an issue adds the `status/queued` label and any configured override labels (`human-merge`, `human-review`). Options: max attempts override, agent tool override (dropdown defaulting to "Repo default", listing all configured tools).
+**Queue existing issue:** select repository, browse open issues that don't have any `status/*` label (i.e., not already queued or in progress). Selecting an issue adds the `status/queued` label and any configured override labels (`human-merge`, `human-review`). Options: max attempts override, agent profile override (dropdown defaulting to "Repo default", listing all configured profiles).
 
-**Create and queue new task:** repository selector, title, description (markdown editor with dependency checklist support), same override options including agent tool. Creates the Forgejo issue with `status/queued` label and queues it in one action.
+**Create and queue new task:** repository selector, title, description (markdown editor with dependency checklist support), same override options including agent profile. Creates the Forgejo issue with `status/queued` label and queues it in one action.
 
 Both modes result in the same outcome: a Forgejo issue with `status/queued` that the orchestrator will pick up on its next tick. Users who want to create issues without immediately queuing them should use Forgejo directly — the orchestrator UI is specifically for dispatching work to agents.
 
 ### Settings View
 
-**Global settings:** max concurrent agents (default: 5), default max attempts (default: 3), agent timeout in minutes (default: 30), poll interval in seconds (default: 60), merge strategy (default: `squash`; options: squash/merge/rebase).
+The Settings page has five tabs:
 
-**Repository configuration:** list of configured repos, each with base branch, dev image type, agent tool selection, pre-agent script (with validation warning — see below), image status/rebuild trigger.
+**Global Settings.** Host resource pool (`max_agent_memory_mb`, `max_agent_cpu_cores`) and the fallback `default_agent_profile_id`. The UI exposes a profile picker for the default; deletion is gated on it not being the global default.
 
-**Pre-agent script validation:** the pre-agent script field accepts any shell command and runs it inside agent containers via `eval`. The UI validates the value against a set of known safe patterns (e.g., `npm ci`, `npm install`, `pip install -r requirements.txt`, `yarn install`, `pnpm install`). If the value doesn't match a known pattern, the UI displays a warning: *"This command doesn't match a common dependency install pattern. It will run with full shell access inside agent containers, including access to environment variables (API keys)."* The warning does not block saving — it is informational only.
+**Repositories.** List of configured repos. Per-repo fields: base branch, default agent profile (`agent_profile_id`, nullable — blank means inherit the global default), `install_steps` (typed entries: kind from a fixed dropdown plus optional `cwd`, plus an `allow_script_steps` toggle for the script escape hatch), per-repo container memory/CPU overrides (blank = compile-time defaults), preferred merge strategy (squash / merge / rebase).
 
-**Agent tools:** list of configured tools with display name, type, and auth status.
+**Providers & Models.** Nested layout: the providers list is the outer view, and selecting a provider expands its model list. Provider fields: `id`, `display_name`, `kind` (anthropic / claude-subscription / openai / gemini / mistral / deepseek / openrouter / ollama), `concurrency_limit`, `base_url` (required for ollama, hidden for cloud kinds), and exactly one of `api_key_env_var` (env-var pointer) or `auth_token` (inline plaintext). Per-kind form components render only the fields that kind supports. Model fields are just `model_id` and `display_name` under a fixed `provider_id`.
 
-**Model pricing:** editable table of model family names with input and output cost per million tokens. Used for cost calculation in the dashboard and task detail views. Defaults are provided; overrides are stored in the `settings` table.
+**Agent Profiles.** Operator-composed pairings. Fields: `id`, `display_name`, `harness_id` (one of the four code-defined harnesses), `model_pk` (picker scoped to the chosen harness's `supported_provider_kinds`), `timeout_minutes`, and a per-harness `config_json` form. The UI renders a different form component per `harness_id`; harnesses with no operator-tunable knobs render an empty form.
 
-**Forgejo connection:** instance URL, connection status indicator.
-
-**Credentials (read-only):** shows which environment variables are configured and whether they are set (e.g., `ANTHROPIC_API_KEY: ✓ configured`). Credential values are loaded from the `.env` file and cannot be edited through the UI. To update credentials, modify the `.env` file and restart the orchestrator.
+**Credentials (read-only).** Shows which orchestrator-only env vars are set in `.env` (`FORGEJO_*`, `ORCHESTRATOR_URL`). Provider credentials are configured per-provider on the Providers & Models tab — this tab no longer enumerates LLM provider keys.
 
 ## Orchestrator API
 
@@ -86,14 +82,14 @@ The UI consumes the following REST and WebSocket endpoints:
 ### REST Endpoints
 
 ```
-GET    /api/tasks                  → queue + active + recent tasks
-GET    /api/tasks?status=queued    → filter by status (optional)
-GET    /api/tasks?limit=20         → limit recent completions (default: 20)
-POST   /api/tasks                  → create new Forgejo issue and queue
-POST   /api/tasks/queue            → queue an existing Forgejo issue
-PATCH  /api/tasks/:id              → update task (see request schema below)
-GET    /api/tasks/:id              → full task detail with attempt history
-GET    /api/tasks/:id/log          → raw agent log download (plain text, Content-Type: text/plain)
+GET    /api/tasks                          → queue + active + recent tasks
+GET    /api/tasks?status=queued            → filter by status (optional)
+GET    /api/tasks?limit=20                 → limit recent completions (default: 20)
+POST   /api/tasks                          → create new Forgejo issue and queue
+POST   /api/tasks/queue                    → queue an existing Forgejo issue
+PATCH  /api/tasks/:id                      → update task (see request schema below)
+GET    /api/tasks/:id                      → full task detail with attempt history
+GET    /api/tasks/:id/log                  → raw agent log download (plain text)
 ```
 
 #### GET /api/tasks Response
@@ -113,12 +109,12 @@ Returns all active and queued tasks, plus the most recent completed tasks (limit
       "status": "in-progress",
       "queue_position": null,
       "attempt": 2,
-      "max_attempts": 3,
-      "agent_tool": "claude-agent-sdk",
+      "max_attempts": 7,
+      "agent_profile_id": "default-claude-sdk",
       "container_id": "abc123def",
-      "started_at": "2025-03-15T10:42:00Z",
+      "started_at": "2026-03-15T10:42:00Z",
       "completed_at": null,
-      "created_at": "2025-03-15T10:40:00Z",
+      "created_at": "2026-03-15T10:40:00Z",
       "blocked_by": []
     }
   ]
@@ -128,6 +124,7 @@ Returns all active and queued tasks, plus the most recent completed tasks (limit
 Field notes:
 - `issue_title` is fetched from Forgejo, not stored in the DB
 - `repo` is joined from the `repos` table
+- `agent_profile_id` is the per-task override; `null` means inherit from `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`
 - `blocked_by` is computed from dependency parsing (array of issue IDs that are still open)
 - Active and queued tasks are always returned in full; completed tasks are limited by `limit`
 - Cost tracking was removed in schema v14 — there is no `total_cost_usd` field on the task or `cost_usd`/`input_tokens`/`output_tokens` on the per-attempt rows
@@ -149,12 +146,12 @@ Returns the same task object as above, plus the full attempt history and timelin
   "status": "in-progress",
   "queue_position": null,
   "attempt": 2,
-  "max_attempts": 3,
-  "agent_tool": "claude-agent-sdk",
+  "max_attempts": 7,
+  "agent_profile_id": "default-claude-sdk",
   "container_id": "abc123def",
-  "started_at": "2025-03-15T10:42:00Z",
+  "started_at": "2026-03-15T10:42:00Z",
   "completed_at": null,
-  "created_at": "2025-03-15T10:40:00Z",
+  "created_at": "2026-03-15T10:40:00Z",
   "blocked_by": [],
   "attempts": [
     {
@@ -163,9 +160,10 @@ Returns the same task object as above, plus the full attempt history and timelin
       "role": "develop",
       "status": "success",
       "verdict": null,
-      "started_at": "2025-03-15T10:42:00Z",
-      "completed_at": "2025-03-15T10:55:00Z",
-      "model": "sonnet",
+      "started_at": "2026-03-15T10:42:00Z",
+      "completed_at": "2026-03-15T10:55:00Z",
+      "harness_id": "claude-sdk",
+      "model_id": "claude-sonnet-4-6",
       "feedback": null
     },
     {
@@ -174,9 +172,10 @@ Returns the same task object as above, plus the full attempt history and timelin
       "role": "review",
       "status": "success",
       "verdict": "changes_needed",
-      "started_at": "2025-03-15T10:55:30Z",
-      "completed_at": "2025-03-15T11:02:00Z",
-      "model": "sonnet",
+      "started_at": "2026-03-15T10:55:30Z",
+      "completed_at": "2026-03-15T11:02:00Z",
+      "harness_id": "claude-sdk",
+      "model_id": "claude-sonnet-4-6",
       "feedback": "[{\"file\":\"src/login.ts\",\"line\":42,\"comment\":\"Missing null check\"}]"
     },
     {
@@ -185,9 +184,10 @@ Returns the same task object as above, plus the full attempt history and timelin
       "role": "develop",
       "status": "running",
       "verdict": null,
-      "started_at": "2025-03-15T11:02:30Z",
+      "started_at": "2026-03-15T11:02:30Z",
       "completed_at": null,
-      "model": null,
+      "harness_id": "claude-sdk",
+      "model_id": "claude-sonnet-4-6",
       "feedback": null
     }
   ],
@@ -224,23 +224,36 @@ Response: `200` with updated task object, or `400` if the action is invalid for 
 
 ```
 
-GET    /api/settings               → current configuration (see response schema below)
-PATCH  /api/settings               → update configuration (partial update, same shape as GET response)
+GET    /api/settings                       → current configuration
+PATCH  /api/settings                       → update configuration (partial)
 
-GET    /api/repos                  → configured repositories (see response schema below)
-POST   /api/repos                  → add repository (see request schema below)
-PATCH  /api/repos/:id              → update repository config (partial update, same shape as POST)
-GET    /api/repos/:id/issues       → open Forgejo issues available for queuing
+GET    /api/repos                          → configured repositories
+POST   /api/repos                          → add repository
+PATCH  /api/repos/:id                      → update repository config (partial)
+GET    /api/repos/:id/issues               → open Forgejo issues available for queuing
 
-GET    /api/tools                  → configured agent tools (see response schema below)
-POST   /api/tools                  → add agent tool (see request schema below)
-PATCH  /api/tools/:id              → update agent tool (partial update, same shape as POST)
+GET    /api/providers                      → configured providers (with stats)
+POST   /api/providers                      → add provider
+PATCH  /api/providers/:id                  → update provider (partial)
+DELETE /api/providers/:id                  → delete provider (409 if any models reference it)
+GET    /api/provider-kinds                 → registry metadata for the per-kind UI form
 
-GET    /api/status                 → system health (see response schema below)
-POST   /api/status/pause           → pause queue processing (no request body, returns updated status)
-POST   /api/status/resume          → resume queue processing (no request body, returns updated status)
+GET    /api/providers/:id/models           → models scoped to one provider
+POST   /api/providers/:id/models           → add a model under this provider
+PATCH  /api/models/:pk                     → update model display name (by surrogate PK)
+DELETE /api/models/:pk                     → delete model (409 if any profile references it)
 
-POST   /webhooks/forgejo            → Forgejo webhook receiver (payload defined by Forgejo, not consumed by UI)
+GET    /api/agent-profiles                 → configured agent profiles (with stats)
+POST   /api/agent-profiles                 → add agent profile
+PATCH  /api/agent-profiles/:id             → update agent profile (partial)
+DELETE /api/agent-profiles/:id             → delete profile (409 if it's the global default or referenced)
+GET    /api/harnesses                      → code-defined harness registry (read-only)
+
+GET    /api/status                         → system health
+POST   /api/status/pause                   → pause queue processing
+POST   /api/status/resume                  → resume queue processing
+
+POST   /webhooks/forgejo                   → Forgejo webhook receiver
 ```
 
 #### GET /api/repos Response & POST /api/repos Request
@@ -255,7 +268,7 @@ POST   /webhooks/forgejo            → Forgejo webhook receiver (payload define
       "owner": "org",
       "name": "frontend",
       "base_branch": "main",
-      "agent_tool": "claude-agent-sdk",
+      "agent_profile_id": null,
       "install_steps": [{ "kind": "npm-ci" }],
       "allow_script_steps": false,
       "container_memory_mb": null,
@@ -266,14 +279,14 @@ POST   /webhooks/forgejo            → Forgejo webhook receiver (payload define
 }
 ```
 
-`POST /api/repos` request — required: `owner`, `name`, `agent_tool`. All other fields are optional (defaults: `base_branch` = `"main"`, `install_steps` = `[]`, `allow_script_steps` = `false`, nullable resource fields = `null`):
+`POST /api/repos` request — required: `owner`, `name`. `agent_profile_id` is optional; `null` means inherit `settings.default_agent_profile_id` at task launch time. Other defaults: `base_branch` = `"main"`, `install_steps` = `[]`, `allow_script_steps` = `false`, nullable resource fields = `null`.
 
 ```json
 {
   "owner": "org",
   "name": "backend",
   "base_branch": "main",
-  "agent_tool": "claude-agent-sdk",
+  "agent_profile_id": "opencode-ollama-qwen",
   "install_steps": [
     { "kind": "pip-requirements", "cwd": "services/api" },
     { "kind": "pnpm-install" }
@@ -281,55 +294,110 @@ POST   /webhooks/forgejo            → Forgejo webhook receiver (payload define
 }
 ```
 
-`install_steps` is an ordered list. Recognised kinds: `npm-ci`, `npm-install`, `yarn-install`, `pnpm-install`, `pip-requirements`, `pip-pyproject`, `uv-sync`, `cargo-fetch`, `go-mod-download`. Each entry may include an optional `cwd` (relative to `/repo`, no `..`, no leading `/`). The `script` kind (`{ kind: "script", path: "scripts/setup.sh", cwd: "..." }`) runs `bash <path>` and is only accepted when this repo's `allow_script_steps` is `true`. Toggling `allow_script_steps` is the operator's per-repo opt-in for letting committers influence what runs at pre-agent time, since scripts inherit the agent container env (`ANTHROPIC_API_KEY`, `FORGEJO_AGENT_TOKEN`, etc.).
+`install_steps` is an ordered list. Recognised kinds: `npm-ci`, `npm-install`, `yarn-install`, `pnpm-install`, `pip-requirements`, `pip-pyproject`, `uv-sync`, `cargo-fetch`, `go-mod-download`. Each entry may include an optional `cwd` (relative to `/repo`, no `..`, no leading `/`). The `script` kind (`{ kind: "script", path: "scripts/setup.sh", cwd: "..." }`) runs `bash <path>` and is only accepted when this repo's `allow_script_steps` is `true`. Toggling `allow_script_steps` is the operator's per-repo opt-in for letting committers influence what runs at pre-agent time, since scripts inherit the agent container env (provider credential under the kind's standard name, `FORGEJO_AGENT_TOKEN`, etc.).
 
 Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "use global default". Setting a value overrides the global for all tasks in this repo.
 
-#### GET /api/tools Response & POST /api/tools Request
+#### GET /api/providers, GET /api/providers/:id/models
 
-`GET` returns all configured agent tools. `POST` creates a new tool. `PATCH` accepts a partial object.
+`GET /api/providers` returns providers enriched with `models_count` and live `active_slots`:
 
 ```json
 {
-  "tools": [
+  "providers": [
     {
-      "id": "claude-agent-sdk",
-      "display_name": "Claude Agent SDK",
-      "type": "sdk",
-      "command_template": null,
-      "env_vars": {}
+      "id": "anthropic",
+      "display_name": "Anthropic",
+      "kind": "anthropic",
+      "concurrency_limit": 5,
+      "base_url": null,
+      "auth_token": null,
+      "api_key_env_var": "ANTHROPIC_API_KEY",
+      "notes": null,
+      "models_count": 3,
+      "active_slots": 1
     },
     {
-      "id": "opencode-local",
-      "display_name": "OpenCode (Local LLM)",
-      "type": "cli",
-      "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\" --non-interactive",
-      "env_vars": {
-        "OPENCODE_PROVIDER": "openai-compatible",
-        "OPENCODE_MODEL": "codestral-latest",
-        "OPENCODE_BASE_URL": "http://192.168.1.50:8080/v1"
-      }
+      "id": "ollama-gpu",
+      "display_name": "Ollama (gpu host)",
+      "kind": "ollama",
+      "concurrency_limit": 1,
+      "base_url": "http://192.168.1.50:11434",
+      "auth_token": null,
+      "api_key_env_var": null,
+      "notes": null,
+      "models_count": 2,
+      "active_slots": 0
     }
   ]
 }
 ```
 
-`POST /api/tools` request — required: `id`, `display_name`, `type`. All other fields are optional:
+`POST /api/providers` request — required: `id`, `display_name`, `kind`. `concurrency_limit` defaults to `1`. `base_url` is required for `kind=ollama` and forbidden for cloud kinds. Operators choose between `api_key_env_var` (env-var pointer) and `auth_token` (inline plaintext); leave both null when no auth is required.
+
+`GET /api/providers/:id/models` returns the models scoped to one provider:
 
 ```json
 {
-  "id": "opencode-anthropic",
-  "display_name": "OpenCode (Anthropic API)",
-  "type": "cli",
-  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\" --non-interactive",
-  "env_vars": {
-    "OPENCODE_PROVIDER": "anthropic",
-    "OPENCODE_MODEL": "claude-sonnet-4-20250514"
-  }
+  "models": [
+    { "id": 1, "provider_id": "anthropic", "model_id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6" },
+    { "id": 2, "provider_id": "anthropic", "model_id": "claude-opus-4-7",   "display_name": "Claude Opus 4.7" }
+  ]
 }
 ```
 
-The `env_vars` object contains non-secret configuration injected as container environment variables. Provider credentials (API keys) are never stored here — they live in the orchestrator's `.env` and are forwarded into every container via the fixed `FORWARDED_KEYS` list (see `packages/server/src/credentials.ts`).
+`POST /api/providers/:id/models` request: `{ "model_id": "...", "display_name": "..." }`. The composite `(provider_id, model_id)` must be unique. Update display name via `PATCH /api/models/:pk`; delete via `DELETE /api/models/:pk` (409 if any agent profile references it).
+
+`GET /api/provider-kinds` returns the per-kind metadata the UI uses to render the right form fields per kind:
+
+```json
+{
+  "kinds": [
+    { "kind": "anthropic", "display_name": "Anthropic", "requires_base_url": false, "container_env_name": "ANTHROPIC_API_KEY", "auth_optional": false, "description": "..." },
+    { "kind": "ollama",    "display_name": "Ollama (self-hosted)", "requires_base_url": true,  "container_env_name": null,                "auth_optional": true,  "description": "..." }
+  ]
+}
+```
+
+#### GET /api/agent-profiles, GET /api/harnesses
+
+`GET /api/agent-profiles` returns profiles with stats:
+
+```json
+{
+  "profiles": [
+    {
+      "id": "default-claude-sdk",
+      "display_name": "Claude SDK + Sonnet",
+      "harness_id": "claude-sdk",
+      "model_pk": 1,
+      "config_json": {},
+      "timeout_minutes": 120,
+      "repos_using": 0,
+      "tasks_using": 3,
+      "provider_id": "anthropic",
+      "model_id": "claude-sonnet-4-6"
+    }
+  ]
+}
+```
+
+`POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h). The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is intentionally not validated at save — mismatches surface at task launch with a clear "harness X doesn't support kind Y" message.
+
+`DELETE /api/agent-profiles/:id` returns 409 when the profile is the global default (`settings.default_agent_profile_id`) or when any repo or task references it.
+
+`GET /api/harnesses` returns the code-defined harness registry — read-only, used by the Agent Profiles form to populate the harness dropdown and scope the model picker:
+
+```json
+{
+  "harnesses": [
+    { "id": "claude-sdk",  "display_name": "Claude Agent SDK", "runtime": "sdk", "supported_provider_kinds": ["anthropic"] },
+    { "id": "claude-code", "display_name": "Claude Code CLI",  "runtime": "cli", "supported_provider_kinds": ["anthropic", "claude-subscription"] },
+    { "id": "opencode",    "display_name": "OpenCode",         "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "ollama"] },
+    { "id": "pi",          "display_name": "pi",               "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "ollama"] }
+  ]
+}
+```
 
 #### GET /api/repos/:id/issues Response
 
@@ -351,14 +419,14 @@ Returns open Forgejo issues for the specified repo that don't have any `status/*
   "repo_id": 1,
   "title": "Add login validation",
   "description": "Implement email format validation on the login form...",
-  "agent_tool": "claude-agent-sdk",
-  "max_attempts": 3,
+  "agent_profile_id": "default-claude-sdk",
+  "max_attempts": 7,
   "human_merge": false,
   "human_review": false
 }
 ```
 
-Required: `repo_id`, `title`, `description`. All other fields are optional (defaults from repo/global settings).
+Required: `repo_id`, `title`, `description`. All other fields are optional. `agent_profile_id` overrides the repo's default; omit (or pass `null`) to inherit `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`.
 
 #### POST /api/tasks/queue Request Schema
 
@@ -366,7 +434,7 @@ Required: `repo_id`, `title`, `description`. All other fields are optional (defa
 {
   "issue_id": 42,
   "repo_id": 1,
-  "agent_tool": null,
+  "agent_profile_id": null,
   "max_attempts": null,
   "human_merge": false,
   "human_review": false
@@ -383,7 +451,7 @@ Required: `issue_id`, `repo_id`. All other fields are optional.
 {
   "max_agent_memory_mb": 20480,
   "max_agent_cpu_cores": 10,
-  "default_model": "sonnet"
+  "default_agent_profile_id": "default-claude-sdk"
 }
 ```
 
@@ -394,7 +462,7 @@ Note: `poll_interval_seconds` (60s), `default_max_attempts` (7), and
 and via `PATCH /api/tasks/:id` (with `{ max_attempts: N }`) on the Task
 Detail page for non-terminal tasks. Cost tracking (`model_pricing`,
 `daily_cost_usd`, per-task / per-attempt cost) was removed in schema v14 —
-use Anthropic's console for spend visibility.
+use the provider's own console for spend visibility.
 
 #### HTTP Status Codes
 
@@ -403,10 +471,11 @@ All endpoints follow consistent status code conventions:
 | Status | Meaning | When |
 |---|---|---|
 | `200` | Success | GET requests, PATCH updates, POST actions (pause/resume/rebuild) |
-| `201` | Created | POST /api/tasks, POST /api/tasks/queue, POST /api/repos, POST /api/tools |
+| `201` | Created | POST /api/tasks, POST /api/tasks/queue, POST /api/repos, POST /api/providers, POST /api/providers/:id/models, POST /api/agent-profiles |
 | `400` | Bad request | Validation error, invalid action for current state, missing required fields |
 | `401` | Unauthorized | No valid session cookie, expired OAuth2 token |
-| `404` | Not found | Unknown task/repo/tool ID |
+| `404` | Not found | Unknown task/repo/provider/model/profile ID |
+| `409` | Conflict | Duplicate id; or RESTRICTed delete (provider has models, model has profiles, profile is the global default or referenced) |
 | `500` | Server error | Unexpected internal error (Forgejo unreachable, Docker error, DB error) |
 
 All error responses include a JSON body: `{ "error": "Human-readable description" }`.

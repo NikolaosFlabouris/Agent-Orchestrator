@@ -84,8 +84,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     attempt: 1,
     max_attempts: 3,
     prep_failure_count: 0,
-    agent_tool: null,
-    model: null,
+    agent_profile_id: null,
     container_id: null,
     started_at: null,
     completed_at: null,
@@ -114,8 +113,8 @@ beforeEach(() => {
   // Fresh in-memory DB so checkpoint rows don't bleed across tests.
   const db = initDatabase(':memory:');
   db.prepare(
-    `INSERT INTO repos (id, owner, name, agent_tool)
-     VALUES (1, 'owner', 'repo', 'tool')`
+    `INSERT INTO repos (id, owner, name)
+     VALUES (1, 'owner', 'repo')`
   ).run();
   db.prepare(
     `INSERT INTO tasks (id, issue_id, repo_id, status, queue_position, max_attempts, prep_failure_count)
@@ -128,7 +127,12 @@ beforeEach(() => {
     owner: 'owner',
     name: 'repo',
     base_branch: 'main',
-    agent_tool: 'tool',
+    agent_profile_id: null,
+    install_steps: [],
+    allow_script_steps: false,
+    container_memory_mb: null,
+    container_cpu_cores: null,
+    merge_strategy: 'squash',
   });
   mocks.updateTask.mockReturnValue(undefined);
   mocks.insertTaskEvent.mockReturnValue(undefined);

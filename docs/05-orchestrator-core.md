@@ -30,8 +30,8 @@ on TICK (triggered by: webhook event, container exit callback, or 60-second fall
        - For queued tasks: check dependency gate; skip if deps not met
        - For each candidate: check it fits in the remaining host pool
          (sum of repo's container_memory_mb / container_cpu_cores ≤ remaining)
-       - For tools with a provider_id: also check the provider's
-         concurrency_limit hasn't been reached
+       - Resolve task → agent_profile → model → provider, then also check
+         that provider's concurrency_limit hasn't been reached
        - Call launch_dev_container(task) or launch_review_container(task) based on status
          (workspace preparation, task file assembly, and container creation all happen
          synchronously within this step — the slot is occupied from this point onward)
@@ -40,9 +40,10 @@ on TICK (triggered by: webhook event, container exit callback, or 60-second fall
 
 ## Queue Model
 
-The queue is a priority FIFO. Two independent gates decide whether a candidate
-launches: the host resource pool (memory + CPU caps configured via UI) and,
-if the task's tool has a `provider_id`, that provider's concurrency_limit.
+The queue is a priority FIFO. Two independent gates decide whether a
+candidate launches: the host resource pool (memory + CPU caps configured
+via UI) and, since every task resolves to an agent profile → model →
+provider, the provider's `concurrency_limit`.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -423,49 +424,74 @@ launch_dev_container(task, feedback=null):
   # 3. Prepare workspace (clone if new, checkout branch)
   prepare_workspace(task)
 
-  # 3. Assemble task files
+  # 3. Resolve the agent profile chain and ask the harness to build its
+  #    invocation. If any link in the chain is missing, the launch fails
+  #    here and the task goes back to the queue (caught by the prep
+  #    failure handler).
+  profile_id = task.agent_profile_id
+            || repo.agent_profile_id
+            || db.getSetting('default_agent_profile_id')
+  profile  = db.getAgentProfile(profile_id)
+  model    = db.getModel(profile.model_pk)
+  provider = db.getProvider(model.provider_id)
+  harness  = harnesses.get(profile.harness_id)
+  invocation = harness.buildInvocation({
+    profile, model, provider,
+    promptFilePath: '/task/prompt.md'
+  })
+    # invocation = { agent_command, config_files, extra_env, resolved_model }
+    # Throws if profile.harness_id can't target provider.kind, or if
+    # config_json is malformed for this harness.
+
+  # 4. Assemble task files
   # prompt.md is the complete prompt. If feedback is present (rework cycle),
   # it is included in prompt.md via the template's "Review Feedback" section.
   # The harness reads prompt.md and passes it directly — no separate feedback file.
   write /task/prompt.md from dev agent prompt template with {issue.body, repo, task, feedback}
-  # Resolve per-task → per-repo → global settings for configurable fields
-  effective_tool_id = task.agent_tool || repo.agent_tool
-  effective_tool = db.getAgentTool(effective_tool_id)
-  effective_model = task.model || db.getSetting('default_model')
-  # timeout_minutes is per-tool only since schema v17 (NOT NULL on the
-  # agent_tools table). The previous tool > repo > global chain is gone.
-  effective_timeout = effective_tool.timeout_minutes
-  effective_command = effective_tool.command_template || ''  # empty for SDK tools
-  # No max_turns in meta — CLI tools encode their own per-turn cap in
-  # command_template (e.g. claude-code's `--max-turns 100`); the SDK
-  # harness uses its own default. The wall-clock timeout above is the
-  # lifetime safety net.
 
+  # No max_turns in meta — CLI harnesses encode any per-turn cap in
+  # `agent_command` (e.g. claude-code's `--max-turns 100`); the SDK
+  # harness uses the SDK's own default. The wall-clock
+  # `profile.timeout_minutes` is the lifetime safety net.
   write /task/meta.json with {
     issue_id, branch_name, base_branch: repo.base_branch,
-    max_runtime_minutes: effective_timeout,
+    max_runtime_minutes: profile.timeout_minutes,
     attempt: task.attempt, role: "develop",
-    pr_number, model: effective_model,
+    pr_number,
+    model: invocation.resolved_model,
+    harness_id: harness.id,
+    agent_profile_id: profile.id,
     install_commands: build_install_commands(repo),
-    agent_tool: effective_tool_id, agent_command: effective_command
+    agent_command: invocation.agent_command || ''
   }
 
-  # 4. Assemble environment variables (caller's responsibility — not done inside createAgentContainer)
-  env = buildEnv(effective_tool)
-    # buildEnv reads tool.env_vars (non-secret config from DB) and
-    # forwards FORWARDED_KEYS (well-known LLM provider keys) from process.env
+  # 5. Drop any harness config files into /repo/ (e.g. opencode.json for
+  #    OpenCode + Ollama) and append their paths to .git/info/exclude so
+  #    they don't end up in commits.
+  for file in invocation.config_files:
+    write workdir + file.path with file.content
+    append file.path to workdir/.git/info/exclude
 
-  # 5. Create and start container
+  # 6. Assemble environment variables. The provider's resolved credential
+  #    (auth_token if set, else process.env[provider.api_key_env_var])
+  #    is exported under the kind's standard name (e.g.
+  #    ANTHROPIC_API_KEY for kind=anthropic — see providers/kinds.ts),
+  #    plus any harness-specific extras from invocation.extra_env.
+  env = buildEnv(provider, invocation)
+
+  # 7. Create and start container
   container = createAgentContainer({
-    task, repo, tool: effective_tool,
+    task, repo, harness,
     workdir, taskDir, outputDir, cacheDir,
     env
   })
   container.start()
   db.update_task(task.id, container_id: container.id, started_at: now())
 
-  # 6. Record attempt
-  start_attempt(task, 'develop')
+  # 8. Record attempt — snapshot resolved harness/model on the row so audit
+  #    survives subsequent profile edits.
+  start_attempt(task, 'develop',
+    harness_id: harness.id, model_id: model.model_id)
 
   relabel: status/in-progress
   forgejo.comment_on_issue(task.issue_id,
@@ -498,38 +524,50 @@ launch_review_container(task):
   # 2. Record branch SHA before review (to detect if review agent modifies it)
   task.pre_review_sha = forgejo.get_branch(repo, task.branch_name).commit.sha
 
-  # 2. Resolve configuration (same resolution order as launch_dev_container)
-  effective_tool_id = task.agent_tool || repo.agent_tool
-  effective_tool = db.getAgentTool(effective_tool_id)
-  effective_model = task.model || db.getSetting('default_model')
-  effective_timeout = effective_tool.timeout_minutes  # per-tool only since v17
-  effective_command = effective_tool.command_template || ''
+  # 3. Resolve the agent profile chain (same as launch_dev_container)
+  profile_id = task.agent_profile_id
+            || repo.agent_profile_id
+            || db.getSetting('default_agent_profile_id')
+  profile  = db.getAgentProfile(profile_id)
+  model    = db.getModel(profile.model_pk)
+  provider = db.getProvider(model.provider_id)
+  harness  = harnesses.get(profile.harness_id)
+  invocation = harness.buildInvocation({
+    profile, model, provider, promptFilePath: '/task/prompt.md'
+  })
 
-  # 3. Assemble task files
+  # 4. Assemble task files
   write /task/prompt.md from review agent prompt template with {issue.body, repo}
   write /task/meta.json with {
     issue_id, branch_name, base_branch: repo.base_branch,
-    max_runtime_minutes: effective_timeout,
+    max_runtime_minutes: profile.timeout_minutes,
     attempt: task.attempt, role: "review",
-    pr_number: task.pr_number, model: effective_model,
+    pr_number: task.pr_number,
+    model: invocation.resolved_model,
+    harness_id: harness.id,
+    agent_profile_id: profile.id,
     install_commands: build_install_commands(repo),
-    agent_tool: effective_tool_id, agent_command: effective_command
+    agent_command: invocation.agent_command || ''
   }
+  for file in invocation.config_files:
+    write workdir + file.path with file.content
+    append file.path to workdir/.git/info/exclude
 
-  # 4. Assemble environment variables
-  env = buildEnv(task, repo, effective_tool)
+  # 5. Assemble environment variables (provider credential + harness extras)
+  env = buildEnv(provider, invocation)
 
-  # 5. Create and start container
+  # 6. Create and start container
   container = createAgentContainer({
-    task, repo, tool: effective_tool,
+    task, repo, harness,
     workdir, taskDir, outputDir, cacheDir,
     env
   })
   container.start()
   db.update_task(task.id, container_id: container.id)
 
-  # 6. Record attempt
-  start_attempt(task, 'review')
+  # 7. Record attempt
+  start_attempt(task, 'review',
+    harness_id: harness.id, model_id: model.model_id)
 
   relabel: status/in-review
   forgejo.comment_on_issue(task.issue_id,
@@ -542,22 +580,25 @@ launch_review_container(task):
 An `attempts` row is created when a container starts and updated when it exits. The row ID is held in memory on the task object (`task.current_attempt_id`) for the duration of the container's lifecycle.
 
 ```
-start_attempt(task, role):
-  # Called when a dev or review container is started
+start_attempt(task, role, harness_id, model_id):
+  # Called when a dev or review container is started. The harness_id and
+  # model_id snapshots are passed in by the launch helper after profile
+  # resolution; storing them on the row keeps audit/usage records robust
+  # against later edits to the profile or its model.
   attempt_id = db.insert_attempt(
     task_id: task.id,
     attempt_number: task.attempt,
     role: role,             # 'develop' or 'review'
     status: 'running',
-    started_at: now()
+    started_at: now(),
+    harness_id: harness_id,
+    model_id: model_id
   )
   task.current_attempt_id = attempt_id  # in-memory only, not persisted in tasks table
   return attempt_id
 
 complete_attempt(task, result):
-  # Called when the container exits, before post-agent flows
-  record_attempt_cost(task, result)
-
+  # Called when the container exits, before post-agent flows.
   # Read review verdict if this was a review attempt
   verdict = null
   feedback = null
@@ -1120,7 +1161,13 @@ The 60-second poll interval is acceptable because webhooks handle the common cas
 
 ## Credential Management
 
-All secrets are loaded from environment variables (sourced from `.env` files) at process startup. No secrets are persisted in SQLite or any other on-disk store. The database stores only non-secret configuration (concurrency limits, repo settings, task state). The `agent_tools` table stores credential metadata (e.g., which env var name to read) but never the secret values themselves.
+Orchestrator-only secrets (Forgejo tokens, OAuth2 client, webhook
+secret, cookie secret) are loaded from environment variables sourced
+from `.env` at process startup; they are never persisted in SQLite.
+LLM provider credentials are stored on the `providers` row — either as
+an `api_key_env_var` pointer that the orchestrator dereferences from its
+own env at launch, or as an inline `auth_token` (used for self-hosted
+Ollama and for multi-instance setups on the same cloud kind).
 
 ### Credential inventory
 
@@ -1128,11 +1175,15 @@ All secrets are loaded from environment variables (sourced from `.env` files) at
 |---|---|---|
 | Orchestrator Forgejo token | `.env` → `process.env.FORGEJO_ORCHESTRATOR_TOKEN` | Long-lived (personal access token) |
 | Agent Forgejo token | `.env` → `process.env.FORGEJO_AGENT_TOKEN` | Long-lived (personal access token) |
-| LLM API keys (Anthropic, etc.) | `.env` → `process.env.ANTHROPIC_API_KEY` (etc.) | Long-lived (API key) |
+| Provider API keys (Anthropic, OpenAI, …) | `.env` → `process.env[provider.api_key_env_var]`, OR `providers.auth_token` (inline) | Long-lived (API key) |
 | OAuth2 client ID + secret | `.env` → `process.env.FORGEJO_OAUTH_CLIENT_*` | Long-lived (app registration) |
 | OAuth2 user session tokens | In memory (signed cookie) | Short-lived (session) |
 | Webhook secret | `.env` → `process.env.FORGEJO_WEBHOOK_SECRET` | Long-lived (shared secret for HMAC-SHA256 verification) |
 | Orchestrator URL | `.env` → `process.env.ORCHESTRATOR_URL` | Configuration (used for webhook callback registration, must be reachable from Forgejo — e.g., `http://orchestrator:8080` in Docker) |
+
+The orchestrator-only env-var inventory the Settings → Credentials tab
+reads from is in `packages/server/src/credentials.ts`
+(`ORCHESTRATOR_ENV_VARS`).
 
 ### Git credential (workspace remote URL)
 
@@ -1146,40 +1197,66 @@ This is read from `process.env.FORGEJO_AGENT_TOKEN` and set once at clone time. 
 
 Note: the agent token appears in `.git/config` within the workspace directory. This is on the same Docker volume on Machine B that hosts the `.env` file, so it does not expand the trust boundary.
 
-### Agent tool credentials (container environment variables)
+### Provider credentials (container environment variables)
 
-LLM API keys and agent tool configuration are injected as container environment variables. The env assembly is handled by the scheduler's `buildEnv` method (the caller of `createAgentContainer`), which passes the assembled `env` array via `CreateContainerOptions.env`. This keeps the Docker manager decoupled from credential resolution.
-
-Schema v9 dropped per-tool credential declarations (`auth_type`, `auth_config`). The orchestrator now forwards a fixed set of well-known LLM provider keys from its host env into every container, and whichever underlying CLI/SDK the tool uses picks up the key it needs.
-
-Schema v10 split the previous dual-purpose `env_vars` JSON: it is now flat key/value only, and the per-tool entries override `FORWARDED_KEYS` host defaults on collision (Docker keeps the LAST value when a key appears more than once in the Env array, so the tool's entry wins). Structured config files moved to `config_file_path` + `config_file_content` and are written by `writeAgentConfigFile` before the container starts (see `workspace.ts`).
+The scheduler resolves a task's provider via `task →
+agent_profile → model → provider`, then exports exactly one credential
+into the agent container under the kind's standard env-var name (e.g.
+`ANTHROPIC_API_KEY` for `kind=anthropic`, `OPENAI_API_KEY` for
+`kind=openai`, `CLAUDE_CODE_OAUTH_TOKEN` for `kind=claude-subscription`,
+…). The standard names are defined per kind in
+`packages/server/src/providers/kinds.ts`.
 
 ```typescript
-import { FORWARDED_KEYS } from './credentials';
-// ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY',
-//  'GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY',
-//  'MISTRAL_API_KEY']
+// packages/server/src/providers/kinds.ts
+import type { Provider } from '@orchestrator/shared';
 
-function buildEnv(tool: AgentTool): string[] {
+export function resolveProviderCredential(provider: Provider): string | null {
+  if (provider.auth_token) return provider.auth_token;
+  if (provider.api_key_env_var) {
+    const v = process.env[provider.api_key_env_var];
+    return v && v.length > 0 ? v : null;
+  }
+  return null;  // ollama with no auth, or misconfigured row
+}
+
+export function buildProviderEnv(provider: Provider): Record<string, string> {
+  const spec = getProviderKindSpec(provider.kind);
+  if (!spec.container_env_name) return {};   // ollama uses config files, not env
+  const cred = resolveProviderCredential(provider);
+  if (!cred) return {};
+  return { [spec.container_env_name]: cred };
+}
+
+// In the scheduler:
+function buildEnv(provider: Provider, invocation: HarnessInvocation): string[] {
   const env: string[] = [];
-
-  // Provider credentials — forwarded from the orchestrator's host env. Pushed
-  // first so per-tool env_vars (below) can override on collision.
-  for (const key of FORWARDED_KEYS) {
-    const value = process.env[key];
-    if (value) env.push(`${key}=${value}`);
+  for (const [k, v] of Object.entries(buildProviderEnv(provider))) {
+    env.push(`${k}=${v}`);
   }
-
-  // Per-tool env_vars: flat key/value (schema v10). Pushed last so it wins
-  // on collision and arbitrary extras get added.
-  for (const [key, value] of Object.entries(JSON.parse(tool.env_vars))) {
-    env.push(`${key}=${value}`);
+  // Harness-specific extras (e.g. CLAUDE_CODE_USE_BEDROCK=0). Typically empty.
+  for (const [k, v] of Object.entries(invocation.extra_env)) {
+    env.push(`${k}=${v}`);
   }
-
   return env;
 }
 ```
 
-To add a new provider, append to `FORWARDED_KEYS` in `packages/server/src/credentials.ts`. Container environment variables are visible via `docker inspect`. This is inherent to Docker and represents the same trust boundary as Machine B filesystem access.
+There is no FORWARDED_KEYS list any more — each provider row carries
+exactly the credential it needs, and only that credential is exported
+into the container. Adding a new provider (e.g. spinning up a second
+Anthropic account) is a UI action: add a row under Settings → Providers
+& Models, point it at a new env-var name, drop the value into `.env`,
+restart. Adding a new provider *kind* (something the orchestrator has
+never targeted) is a code change in `providers/kinds.ts` plus matching
+harness support.
 
-**Note on per-tool overrides storing secrets in the DB:** when an operator overrides a forwarded key on a specific tool (e.g. a different `ANTHROPIC_API_KEY` for an experimental account), the value is stored in `agent_tools.env_vars`. Database backups contain those values; treat the SQLite file as sensitive accordingly.
+Container environment variables are visible via `docker inspect`. This
+is inherent to Docker and represents the same trust boundary as
+filesystem access on the orchestrator host.
+
+**Note on inline `auth_token` storing secrets in the DB:** when an
+operator stores a credential as an inline `auth_token` rather than
+through `api_key_env_var` indirection, the value lives in the
+`providers` row as plaintext. Database backups contain it; treat the
+SQLite file as sensitive accordingly.

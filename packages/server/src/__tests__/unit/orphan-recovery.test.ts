@@ -73,8 +73,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     attempt: 1,
     max_attempts: 3,
     prep_failure_count: 0,
-    agent_tool: null,
-    model: null,
+    agent_profile_id: null,
     container_id: null,
     started_at: null,
     completed_at: null,
@@ -95,7 +94,8 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     completed_at: null,
     log_path: null,
     feedback: null,
-    model: null,
+    model_id: null,
+    harness_id: null,
     ...overrides,
   };
 }

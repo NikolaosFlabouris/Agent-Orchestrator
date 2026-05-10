@@ -7,8 +7,7 @@ For the full architecture, see [00 - Architecture Overview](./00-architecture-ov
 
 - **Docker** + **Docker Compose** on the orchestrator host
 - **Forgejo** reachable from the orchestrator (self-hosted, Gitea-compatible)
-- **Anthropic API key** (if using Claude Agent SDK or Claude Code CLI)
-- **Node.js 22** on the host if you plan to run the seed script outside the container
+- **Anthropic API key** for the bootstrap profile (Claude SDK + Sonnet). Other providers (OpenAI, Gemini, Ollama, …) can be added afterwards via Settings without editing files.
 
 ## 1. Forgejo setup
 
@@ -34,15 +33,15 @@ Fill in at minimum:
 - `FORGEJO_WEBHOOK_SECRET` — any random string; use the same value when registering webhooks in Forgejo
 - `FORGEJO_OAUTH_CLIENT_ID` / `FORGEJO_OAUTH_CLIENT_SECRET`
 - `ORCHESTRATOR_URL` — e.g. `http://<host>:8081`
-- `ANTHROPIC_API_KEY` — only if you'll use Claude-based tools
+- `ANTHROPIC_API_KEY` — required for the bootstrap profile (Claude SDK + Sonnet) the orchestrator seeds on first run. If you'll only use a different provider (e.g. Ollama), you can leave this blank and switch the default profile after first boot.
 - `COOKIE_SECRET` — random 32+ byte hex string for production
- 
-**One-shot install:** Alternatively, after creating your `.env` file, you can run the following command to build everything, seed tools, and start the system in one go:
- 
+
+**One-shot install:** Alternatively, after creating your `.env` file, you can run the following command to build the agent image and start the system in one go:
+
 ```bash
-./scripts/install.sh --seed-tools --up
+./scripts/install.sh --up
 ```
- 
+
 For transparency, the detailed step-by-step sequence follows:
 
 ## 3. Build the agent container image
@@ -86,24 +85,16 @@ Expected log events:
 
 Open the UI at `http://<orchestrator-host>:8081`.
 
-## 5. Seed the default agent tools
+## 5. Verify the bootstrap profile
 
-The `agent_tools` table is empty on a fresh install. Seed the four documented defaults:
+The schema v21 migration auto-seeds the standard cloud providers (Anthropic, OpenAI, Gemini, Mistral, DeepSeek, OpenRouter) with a representative model each, plus a default `Claude SDK + Sonnet` agent profile pointed at Anthropic. `settings.default_agent_profile_id` is set to this profile, so a fresh install with `ANTHROPIC_API_KEY` in `.env` boots into a usable state — no seed script.
 
-```bash
-docker compose exec orchestrator node /app/scripts/seed-agent-tools.js
-# or, from the host:
-npm run seed:tools
-```
+Open the UI and confirm:
 
-Tools inserted:
+- **Settings > Providers & Models** — Anthropic should show `models_count: 3` and a green "credential configured" indicator if `ANTHROPIC_API_KEY` is set in `.env`. Other cloud providers are seeded but flagged "missing credential" until you point each one at an env var or paste an inline `auth_token`.
+- **Settings > Agent Profiles** — `default-claude-sdk` (harness `claude-sdk`, Anthropic / Claude Sonnet 4.6, timeout 120m) is the only profile.
 
-- `claude-agent-sdk` (SDK, Anthropic API)
-- `claude-code-cli` (CLI, Anthropic API)
-- `opencode-anthropic` (CLI, Anthropic API)
-- `opencode-local` (CLI, no auth, local LLM)
-
-Review and adjust in the UI under **Settings > Agent Tools**. Verify each tool's `command_template` matches the flags of the actually-installed version of the CLI inside the image (run `docker run --rm -it orchestrator-agent:latest opencode run --help`).
+To add Ollama or another local LLM server, create a new provider with `kind: ollama` and the server's `base_url`, add the loaded models to it, then create a new agent profile pairing the OpenCode or pi harness with one of those models. See [Agents.md](./Agents.md) for the full configuration reference.
 
 ## 6. Register a repository
 
@@ -111,7 +102,7 @@ In the UI:
 
 1. **Settings > Repositories > Add Repository**.
 2. Select a repo from the dropdown (populated from Forgejo via `/api/repos/available`).
-3. Set `agent_tool` (default for this repo), and optionally one or more install steps from the dropdown (e.g. `npm-ci`, `pnpm-install`, `pip-requirements`). Each step takes an optional `cwd` relative to `/repo`, so monorepos can install in multiple sub-folders. The agent image already ships Node, Python, and Go — no language selection. If your repo needs a custom bootstrap, flip "Allow custom setup scripts" and add a `script` step pointing at a path inside the repo (`bash <path>`); the script inherits the agent container env, so only enable for repos whose committers you trust.
+3. Leave `agent_profile_id` blank to inherit the global default, or pick a different profile for this repo. Optionally add one or more install steps from the dropdown (e.g. `npm-ci`, `pnpm-install`, `pip-requirements`). Each step takes an optional `cwd` relative to `/repo`, so monorepos can install in multiple sub-folders. The agent image already ships Node, Python, and Go — no language selection. If your repo needs a custom bootstrap, flip "Allow custom setup scripts" and add a `script` step pointing at a path inside the repo (`bash <path>`); the script inherits the agent container env, so only enable for repos whose committers you trust.
 4. Save. The orchestrator will clone the repo into `/workspaces/` on its first task.
 
 Then register a webhook in Forgejo for this repo:
@@ -127,14 +118,16 @@ Easiest path: open an issue in your Forgejo repo whose body says something trivi
 Track progress in the UI:
 
 - **Dashboard** shows the task move `queued → preparing → in-progress → in-review → merged`.
-- **Task Detail** streams the agent's live output and lists each attempt with token/cost usage.
+- **Task Detail** streams the agent's live output and lists each attempt with the snapshotted harness id and model id.
 - Forgejo shows the new branch `agent/issue-N-*`, a PR, and an audit-trail comment stream on the issue.
 
 ## Troubleshooting
 
-- **"Agent tool 'X' not found"** — you didn't run the seed script, or the repo's `agent_tool` field references an ID that doesn't exist. Seed or edit via the UI.
+- **"Agent profile 'X' not found"** — the repo or task references a profile id that no longer exists. Reassign via Settings > Repositories or Settings > Agent Profiles.
+- **"Provider credential missing"** — the active profile's provider has `api_key_env_var` pointing at an env var that isn't set on the orchestrator host. Set it in `.env` and restart, or paste an `auth_token` directly onto the provider row.
+- **"Harness X doesn't support kind Y"** at task launch — the profile pairs a harness with a provider kind it can't target. Compatibility is checked at launch (not save) by design; reassign the profile's model to a provider whose kind is in the harness's `supported_provider_kinds`.
 - **Container never starts** — check `docker images` for the `orchestrator-agent:latest` image. Check `docker network ls` for `agent-network`. Check orchestrator logs for `docker_connection_failed`.
-- **Container runs but agent errors immediately** — exec into the image and run the tool manually: `docker run --rm -it orchestrator-agent:latest bash` then `opencode --help` or `claude --help`. If the CLI flags differ, update the tool's `command_template` via the UI.
+- **Container runs but agent errors immediately** — exec into the image and run the underlying CLI: `docker run --rm -it orchestrator-agent:latest bash`, then `claude --help`, `opencode --help`, or `pi --help`. If the CLI flags have shifted in a new release, update the matching harness module under `packages/server/src/harnesses/` and rebuild the image.
 - **Agent pushes branch but no PR appears** — the orchestrator's Forgejo token may be missing `write:repository`. Check logs for `forgejo_api_error`.
 - **Webhook events not arriving** — verify `ORCHESTRATOR_URL` is reachable from the Forgejo host, and that the webhook secret matches.
 

@@ -1,147 +1,142 @@
-# Agent Tools
+# Agent Profiles, Harnesses, Providers & Models
 
-Agent tools are the LLM-powered programs that the orchestrator runs inside Docker containers to complete tasks. Each tool defines how the agent is invoked, what LLM it talks to, and what credentials it needs.
+The orchestrator launches LLM-powered programs inside ephemeral Docker
+containers. The configuration that drives a launch is composed from three
+first-class concepts the operator manages, plus a fourth that's
+code-defined.
 
 ## Concepts
 
-An **agent tool** is a named configuration with:
+- **Provider** — the connection identity for an LLM endpoint. A row in
+  the `providers` table carries a `kind` (`anthropic`, `openai`,
+  `gemini`, `mistral`, `deepseek`, `openrouter`, `claude-subscription`,
+  `ollama`), an optional `base_url` (required for `ollama`), a
+  `concurrency_limit`, and exactly one of `api_key_env_var` (env-var
+  pointer the orchestrator dereferences from its own `.env`) or
+  `auth_token` (inline plaintext, useful for self-hosted Ollama and for
+  multi-instancing a cloud kind). Cloud kinds are typically singletons;
+  Ollama is multi-instance (one row per server).
+- **Model** — a `(provider_id, model_id, display_name)` triple under a
+  surrogate primary key. Models are scoped to providers, so the same
+  `model_id` (e.g. `claude-sonnet-4-6`) can exist under multiple
+  providers as separate rows.
+- **Agent profile** — the operator-composed pairing tasks reference. A
+  profile names a `harness_id`, a `model_pk`, a `config_json` blob the
+  harness understands, and a wall-clock `timeout_minutes`.
+- **Harness** — the in-container program that runs the agent. Harnesses
+  are **code-defined** (`packages/server/src/harnesses/*.ts`); operators
+  pick from the four shipped harnesses but can't author their own
+  through the UI. Each harness declares which provider kinds it supports
+  and how to build its launch invocation from `(profile, model,
+  provider)`.
 
-- **Type** — `cli` (command-line tool like OpenCode) or `sdk` (programmatic like Claude Agent SDK)
-- **Command template** — the shell command that runs inside the container (CLI tools only). Use the `{{PROMPT_FILE}}` placeholder (replaced with the literal path `/task/prompt.md`) so the prompt content never reaches the shell as code and is immune to metacharacters in user-authored issue bodies.
-- **Environment variables** — non-secret config passed to the container (provider, model, base URL)
-- **Auth config** — which secret env var to inject from the orchestrator's `.env` file (e.g., `ANTHROPIC_API_KEY`)
+## Resolution chain
 
-## How tools are used
-
-1. Each **repository** has a default agent tool assigned to it
-2. Individual **tasks** can override the tool at creation time
-3. When the scheduler launches a container, it resolves the tool, builds the environment from `env_vars` + credentials, and runs the command template with the task prompt substituted in
-
-## Configuration
-
-Tools are managed in the web UI under **Settings > Agent Tools**. You can also use the API:
+A task launch resolves the profile in this order:
 
 ```
-GET    /api/tools          — list all tools
-POST   /api/tools          — create a tool
-PATCH  /api/tools/:id      — update a tool
+tasks.agent_profile_id
+  ↳ repos.agent_profile_id
+      ↳ settings.default_agent_profile_id
 ```
 
-## Examples
+The scheduler then walks `profile → models[model_pk] → providers[provider_id]`,
+calls `harness.buildInvocation` to produce
+`{ agent_command, config_files, extra_env, resolved_model }`, and writes
+that into the container's `meta.json` along with snapshots of
+`harness_id` and `agent_profile_id` for audit.
 
-> **Verify the invocation before enabling a CLI tool.** OpenCode's flags and
-> subcommands change between releases. Run `opencode --help` and
-> `opencode run --help` inside the agent image (`docker run --rm -it
-> orchestrator-agent:latest opencode run --help`) and adjust
-> `command_template` to match. The examples below use `opencode run` with the
-> prompt piped in, which avoids shell-quoting issues.
+## Shipped harnesses
 
-### OpenCode with local Ollama
+| Harness id | Runtime | Supported provider kinds |
+|---|---|---|
+| `claude-sdk` | sdk | `anthropic` |
+| `claude-code` | cli | `anthropic`, `claude-subscription` |
+| `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
+| `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
 
-```json
-{
-  "id": "opencode-ollama",
-  "display_name": "OpenCode (Ollama)",
-  "type": "cli",
-  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\"",
-  "env_vars": {
-    "OPENCODE_PROVIDER": "openai-compatible",
-    "OPENCODE_MODEL": "devstral-small-2:latest",
-    "OPENCODE_BASE_URL": "http://host.docker.internal:11434/v1"
-  }
-}
-```
+Harness↔provider compatibility is checked at task-launch time, not at
+profile-save time (operator agreement E3). Pairing a harness with an
+unsupported provider kind passes the save and fails loudly when the
+task tries to launch.
 
-### OpenCode with Anthropic API
+Adding a new harness is a code change — see
+[04 - Agent Harness, Profiles, Providers & Models](./04-agent-harness.md#adding-a-new-harness).
 
-```json
-{
-  "id": "opencode-anthropic",
-  "display_name": "OpenCode (Anthropic)",
-  "type": "cli",
-  "command_template": "opencode run \"$(cat {{PROMPT_FILE}})\"",
-  "env_vars": {
-    "OPENCODE_PROVIDER": "anthropic",
-    "OPENCODE_MODEL": "claude-sonnet-4-20250514"
-  }
-}
-```
+## How to configure
 
-### pi with local Ollama
+Everything below is on the **Settings** page in the web UI.
 
-> **Verify the invocation before enabling pi.** pi's flags change between
-> releases. Run `pi --help` inside the agent image (`docker run --rm -it
-> orchestrator-agent:latest pi --help`) and adjust `command_template` to
-> match. The examples below target `@mariozechner/pi-coding-agent@0.68.x`.
+### Providers & Models tab
 
-pi does not expose Ollama through a CLI flag or a dedicated env var — custom
-providers are configured via `~/.pi/agent/models.json` (see pi's own
-`docs/models.md`). The `command_template` bootstraps that file inline before
-invoking pi so the tool works out of the box; edit the `id` field to match a
-model you've pulled on your Ollama server.
+Add a provider row per LLM endpoint you'll use. Cloud providers (Anthropic,
+OpenAI, …) typically need just an `api_key_env_var` (e.g.
+`ANTHROPIC_API_KEY`) — drop the value into the orchestrator's `.env` and
+restart. Ollama needs a `base_url` (e.g. `http://192.168.1.50:11434`).
 
-```json
-{
-  "id": "pi-ollama",
-  "display_name": "pi (Local Ollama)",
-  "type": "cli",
-  "command_template": "mkdir -p ~/.pi/agent && printf '%s' '{\"providers\":{\"ollama\":{\"baseUrl\":\"http://host.docker.internal:11434/v1\",\"api\":\"openai-completions\",\"apiKey\":\"ollama\",\"compat\":{\"supportsDeveloperRole\":false,\"supportsReasoningEffort\":false},\"models\":[{\"id\":\"qwen2.5-coder:14b\"}]}}}' > ~/.pi/agent/models.json && pi -p --mode json --no-session --model ollama/qwen2.5-coder:14b @{{PROMPT_FILE}}",
-  "env_vars": {}
-}
-```
+Under each provider, add the models you want to expose (`model_id` +
+`display_name`). The `model_id` must match what the inference endpoint
+expects, without provider prefix — harnesses that need
+`<provider>/<model>` form prefix at launch.
 
-The `@{{PROMPT_FILE}}` syntax tells pi to include `/task/prompt.md` as the
-initial user message (`pi @file "msg"`). `--mode json` yields a structured
-event stream; `--no-session` skips session persistence for one-shot runs;
-`-p` is the print / non-interactive flag.
+The v21 bootstrap seeds the standard cloud providers with reasonable
+defaults plus a representative set of models. Operators add Ollama
+themselves; they remove or extend the seeded list to match the team's
+actual usage.
 
-### pi with Anthropic API
+### Agent Profiles tab
 
-pi reads `ANTHROPIC_API_KEY` from the environment automatically — no config
-file or env-var remapping is required.
+Compose a profile by picking a harness, a model (the picker is scoped to
+that harness's `supported_provider_kinds`), and any per-harness config.
+The form's `config_json` editor changes per harness — harnesses with no
+operator-tunable knobs render an empty form.
 
-```json
-{
-  "id": "pi-anthropic",
-  "display_name": "pi (Anthropic API)",
-  "type": "cli",
-  "command_template": "pi -p --mode json --no-session --model anthropic/claude-sonnet-4-5 @{{PROMPT_FILE}}",
-  "env_vars": {}
-}
-```
+`timeout_minutes` defaults to 2880 (48h) for new profiles and 120 (2h)
+for the bootstrap profile. Typical values: 120 for paid APIs to cap
+token-burn on a runaway agent, 2880 for free local servers where a slow
+generation is cheap.
 
-### Claude Code CLI
+### Repositories tab
 
-```json
-{
-  "id": "claude-code-cli",
-  "display_name": "Claude Code CLI",
-  "type": "cli",
-  "command_template": "claude --print --dangerously-skip-permissions < {{PROMPT_FILE}}",
-  "env_vars": {}
-}
-```
+Each repo points at a default `agent_profile_id`. Leave it blank to
+inherit the global default from Global Settings.
 
-### Claude Agent SDK
+### Global Settings tab
 
-```json
-{
-  "id": "claude-agent-sdk",
-  "display_name": "Claude Agent SDK",
-  "type": "sdk",
-  "command_template": null,
-  "env_vars": {}
-}
-```
+`default_agent_profile_id` is the fallback when neither the task nor the
+repo specifies a profile. Set on first-run by the v21 bootstrap (to
+`default-claude-sdk`); change it via this tab.
 
-## Multiple models
+## Provider credentials
 
-To use different models for different tasks, create separate tool entries (e.g., `opencode-devstral`, `opencode-qwen`). Assign the default per-repo, and override per-task when needed.
+Secrets live one of two places:
+
+1. **`.env` on the orchestrator host** — pointed at by the provider's
+   `api_key_env_var` field. The orchestrator reads from its own env at
+   launch and exports the value into the agent container under the
+   kind's standard name (e.g. `ANTHROPIC_API_KEY` for `kind=anthropic`,
+   regardless of what the env var on the orchestrator side is called).
+   This is the recommended path; `.env` is gitignored and Docker volumes
+   mount it as a known sensitive file.
+2. **Inline `auth_token` on the provider row** — stored as plaintext in
+   the SQLite DB. Useful for multi-instancing a kind (e.g. two Ollama
+   servers, each with their own basic-auth token) or for two
+   accounts on the same cloud kind. Database backups contain these
+   values; treat the SQLite file as sensitive.
+
+Whichever path is used, only the credential for the *active* provider
+gets exported into the container. There is no list of "all known LLM
+keys forwarded everywhere" — adding a credential is a UI action against
+a specific provider row.
+
+The **Settings → Credentials** tab shows which orchestrator-only env
+vars (`FORGEJO_*`, `ORCHESTRATOR_URL`, `COOKIE_SECRET`) are set. Provider
+credentials are configured per-provider on the Providers & Models tab,
+so they don't appear here.
 
 ## Network access from containers
 
-Agent containers run in Docker. To reach services on the host machine (e.g., Ollama), use `host.docker.internal` instead of `localhost` in the base URL.
-
-## Credentials
-
-Secret values (API keys) are never stored in the database. They live in the orchestrator's `.env` file. The orchestrator forwards a fixed list of well-known LLM provider keys (`FORWARDED_KEYS` in `packages/server/src/credentials.ts`) into every agent container at launch — currently `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`. Whichever the tool's underlying CLI/SDK reads gets used; unused keys sit harmlessly. The **Settings > Credentials** tab shows which keys are set in the orchestrator's `.env`.
+Agent containers run on the `agent-network` Docker bridge with full
+outbound access. To reach services on the host machine (e.g. Ollama
+running on the Docker host), use `host.docker.internal` instead of
+`localhost` in the provider's `base_url`.

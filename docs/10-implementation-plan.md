@@ -20,17 +20,24 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - Install backend dependencies: `fastify`, `@fastify/websocket`, `@fastify/static`, `@fastify/cookie`, `@fastify/oauth2`, `dockerode`, `better-sqlite3`
    - Install frontend dependencies: `react`, `react-dom`, `react-router-dom`, `react-markdown`, `zustand`, `@dnd-kit/core`, `tailwindcss`
    - Install dev dependencies: `typescript`, `vite`, `tsx`, `vitest`
-   - `packages/shared/src/types.ts` — Task, Attempt, Repo, AgentTool, Settings types matching the DB schema
+   - `packages/shared/src/types.ts` — Task, Attempt, Repo, Provider, Model, AgentProfile, Settings types matching the DB schema, plus the `ProviderKind` / `HarnessId` unions and their `PROVIDER_KINDS` / `HARNESS_IDS` const arrays
    - `packages/shared/src/labels.ts` — status label constants
    - `packages/shared/src/events.ts` — WebSocket event types
    - Configure Pino logger via Fastify's built-in integration (JSON-line structured logging to stdout)
 
 2. **SQLite database layer** (`packages/server/src/db.ts`)
-   - Schema creation (`CREATE TABLE IF NOT EXISTS` for all 5 tables)
-   - Schema versioning (`runMigrations` with `schema_version` check)
-   - Settings seeding (`seedDefaultSettings` with all 13 keys from the settings inventory)
+   - Schema creation (`CREATE TABLE IF NOT EXISTS` for `settings`, `repos`,
+     `tasks`, `attempts`, `providers`, `models`, `agent_profiles`,
+     `task_events`, `task_steps`)
+   - Schema versioning (`runMigrations` with `schema_version` check; current
+     target is `21`)
+   - Settings seeding (`seedDefaultSettings` for the host pool keys; v21
+     bootstrap seeds providers + models + a default Claude SDK profile and
+     points `default_agent_profile_id` at it)
    - WAL mode and busy_timeout pragmas
-   - Query helpers: `getTask`, `getTasks`, `getRepo`, `getAgentTool`, `getSetting`, `updateTask`, `insertAttempt`, `updateAttempt`
+   - Query helpers: `getTask`, `getTasks`, `getRepo`, `getProvider`,
+     `getModel`, `getAgentProfile`, `getSetting`, `updateTask`,
+     `insertAttempt`, `updateAttempt`
 
 3. **Forgejo API client** (`packages/server/src/forgejo.ts`)
    - HTTP client using native `fetch` with the orchestrator token from `process.env`
@@ -71,6 +78,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 
 3. **Scheduler** (`packages/server/src/scheduler.ts`)
    - Main tick loop: check completed containers → fill slots
+   - Per-task profile resolution: walks `task → repo → settings.default_agent_profile_id → agent_profile → model → provider`, fetches the harness module from the code-defined registry, and calls `harness.buildInvocation` to produce the launch shape (agent_command, config_files, extra_env, resolved_model)
    - Container completion detection via `container.wait()` callbacks
    - 60-second fallback poll timer
    - Pause/resume control
@@ -93,31 +101,37 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 
 **Deliverables:**
 
-1. **Agent harnesses** (`harness/`)
-   - SDK harness (`harness-sdk.ts`): read prompt, flock pre-agent script, invoke Agent SDK `query()`, accumulate usage, write result.json with usage and error_message
-   - CLI harness (`harness-cli.sh`): read prompt, flock pre-agent script, substitute `{{PROMPT_FILE}}` in the command template with the prompt file path, run with timeout, parse usage from stream-json, write result.json
+1. **In-container harness scripts** (`harness/`)
+   - `harness-sdk.ts` (entrypoint for `runtime: 'sdk'` harnesses): read prompt, flock-protected install steps, invoke Agent SDK `query()` with `meta.model`, write result.json
+   - `harness-cli.sh` (entrypoint for `runtime: 'cli'` harnesses): read prompt, flock-protected install steps, `bash -c "$AGENT_COMMAND"` against the literal `meta.agent_command` produced by the harness module, parse usage from stream-json (where present), write result.json
    - Both: handle timeout, failure, review.json verification for review role
 
-2. **Agent base image** (`images/base/Dockerfile`)
-   - Ubuntu 24.04, git, jq, curl, Node.js 22, Claude Code CLI, OpenCode, Agent SDK
+2. **Code-defined harness registry** (`packages/server/src/harnesses/`)
+   - `types.ts`: `HarnessSpec`, `HarnessInputs`, `HarnessInvocation`, `HarnessConfigFile`
+   - `index.ts`: registry mapping each `HarnessId` to its `HarnessSpec`; `getHarness(id)` and `listHarnesses()`
+   - One module per harness: `claude-sdk.ts`, `claude-code.ts`, `opencode.ts`, `pi.ts`. Each exports a `HarnessSpec` whose `buildInvocation` takes the resolved `(profile, model, provider)` tuple and returns `{ agent_command, config_files, extra_env, resolved_model }`. Adding a harness is a code change — there is no DB-side authoring surface.
+
+3. **Provider-kind metadata** (`packages/server/src/providers/kinds.ts`)
+   - `ProviderKindSpec` table: per-kind `display_name`, `requires_base_url`, `container_env_name` (the standard env var the agent CLI/SDK reads for this kind), `auth_optional`
+   - `resolveProviderCredential(provider)` and `buildProviderEnv(provider)` helpers used by the scheduler at launch
+
+4. **Agent image** (`images/agent/Dockerfile`)
+   - Ubuntu 24.04, git, jq, curl, Node.js 22, Python 3, Go 1.24, all four agent CLIs / SDK (`@anthropic-ai/claude-agent-sdk`, `@anthropic-ai/claude-code`, `opencode-ai`, `@mariozechner/pi-coding-agent`)
    - Both harness scripts copied in
    - Non-root `agent` user (UID 1000)
-   - No ENTRYPOINT
+   - No ENTRYPOINT — set per-task to `harness-sdk` or `harness-cli`
 
-3. **Runtime images** (`images/node/`, `images/python/`, `images/go/`)
-
-4. **Launch helpers** (`packages/server/src/agents/`)
-   - `launchDevContainer`: archive previous output, verify workspace, prepare workspace, resolve config (task → repo → global), assemble prompt.md and meta.json, create and start container, record attempt
+5. **Launch helpers** (in `packages/server/src/scheduler.ts`)
+   - `launchDevContainer`: archive previous output, verify workspace, prepare workspace, resolve `task → profile → model → provider`, call `harness.buildInvocation`, assemble prompt.md and meta.json, write any harness config files into `/repo/`, create and start container, record attempt with `harness_id` + `model_id` snapshots
    - `launchReviewContainer`: same flow with review prompt, SHA recording
-   - Prompt assembly from templates with variable substitution
 
-5. **Post-agent flows** (`packages/server/src/agents/develop.ts`, `review.ts`)
+6. **Post-agent flows** (`packages/server/src/agents/develop.ts`, `review.ts`)
    - `onDevAgentComplete`: complete_attempt, post_dev_agent verification (branch check, salvage, PR creation), continue_to_review or handle_dev_failure
    - `onReviewAgentComplete`: complete_attempt, SHA check, process verdict (merge, rework, human review), review retry logic
    - `postDevAgent`: branch verification, unexpected branch detection, salvage (uncommitted + untracked + local commits), push, PR creation with error handling
    - `attemptMerge`: freshness check, merge with error handling, conflict → rework
 
-6. **Attempt tracking**
+7. **Attempt tracking**
    - `startAttempt`, `completeAttempt`
    - Output archiving before each new container launch
    - (Cost tracking was removed in schema v14 — see `docs/05-orchestrator-core.md`.)
@@ -163,7 +177,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 **Deliverables:**
 
 1. **Fastify server setup** (`packages/server/src/index.ts`)
-   - REST API routes (tasks, settings, repos, tools, status) — response schemas defined in doc 06
+   - REST API routes (tasks, settings, repos, providers, agent-profiles, status) — response schemas defined in doc 06. Each lives under its own module in `packages/server/src/routes/`.
    - Static file serving for the UI build (`@fastify/static`)
    - Cookie-based sessions (`@fastify/cookie`)
    - WebSocket endpoints (`@fastify/websocket`)
@@ -216,7 +230,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 **Deliverables:**
 
 1. **Task creation view** (`packages/ui/src/views/CreateTask.tsx`)
-   - "Create and queue" mode: repo selector, title, description textarea with markdown preview (`react-markdown`), agent tool override, model override, max attempts, human-merge/human-review toggles
+   - "Create and queue" mode: repo selector, title, description textarea with markdown preview (`react-markdown`), agent profile override, max attempts, human-merge/human-review toggles
    - "Queue existing" mode: repo selector, issue browser (via `/api/repos/:id/issues`), same overrides
    - Dependency checklist support in description (standard markdown `- [ ] #N` syntax, rendered in preview)
 
@@ -230,14 +244,14 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - Confirmation dialogs for destructive actions (cancel, reset, force-fail)
    - PATCH `/api/tasks/:id` with action payload
 
-4. **Settings view** (`packages/ui/src/views/Settings.tsx`)
-   - Global settings form — see doc 08 for the current editable list (concurrency, default model). Most defaults live in `packages/server/src/constants.ts` (poll interval, default max attempts, workspace retention, drain timeout, stuck-task multiplier, default container memory/CPU).
-   - Repository list with add/edit/remove — `GET/POST/PATCH /api/repos` with full schema (doc 06)
-   - Per-repo config: base branch, agent tool, pre-agent script (with validation warning), timeout, container memory, container CPU (nullable fields = "use global default")
-   - Agent tools list with add/edit — `GET/POST/PATCH /api/tools` with full schema (doc 06), including structured env-var override form and an optional config-file path/content (path anchored at /repo)
-   - Credentials view (read-only) — shows orchestrator-only secrets and the FORWARDED_KEYS provider keys
-   - Forgejo connection status
-   - Image rebuild trigger per repo (`POST /api/repos/:id/rebuild`)
+4. **Settings view** (`packages/ui/src/views/Settings.tsx`) — five tabs
+   - **Global Settings**: host pool (`max_agent_memory_mb`, `max_agent_cpu_cores`) and `default_agent_profile_id` picker. Most defaults live in `packages/server/src/constants.ts` (poll interval, default max attempts, workspace retention, drain timeout, stuck-task multiplier, default container memory/CPU).
+   - **Repositories**: list with add/edit/remove — `GET/POST/PATCH /api/repos` with full schema (doc 06). Per-repo config: base branch, default `agent_profile_id` (nullable), `install_steps` (typed-kind dropdown + cwd), `allow_script_steps` toggle, container memory / CPU (nullable = compile-time defaults), preferred merge strategy.
+   - **Providers & Models**: nested layout — `GET/POST/PATCH/DELETE /api/providers` for the outer list, `GET/POST /api/providers/:id/models` and `PATCH/DELETE /api/models/:pk` for the inner one. Per-kind form components keyed off `GET /api/provider-kinds`.
+   - **Agent Profiles**: list with add/edit/remove — `GET/POST/PATCH/DELETE /api/agent-profiles`, harness dropdown driven by `GET /api/harnesses`, model picker scoped to the harness's `supported_provider_kinds`. Per-harness `config_json` form (one React component per harness id).
+   - **Credentials (read-only)**: orchestrator-only env vars from `ORCHESTRATOR_ENV_VARS`. Provider credentials are configured per-provider on the Providers & Models tab.
+   - Forgejo connection status surfaced in the header (not a tab).
+   - Image rebuild trigger per repo (`POST /api/repos/:id/rebuild`).
 
 5. **Pause/resume**
    - Dashboard header button
@@ -291,7 +305,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - `change-detection.test.ts` — uncommitted, untracked, local commits, no work
    - `prompt-assembly.test.ts` — dev/review templates, variable substitution, feedback inclusion
    - `branch-naming.test.ts` — sanitization, git naming rules, truncation
-   - `cost-calculation.test.ts` — model normalization, pricing lookup, cost math
+   - `harnesses.test.ts` — each harness's `buildInvocation` against a representative provider+model+config tuple; `validateConfig` rejects malformed knobs; harness↔provider mismatch throws at launch with a clear message
 
 2. **Integration tests** (`packages/server/src/__tests__/integration/`)
    - `forgejo-client.test.ts` — real Forgejo container, CRUD on repos/issues/labels/PRs, branch protection

@@ -39,8 +39,10 @@ RUN npm run build -w packages/ui
 COPY packages/server ./packages/server
 RUN npm run build -w packages/server
 
-# Ship the seed script alongside the server so `npm run seed:tools` (which
-# `docker exec`s into this container) can find it at /app/scripts.
+# Ship the host-side helper scripts inside the image. They're only invoked
+# from the host (e.g. install.sh, build-agent-images.sh), so the COPY is
+# largely informational; keeping it in the image preserves a single
+# source-of-truth artifact for ops.
 COPY scripts ./scripts
 
 EXPOSE 8080

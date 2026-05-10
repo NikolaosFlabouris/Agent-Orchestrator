@@ -19,12 +19,15 @@ import { describe, it, expect } from 'vitest';
  *   npm run test:e2e
  *
  * Preconditions (set up manually or via a fixture script before running):
- *   - The orchestrator is running and reachable at TEST_ORCHESTRATOR_URL
+ *   - The orchestrator is running and reachable at TEST_ORCHESTRATOR_URL.
+ *     First-run seeding (schema v21) provides a default agent profile
+ *     `default-claude-sdk` against the Anthropic provider, so the
+ *     bootstrap path works as long as ANTHROPIC_API_KEY is set in the
+ *     orchestrator's .env.
  *   - Agent images built: `./scripts/build-agent-images.sh`
- *   - Agent tools seeded: `npm run seed:tools`
- *   - The repo `TEST_REPO` is registered in the orchestrator with an
- *     agent_tool (the mock tool `orchestrator-agent-test-mock` is
- *     recommended for deterministic behavior).
+ *   - The repo `TEST_REPO` is registered in the orchestrator. Either
+ *     leave `agent_profile_id` null (inherits the global default) or
+ *     point it at a profile suited for testing.
  *   - Labels `status/queued`, `status/in-progress`, `status/in-review`,
  *     `status/merged` exist in the repo (see docs/01-forgejo-setup.md).
  */

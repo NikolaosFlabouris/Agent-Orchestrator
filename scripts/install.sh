@@ -4,7 +4,11 @@ set -euo pipefail
 # Install script for the Agent Orchestrator.
 # Wraps configuration validation, image building, and optional setup steps.
 #
-# Usage: ./scripts/install.sh [--seed-tools] [--up]
+# Usage: ./scripts/install.sh [--up]
+#
+# Providers, models, and the bootstrap agent profile are auto-seeded by the
+# orchestrator on first boot (schema migration v21). There is no longer a
+# separate seed step for operators to run.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -77,12 +81,10 @@ build_system() {
 
 # --- Main ---
 
-SEED_TOOLS=false
 UP=false
 
 for arg in "$@"; do
   case $arg in
-    --seed-tools) SEED_TOOLS=true ;;
     --up) UP=true ;;
   esac
 done
@@ -90,30 +92,9 @@ done
 validate_env
 build_system
 
-# Order matters: seeding now docker-execs into the orchestrator container, so
-# the container must be up first. If the user asked for both, start before
-# seeding; if they asked for --seed-tools alone, the container must already
-# be running (the docker exec will surface a clear error if it isn't).
 if [[ "$UP" == true ]]; then
   echo "==> Starting orchestrator..."
   docker compose up -d
-fi
-
-if [[ "$SEED_TOOLS" == true ]]; then
-  echo "==> Seeding providers and agent tools..."
-  # The seed script needs the providers + agent_tools tables, which are
-  # created by the server's migration on first boot. Retry briefly in case
-  # the container has just started and migrations are still running.
-  for attempt in $(seq 1 30); do
-    if npm run seed:tools; then
-      break
-    fi
-    if [[ $attempt -eq 30 ]]; then
-      echo "Error: seed failed after 30 attempts. Is the orchestrator container running?"
-      exit 1
-    fi
-    sleep 1
-  done
 fi
 
 echo

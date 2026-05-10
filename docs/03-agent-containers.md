@@ -65,7 +65,7 @@ RUN groupadd -g 1000 agent && \
 USER agent
 WORKDIR /repo
 # No ENTRYPOINT — the orchestrator sets the entrypoint at container creation
-# based on the resolved agent tool type (sdk → harness-sdk.ts, cli → harness-cli)
+# based on the resolved harness's runtime (sdk → harness-sdk.ts, cli → harness-cli)
 ```
 
 ### Agent User Permissions
@@ -100,7 +100,13 @@ For shared cache directories, ownership is set once at creation and persists acr
 
 ### Repository Configuration
 
-Each repository is configured with a default agent tool and an optional pre-agent script via the Settings UI. The `agent_tool` determines the LLM tool and harness type and can be overridden per task. See [04 - Agent Harness](./04-agent-harness.md) for tool configuration and the resolution order.
+Each repository is configured with a default agent profile and an
+ordered list of typed install steps via the Settings UI. The
+`agent_profile_id` selects the harness, model, and provider; it can be
+overridden per task. NULL falls back to
+`settings.default_agent_profile_id`. See [04 - Agent Harness, Profiles,
+Providers & Models](./04-agent-harness.md) for the profile model and the
+resolution chain.
 
 ## Dependency Caching
 
@@ -132,22 +138,22 @@ Two agents working on the same repo in parallel could corrupt shared caches. The
 
 ## Container Creation
 
-The orchestrator creates agent containers via the Docker API (dockerode). The `createAgentContainer` function receives a pre-assembled options object — tool resolution, path computation, environment variable assembly, and directory creation are handled by the caller (the launch helpers in `packages/server/src/agents/`). This keeps the Docker manager focused on container lifecycle and avoids coupling it to the database or workspace logic.
+The orchestrator creates agent containers via the Docker API (dockerode). The `createAgentContainer` function receives a pre-assembled options object — profile resolution, harness invocation, path computation, environment variable assembly, and directory creation are handled by the caller (the scheduler / launch helpers in `packages/server/src/`). This keeps the Docker manager focused on container lifecycle and avoids coupling it to the database, harness registry, or workspace logic.
 
 ```typescript
 interface CreateContainerOptions {
   task: Task;
   repo: Repo;
-  tool: AgentTool;
-  workdir: string;    // e.g. /workspaces/issue-42
-  taskDir: string;    // e.g. /workspaces/issue-42/.task
-  outputDir: string;  // e.g. /workspaces/issue-42/.output
-  cacheDir: string;   // e.g. /caches/org-reponame
-  env: string[];      // pre-assembled environment variables
+  harness: HarnessSpec;   // resolved from the task's agent profile
+  workdir: string;        // e.g. /workspaces/issue-42
+  taskDir: string;        // e.g. /workspaces/issue-42/.task
+  outputDir: string;      // e.g. /workspaces/issue-42/.output
+  cacheDir: string;       // e.g. /caches/org-reponame
+  env: string[];          // pre-assembled: provider credential + harness extras
 }
 
 async function createAgentContainer(opts: CreateContainerOptions) {
-  const { task, repo, tool, workdir, taskDir, outputDir, cacheDir, env } = opts;
+  const { task, repo, harness, workdir, taskDir, outputDir, cacheDir, env } = opts;
 
   const mounts = [
     `${workdir}:/repo`,
@@ -165,12 +171,12 @@ async function createAgentContainer(opts: CreateContainerOptions) {
     `${cacheDir}/go-build-cache:/home/agent/.cache/go-build`,
   ];
 
-  // Entrypoint determined by tool type (sdk → TypeScript harness, cli → bash harness)
-  const entrypoint = tool.type === 'sdk'
+  // Entrypoint determined by the harness's runtime
+  // (sdk → TypeScript harness, cli → bash harness).
+  const entrypoint = harness.runtime === 'sdk'
     ? ['npx', 'tsx', '/usr/local/bin/harness-sdk.ts']
     : ['/usr/local/bin/harness-cli'];
 
-  // Resource limits — per-repo override or global default from settings
   // Per-repo override or compile-time default (constants.ts:
   // DEFAULT_CONTAINER_MEMORY_MB / DEFAULT_CONTAINER_CPU_CORES, 4096/2).
   const memoryMb = repo.container_memory_mb ?? DEFAULT_CONTAINER_MEMORY_MB;
@@ -178,7 +184,7 @@ async function createAgentContainer(opts: CreateContainerOptions) {
 
   return docker.createContainer({
     Image: 'orchestrator-agent:latest',                      // single image for all repos
-    Entrypoint: entrypoint,                                  // harness from tool type (sdk vs cli)
+    Entrypoint: entrypoint,                                  // harness runtime (sdk vs cli)
     Labels: {
       'managed-by': 'orchestrator',
       'task-id': String(task.id)
@@ -257,9 +263,9 @@ Default resource limits per agent container:
 
 | Resource | Limit | Rationale |
 |----------|-------|-----------|
-| Memory | 4 GB | Sufficient for most build/test workloads |
-| CPU | 2 cores | Prevents single agent from starving others |
+| Memory | 4 GB | Sufficient for most build/test workloads. Per-repo override via `repos.container_memory_mb`. |
+| CPU | 2 cores | Prevents single agent from starving others. Per-repo override via `repos.container_cpu_cores`. |
 | Disk | Inherited from host | Workspace + cache volume |
-| Time | Configurable (default 30 min) | Enforced by harness timeout |
+| Time | `agent_profiles.timeout_minutes` (form pre-fill 2880 / 48 h; bootstrap profile 120 / 2 h) | Wall-clock, enforced by the in-container harness; SIGKILLs the container at the deadline regardless of turn count. |
 
-These are defaults configurable via the orchestrator settings.
+Memory and CPU defaults live in `packages/server/src/constants.ts` (`DEFAULT_CONTAINER_MEMORY_MB`, `DEFAULT_CONTAINER_CPU_CORES`) — operators tune per-repo via Settings → Repositories. The host pool (`settings.max_agent_memory_mb` / `max_agent_cpu_cores`) caps the sum of running containers.

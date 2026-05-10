@@ -112,11 +112,12 @@ The task creation description field uses a plain `<textarea>` with a markdown pr
 
 The `packages/shared` workspace package contains TypeScript type definitions used by both the server and UI:
 
-- Task, QueueItem, AgentResult, ReviewVerdict types
+- Task, Attempt, Repo, Provider, Model, AgentProfile, Settings types
+- `ProviderKind` and `HarnessId` string-literal unions plus the matching
+  `PROVIDER_KINDS` / `HARNESS_IDS` const arrays for runtime validation
 - Label constants (status/queued, status/merged, etc.)
 - WebSocket event type definitions
 - API request/response types
-- Agent tool configuration types
 
 This is a build-time dependency — types are compiled and imported by both server and UI. No runtime dependency between them.
 
@@ -140,17 +141,27 @@ orchestrator/
 │   │       ├── scheduler.ts     ← main loop (poll, fill slots, completions)
 │   │       ├── docker.ts        ← container lifecycle management
 │   │       ├── forgejo.ts       ← Forgejo API client
-│   │       ├── git.ts           ← git operations
 │   │       ├── workspace.ts     ← workspace preparation and cleanup
+│   │       ├── credentials.ts   ← orchestrator-only env var inventory
 │   │       ├── agents/
 │   │       │   ├── develop.ts   ← dev agent orchestration flow
 │   │       │   └── review.ts    ← review agent orchestration flow
+│   │       ├── harnesses/       ← code-defined harness registry
+│   │       │   ├── index.ts     ← REGISTRY of HarnessSpec by HarnessId
+│   │       │   ├── types.ts     ← HarnessSpec / HarnessInputs / HarnessInvocation
+│   │       │   ├── claude-sdk.ts
+│   │       │   ├── claude-code.ts
+│   │       │   ├── opencode.ts
+│   │       │   └── pi.ts
+│   │       ├── providers/
+│   │       │   └── kinds.ts     ← per-kind metadata + container env-var resolution
 │   │       ├── routes/
-│   │       │   ├── tasks.ts     ← task management endpoints
-│   │       │   ├── settings.ts  ← configuration endpoints
-│   │       │   ├── repos.ts     ← repository management endpoints
-│   │       │   ├── tools.ts     ← agent tool endpoints
-│   │       │   └── status.ts    ← system status endpoints
+│   │       │   ├── tasks.ts            ← task management endpoints
+│   │       │   ├── settings.ts         ← global settings endpoints
+│   │       │   ├── repos.ts            ← repository management endpoints
+│   │       │   ├── providers.ts        ← providers + nested models endpoints
+│   │       │   ├── agent-profiles.ts   ← agent profiles + harness registry endpoints
+│   │       │   └── status.ts           ← system status endpoints
 │   │       └── ws/
 │   │           ├── dashboard.ts ← dashboard event stream
 │   │           └── output.ts    ← agent log stream
@@ -180,14 +191,9 @@ orchestrator/
 │   └── harness-cli.sh           ← Bash harness for CLI tools
 │
 ├── images/
-│   ├── base/
-│   │   └── Dockerfile           ← common base (git, jq, node, agent tools)
-│   ├── node/
-│   │   └── Dockerfile           ← Node.js runtime
-│   ├── python/
-│   │   └── Dockerfile           ← Python runtime
-│   └── go/
-│       └── Dockerfile           ← Multi-runtime
+│   └── agent/
+│       └── Dockerfile           ← unified orchestrator-agent:latest (Node, Python, Go,
+│                                  agent CLIs and SDK, both harnesses)
 │
 ├── docker-compose.yml           ← orchestrator deployment
 ├── Dockerfile                   ← orchestrator container build
@@ -236,9 +242,10 @@ Pino is included with Fastify (not a separate dependency). Webhook HMAC verifica
 
 | Package | Purpose |
 |---------|---------|
-| `@anthropic-ai/claude-agent-sdk` | Claude Agent SDK (TypeScript) |
-| `@anthropic-ai/claude-code` | Claude Code CLI (global install) |
-| OpenCode binary | Alternative agent tool |
+| `@anthropic-ai/claude-agent-sdk` | Claude Agent SDK (TypeScript), used by the `claude-sdk` harness |
+| `@anthropic-ai/claude-code` | Claude Code CLI, used by the `claude-code` harness |
+| `opencode-ai` | OpenCode CLI, used by the `opencode` harness |
+| `@mariozechner/pi-coding-agent` | pi CLI, used by the `pi` harness |
 
 **Total: 7 runtime dependencies for backend, 6 for frontend.**
 
@@ -248,7 +255,16 @@ No ORM, no state management framework, no API schema generator, no CSS-in-JS.
 
 The `tasks.status` column stores the label name without the `status/` prefix (e.g., `queued`, `preparing`, `in-progress`, `in-review`, `merged`). This matches the Forgejo label suffix exactly, so converting between DB status and Forgejo label is: `'status/' + task.status`.
 
-The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields (`owner`, `name`, `base_branch`, `agent_tool`) are accessed via: `repo = db.getRepo(task.repo_id)`. The pseudocode in other documents uses `repo.base_branch`, `repo.owner`, `repo.name` etc. — these always come from the joined `repos` row.
+The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields (`owner`, `name`, `base_branch`, `agent_profile_id`, etc.) are accessed via: `repo = db.getRepo(task.repo_id)`. The pseudocode in other documents uses `repo.base_branch`, `repo.owner`, `repo.name` etc. — these always come from the joined `repos` row.
+
+The agent-launch configuration is composed from three first-class tables —
+`providers` (connection identity), `models` (provider-scoped model_ids), and
+`agent_profiles` (the operator-composed `(harness_id, model_pk, config_json,
+timeout_minutes)` row that tasks reference). The resolution chain at task
+launch is `tasks.agent_profile_id → repos.agent_profile_id →
+settings.default_agent_profile_id → agent_profiles → models → providers`.
+Harnesses themselves are code-defined (no DB-side registration); a profile
+just names which one of the four shipped harness ids it uses.
 
 The issue `title` is not stored in the `tasks` table. The REST API populates `issue_title` from the Forgejo API when practical (single-task endpoints like `GET /api/tasks/:id`), and falls back to a placeholder (`Issue #N`) in list responses to avoid N Forgejo API calls. This avoids stale data if the issue title is edited in Forgejo, at the cost of titles only appearing after the Forgejo API is reachable. The UI can fetch updated titles client-side for display purposes.
 
@@ -270,10 +286,12 @@ CREATE TABLE tasks (
   status TEXT NOT NULL,  -- label suffix: 'queued', 'preparing', 'in-progress', etc.
   queue_position INTEGER,
   attempt INTEGER DEFAULT 1,
-  max_attempts INTEGER DEFAULT 3,
+  max_attempts INTEGER DEFAULT 7,
   prep_failure_count INTEGER DEFAULT 0,
-  agent_tool TEXT,       -- per-task override; NULL = use repo's configured tool
-  model TEXT,            -- per-task override; NULL = use repo's model or global default
+  -- Per-task profile override. NULL inherits from repos.agent_profile_id,
+  -- which inherits from settings.default_agent_profile_id. RESTRICT on
+  -- delete: operator must reassign or unset before deleting the profile.
+  agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
   container_id TEXT,
   started_at TEXT,
   completed_at TEXT,
@@ -295,13 +313,17 @@ CREATE TABLE attempts (
   completed_at TEXT,
   log_path TEXT,
   feedback TEXT,
-  model TEXT
+  -- Snapshot of the model_id and harness_id resolved at attempt-launch time.
+  -- Stored on the attempt so audit records survive subsequent edits to the
+  -- agent profile, model row, or any of the upstream FK targets.
+  model_id TEXT,
+  harness_id TEXT
   -- Cost tracking (input_tokens, output_tokens, cost_usd) was removed in
   -- schema v14. The harness layer recorded the user's intended model alias
   -- rather than the actual model id reported by the agent's stream, so the
   -- pricing lookup missed every time and cost was always 0. Rather than fix
   -- the bug + maintain a pricing table, the whole cost-tracking feature is
-  -- gone. Use Anthropic's console for spend visibility.
+  -- gone. Use the provider's console for spend visibility.
 );
 
 CREATE INDEX idx_attempts_task_id ON attempts(task_id);
@@ -316,69 +338,130 @@ CREATE TABLE repos (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   base_branch TEXT DEFAULT 'main',
-  agent_tool TEXT NOT NULL,
+  -- Per-repo default agent profile. NULL falls back to
+  -- settings.default_agent_profile_id at task-launch time.
+  agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
   install_steps TEXT NOT NULL DEFAULT '[]',   -- JSON array of typed { kind, cwd?, path? } entries; see InstallStep
   allow_script_steps INTEGER NOT NULL DEFAULT 0,  -- 1 = repo opted in to the `script` install-step kind
   container_memory_mb INTEGER,   -- per-repo override; NULL = use DEFAULT_CONTAINER_MEMORY_MB constant (4096)
   container_cpu_cores INTEGER,   -- per-repo override; NULL = use DEFAULT_CONTAINER_CPU_CORES constant (2)
+  merge_strategy TEXT NOT NULL DEFAULT 'squash',  -- 'squash' | 'merge' | 'rebase'
   UNIQUE(owner, name)     -- one config per repo
 );
 
-CREATE TABLE agent_tools (
-  id TEXT PRIMARY KEY,
+-- Provider: concrete connection identity for an LLM endpoint. Cloud kinds
+-- (anthropic, openai, gemini, …) are typically singletons; self-hosted
+-- kinds (ollama) can have multiple instances (one row per server).
+CREATE TABLE providers (
+  id TEXT PRIMARY KEY,                -- operator-authored stable id
   display_name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  command_template TEXT,
-  -- Flat key/value JSON. Forwarded as container env vars at launch on top
-  -- of FORWARDED_KEYS so per-tool entries override host defaults on collision.
-  env_vars TEXT NOT NULL DEFAULT '{}',
-  -- Optional config file dropped into /repo before the agent runs. Both set
-  -- together or both null. Used by tools (e.g. OpenCode) that read structured
-  -- config from a file rather than env vars.
-  config_file_path TEXT,
-  config_file_content TEXT
-  -- Provider credentials are forwarded from the orchestrator's host env into
-  -- every container via a fixed FORWARDED_KEYS list (see credentials.ts).
-  -- Tools no longer declare their own credentials.
+  -- One of: anthropic | claude-subscription | openai | gemini | mistral |
+  -- deepseek | openrouter | ollama. Determines credential shape, the
+  -- container env var name (see providers/kinds.ts), default endpoint,
+  -- and which harnesses can target this provider.
+  kind TEXT NOT NULL,
+  -- Per-provider concurrency cap (an upstream LLM constraint, e.g. an API
+  -- rate-limit bucket or a single Ollama server). 0 means "paused" (no
+  -- task using this provider launches). Independent from the host
+  -- resource pool which gates hardware capacity.
+  concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
+  -- Connection URL. NULL for cloud kinds (uses kind's default endpoint).
+  -- REQUIRED for self-hosted kinds (ollama).
+  base_url TEXT,
+  -- Inline secret (Ollama bearer/basic auth token, or a cloud API key when
+  -- the operator is multi-instancing a kind without env-var indirection).
+  -- NULL when api_key_env_var is used or no auth needed. Stored as plaintext.
+  auth_token TEXT,
+  -- Name of the orchestrator-side env var holding this provider's API key
+  -- (e.g. 'ANTHROPIC_API_KEY'). At launch the orchestrator reads from its
+  -- own env and exports the value into the agent container under the
+  -- kind's standard name (e.g. ANTHROPIC_API_KEY for kind=anthropic).
+  api_key_env_var TEXT,
+  notes TEXT
 );
+
+-- Models: provider-scoped model identifiers. Composite uniqueness on
+-- (provider_id, model_id); agent_profiles reference the surrogate PK.
+CREATE TABLE models (
+  id INTEGER PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
+  -- Bare model identifier as the inference endpoint expects, without any
+  -- provider prefix (e.g. 'claude-sonnet-4-6', 'qwen2.5-coder:14b').
+  -- Harnesses that need '<provider>/<model>' form prefix at launch time.
+  model_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  UNIQUE(provider_id, model_id)
+);
+
+CREATE INDEX idx_models_provider_id ON models(provider_id);
+
+-- Agent profiles: the operator-composed pairing that tasks reference.
+-- Pairs a code-defined harness with a (provider, model) and any
+-- harness-specific knobs.
+CREATE TABLE agent_profiles (
+  id TEXT PRIMARY KEY,                  -- operator-authored stable id
+  display_name TEXT NOT NULL,
+  -- One of the code-defined harness ids: claude-sdk | claude-code |
+  -- opencode | pi. Adding a harness is a code change — see
+  -- packages/server/src/harnesses/.
+  harness_id TEXT NOT NULL,
+  -- FK to the model surrogate PK. The provider is reachable via the model.
+  model_pk INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+  -- Harness-specific config (typed knobs the harness understands). The
+  -- harness module owns its schema and validates on save via
+  -- HarnessSpec.validateConfig.
+  config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
+  -- Wall-clock timeout (minutes) for any agent run using this profile.
+  timeout_minutes INTEGER NOT NULL DEFAULT 2880
+);
+
+CREATE INDEX idx_agent_profiles_model_pk ON agent_profiles(model_pk);
 ```
 
 ### Schema Versioning
 
-The `settings` table contains a `schema_version` row initialized to `1` on first run. On startup, the orchestrator checks the current version and runs any pending migrations sequentially:
+The `settings` table contains a `schema_version` row that the orchestrator
+bumps as it applies migrations. On startup it checks the current version
+and runs any pending migrations sequentially. The current version is
+`21` — the v21 migration replaced the legacy `agent_tools` row with the
+three-layer `providers` / `models` / `agent_profiles` composition,
+swapped `tasks.agent_tool` + `tasks.model` for `tasks.agent_profile_id`,
+swapped `repos.agent_tool` for `repos.agent_profile_id`, renamed
+`attempts.model` to `attempts.model_id`, added `attempts.harness_id`,
+dropped `settings.default_model` in favour of
+`settings.default_agent_profile_id`, and seeded a bootstrap
+Anthropic-Sonnet Claude SDK profile so a fresh install with
+`ANTHROPIC_API_KEY` set in `.env` boots into a usable state.
 
 ```typescript
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 21;
 
 function runMigrations(db: Database) {
   const row = db.prepare("SELECT value FROM settings WHERE key = 'schema_version'").get();
   const version = row ? parseInt(row.value, 10) : 0;
 
   if (version < 1) {
-    // Initial schema — created by CREATE TABLE IF NOT EXISTS statements above
-    // Seed all default settings
     seedDefaultSettings(db);
     db.exec("UPDATE settings SET value = '1' WHERE key = 'schema_version'");
   }
 
-  // Future migrations follow the same pattern:
-  // if (version < 2) {
-  //   db.exec('ALTER TABLE repos ADD COLUMN new_field TEXT');
-  //   db.exec("UPDATE settings SET value = '2' WHERE key = 'schema_version'");
-  // }
+  // Each subsequent migration is a `if (version < N)` block that ALTERs in
+  // place and bumps schema_version. v21 wraps its work in a transaction so
+  // a crash mid-migration leaves the install at v20 and retries cleanly on
+  // the next boot.
 }
 ```
 
 ### Settings Inventory
 
-All settings keys, their types, and defaults. Seeded on first run by `seedDefaultSettings()`. Editable via the Settings UI.
+All settings keys, their types, and defaults. Seeded on first run by `seedDefaultSettings()` and the v21 bootstrap. Editable via the Settings UI.
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `schema_version` | integer | `1` | Schema migration version |
+| `schema_version` | integer | `21` | Schema migration version |
 | `max_agent_memory_mb` | integer | `20480` | Host memory pool (MB) — sum of per-repo `container_memory_mb` across active tasks may not exceed this |
 | `max_agent_cpu_cores` | integer | `10` | Host CPU pool (cores) — sum of per-repo `container_cpu_cores` across active tasks may not exceed this |
-| `default_model` | string | `sonnet` | Default LLM model for agent tools |
+| `default_agent_profile_id` | string | `default-claude-sdk` | Fallback agent profile when neither task nor repo specifies one. The v21 bootstrap seeds a Claude SDK + Sonnet profile under this id. |
 | `last_shutdown` | string | `''` | Records how the orchestrator last exited (`graceful` or empty). Used by startup recovery to distinguish clean shutdown from crash. |
 
 Compile-time constants (live in `packages/server/src/constants.ts` — not editable per-install):
@@ -397,20 +480,20 @@ Each migration is idempotent and runs inside the startup sequence before the sch
 
 ## Cost Considerations
 
-### Anthropic API (Claude Agent SDK / Claude Code)
+### Paid APIs (Anthropic, OpenAI, Gemini, Mistral, DeepSeek, OpenRouter)
 
-Per-task cost depends on model, task complexity, and codebase size:
+Per-task cost depends on the model, task complexity, and codebase size. Rough Anthropic figures for reference:
 
 | Model | Per Task (est.) | 20 tasks/day | Monthly (weekdays) |
 |-------|----------------|--------------|-------------------|
 | Sonnet | $2-10 | $40-200/day | $800-4,000 |
 | Opus | $10-50 | $200-1,000/day | $4,000-20,000 |
 
-**Recommendation:** use Sonnet for implementation, reserve Opus for complex architectural tasks or reviews. Model selection is configurable per task via the orchestrator.
+**Recommendation:** create separate agent profiles per (model, harness) pair the team actually uses, set the cheapest one as the default in Global Settings, and override per-repo or per-task when a heavier model is warranted. Spend visibility lives on the provider's own console — the orchestrator no longer tracks token usage (schema v14).
 
-### Local LLM (OpenCode)
+### Local / self-hosted (Ollama)
 
-Infrastructure cost only. No per-token charges. Quality depends on the model — smaller local models may produce lower quality code and require more rework cycles, potentially offsetting the cost savings.
+Infrastructure cost only. No per-token charges. Quality depends on the model — smaller local models may produce lower quality code and require more rework cycles, potentially offsetting the cost savings. Register the Ollama server as a `kind=ollama` provider, add the loaded models, and create a profile pointing the OpenCode or pi harness at it.
 
 ### Infrastructure
 

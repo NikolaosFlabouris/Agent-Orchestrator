@@ -11,8 +11,8 @@ beforeEach(() => {
   const db = initDatabase(':memory:');
   // repos must exist before tasks (tasks.repo_id references repos.id).
   db.prepare(
-    `INSERT INTO repos (id, owner, name, agent_tool)
-     VALUES (1, 'owner', 'repo', 'tool')`
+    `INSERT INTO repos (id, owner, name)
+     VALUES (1, 'owner', 'repo')`
   ).run();
   // Insert a fake tasks row so that the task_id foreign-key constraint is met.
   db.prepare(

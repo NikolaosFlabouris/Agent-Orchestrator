@@ -38,11 +38,9 @@ Run the smoke test: `npm run test:e2e` (requires Docker and a reachable Forgejo 
 
 ## Future Enhancements
 
-### Model selection dropdown
+### Model-list autocomplete from provider endpoints
 
-Query available models from the LLM provider and populate a dropdown in the UI instead of free text input. Anthropic models can use a static list. Local LLM servers (Ollama, vLLM, llama.cpp, LM Studio) expose a `/v1/models` endpoint that returns installed/loaded models.
-
-Implementation: add an optional `models_endpoint` field to the `agent_tools` configuration. If set, the orchestrator proxies a query to it and the UI renders a dropdown. Falls back to free text if unset or the query fails.
+Local LLM servers (Ollama, vLLM, llama.cpp, LM Studio) expose a `/v1/models` endpoint that returns installed/loaded models. The Providers & Models tab currently requires the operator to type each `model_id` by hand; we could query the endpoint when the operator clicks "Add model" and prefill a dropdown. Cloud providers don't have a useful equivalent — Anthropic, OpenAI, etc. publish their model lists as documentation rather than via API — so this would be Ollama-only for now.
 
 ### Notifications outside the web UI
 
@@ -62,19 +60,17 @@ A task that spans multiple repositories (e.g., frontend + backend changes for on
 
 ## Known Limitations to Address
 
-### CLI harness prompt injection (resolved)
+### Verify agent CLI flags against installed versions
 
-The CLI harness accepts only the `{{PROMPT_FILE}}` placeholder in `command_template` — substituted with the literal path `/task/prompt.md` before `bash -c`, so the agent tool reads the file itself and prompt content never reaches the shell as code. All default tool definitions seeded by `scripts/seed-agent-tools.ts` use this placeholder, and the schema v5 migration rewrites any legacy `"${TASK_PROMPT}"` templates on startup. See [04 - Agent Harness](./04-agent-harness.md#prompt-substitution-in-cli-command-templates).
-
-### Verify OpenCode CLI flags against installed version
-
-`scripts/seed-agent-tools.ts` uses `opencode run "$(cat {{PROMPT_FILE}})"` as the default command template. OpenCode's CLI surface changes between releases; confirm the flags of the actually-installed version at bring-up time:
+The four shipped harnesses (`claude-sdk`, `claude-code`, `opencode`, `pi`) bake their invocations as TypeScript in `packages/server/src/harnesses/`. Each underlying CLI's flag surface changes between releases. Confirm at bring-up time:
 
 ```bash
+docker run --rm -it orchestrator-agent:latest claude --help
 docker run --rm -it orchestrator-agent:latest opencode run --help
+docker run --rm -it orchestrator-agent:latest pi --help
 ```
 
-If the non-interactive invocation differs, update the `command_template` via **Settings > Agent Tools** and re-seed with `npm run seed:tools -- --force` (or edit inline).
+If a flag has shifted, update the matching harness module and rebuild the agent image. There is no operator-authored shell template any more, so the fix is always a code change.
 
 ### Docker Compose stop_grace_period coupling
 
