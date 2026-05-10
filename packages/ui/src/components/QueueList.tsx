@@ -9,6 +9,7 @@ import {
   useDraggable,
   useDroppable,
 } from '@dnd-kit/core';
+import type { DragEndEvent } from '@dnd-kit/core';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { TaskResponse } from '../api.js';

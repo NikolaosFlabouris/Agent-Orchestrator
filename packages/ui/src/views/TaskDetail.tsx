@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
-import type { TaskDetailResponse, AttemptResponse, TaskAction, ToolResponse } from '../api.js';
+import type { TaskDetailResponse, AttemptResponse, TaskAction } from '../api.js';
 import { connectDashboardWs, connectOutputWs } from '../ws.js';
 import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { Timeline } from '../components/Timeline.js';
@@ -28,7 +28,7 @@ export function TaskDetail() {
   const [task, setTask] = useState<TaskDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
-  const [agentToolError, setAgentToolError] = useState<string | null>(null);
+  const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
   const [extendModalOpen, setExtendModalOpen] = useState(false);
   const [extendAmount, setExtendAmount] = useState(1);
   const [extendError, setExtendError] = useState<string | null>(null);
@@ -36,8 +36,8 @@ export function TaskDetail() {
   const [maxAttemptsDraft, setMaxAttemptsDraft] = useState<number | null>(null);
   const [maxAttemptsError, setMaxAttemptsError] = useState<string | null>(null);
   const [maxAttemptsPending, setMaxAttemptsPending] = useState(false);
-  const tools = useStore((s) => s.tools);
-  const setTools = useStore((s) => s.setTools);
+  const profiles = useStore((s) => s.agentProfiles);
+  const setAgentProfiles = useStore((s) => s.setAgentProfiles);
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
 
   useEffect(() => {
@@ -68,23 +68,29 @@ export function TaskDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task?.id]);
 
-  // Load tools into store if not already cached
+  // Load agent profiles into store if not already cached
   useEffect(() => {
-    if (tools.length === 0) {
-      api.getTools().then((res) => setTools(res.tools)).catch(() => {});
+    if (profiles.length === 0) {
+      api
+        .getAgentProfiles()
+        .then((res) => setAgentProfiles(res.profiles))
+        .catch(() => {});
     }
-  }, [tools.length, setTools]);
+  }, [profiles.length, setAgentProfiles]);
 
   async function handleAction(action: TaskAction) {
     if (!task || actionPending) return;
+    // The TaskAction union has variants without an `action` discriminator
+    // (the per-task field-edit shapes), so narrow before reading it.
+    const actionName = 'action' in action ? action.action : null;
     // Confirmation for destructive actions
-    if (action.action === 'cancel') {
+    if (actionName === 'cancel') {
       if (!confirm('Cancel this task? Container will be stopped and branch/PR cleaned up.')) return;
-    } else if (action.action === 'reset') {
+    } else if (actionName === 'reset') {
       if (!confirm('This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?')) return;
-    } else if (action.action === 'force_fail') {
+    } else if (actionName === 'force_fail') {
       if (!confirm('Force-fail this task?')) return;
-    } else if (action.action === 'requeue') {
+    } else if (actionName === 'requeue') {
       if (!confirm('Requeue this task? It will be placed at the end of the queue.')) return;
     }
 
@@ -117,35 +123,52 @@ export function TaskDetail() {
     }
   }
 
-  async function handleAgentToolChange(newToolId: string) {
+  async function handleAgentProfileChange(newProfileId: string) {
     if (!task) return;
-    const newTool = newToolId || null; // empty string → null (repo default)
-    const prevTool = task.agent_tool;
+    const newProfile = newProfileId || null; // empty string → null (inherit)
+    const prevProfile = task.agent_profile_id;
 
-    // Optimistic update — also sync derived fields so the select label stays
+    // Optimistic update — sync derived fields so the select label stays
     // consistent before the getTask refetch resolves.
     setTask((prev) => {
       if (!prev) return prev;
+      const inherited = prev.repo_agent_profile_id ?? prev.global_agent_profile_id;
       return {
         ...prev,
-        agent_tool: newTool,
-        effective_agent_tool_id: newTool ?? prev.repo_agent_tool,
-        agent_tool_source: newTool !== null ? 'task' : 'repo',
+        agent_profile_id: newProfile,
+        effective_agent_profile_id: newProfile ?? inherited,
+        agent_profile_source: newProfile !== null
+          ? 'task'
+          : prev.repo_agent_profile_id !== null
+            ? 'repo'
+            : prev.global_agent_profile_id !== null
+              ? 'global'
+              : 'none',
       };
     });
-    setAgentToolError(null);
+    setAgentProfileError(null);
 
     try {
-      await api.patchTask(task.id, { agent_tool: newTool });
+      await api.patchTask(task.id, { agent_profile_id: newProfile });
     } catch (err) {
       // Roll back only when the PATCH itself failed (server hasn't persisted the change).
-      setTask((prev) => prev ? {
-        ...prev,
-        agent_tool: prevTool,
-        effective_agent_tool_id: prevTool ?? prev.repo_agent_tool,
-        agent_tool_source: prevTool !== null ? 'task' : 'repo',
-      } : prev);
-      setAgentToolError(err instanceof Error ? err.message : 'Failed to update agent tool');
+      setTask((prev) => {
+        if (!prev) return prev;
+        const inherited = prev.repo_agent_profile_id ?? prev.global_agent_profile_id;
+        return {
+          ...prev,
+          agent_profile_id: prevProfile,
+          effective_agent_profile_id: prevProfile ?? inherited,
+          agent_profile_source: prevProfile !== null
+            ? 'task'
+            : prev.repo_agent_profile_id !== null
+              ? 'repo'
+              : prev.global_agent_profile_id !== null
+                ? 'global'
+                : 'none',
+        };
+      });
+      setAgentProfileError(err instanceof Error ? err.message : 'Failed to update agent profile');
       return;
     }
     try {
@@ -288,29 +311,35 @@ export function TaskDetail() {
               </div>
             )}
             <div className="mt-2 flex items-center gap-2 flex-wrap">
-              <label className="text-xs text-gray-500">Agent tool:</label>
+              <label className="text-xs text-gray-500">Agent profile:</label>
               <select
-                value={task.agent_tool ?? ''}
-                onChange={(e) => handleAgentToolChange(e.target.value)}
+                value={task.agent_profile_id ?? ''}
+                onChange={(e) => handleAgentProfileChange(e.target.value)}
                 className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
               >
                 <option value="">
-                  Use repo default
-                  {task.repo_agent_tool
-                    ? ` (${tools.find((t) => t.id === task.repo_agent_tool)?.display_name ?? task.repo_agent_tool})`
-                    : ''}
+                  Inherit
+                  {(() => {
+                    const inheritedId =
+                      task.repo_agent_profile_id ?? task.global_agent_profile_id;
+                    if (!inheritedId) return ' (no default — set one in Global Settings)';
+                    const found = profiles.find((p) => p.id === inheritedId);
+                    const label = found?.display_name ?? inheritedId;
+                    const source = task.repo_agent_profile_id ? 'repo' : 'global';
+                    return ` (${source} default: ${label})`;
+                  })()}
                 </option>
-                {tools.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.display_name}
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
                   </option>
                 ))}
               </select>
               {ACTIVE_STATUSES.has(task.status) && (
                 <span className="text-xs text-gray-500 italic">Takes effect on next attempt</span>
               )}
-              {agentToolError && (
-                <span className="text-xs text-red-400">{agentToolError}</span>
+              {agentProfileError && (
+                <span className="text-xs text-red-400">{agentProfileError}</span>
               )}
             </div>
           </div>
@@ -697,8 +726,11 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
         </div>
         <div className="flex items-center gap-4 text-sm text-gray-400">
           <span>{duration}</span>
-          {attempt.model && (
-            <span className="font-mono text-xs">{attempt.model}</span>
+          {attempt.model_id && (
+            <span className="font-mono text-xs">
+              {attempt.harness_id ? `${attempt.harness_id} · ` : ''}
+              {attempt.model_id}
+            </span>
           )}
         </div>
       </div>

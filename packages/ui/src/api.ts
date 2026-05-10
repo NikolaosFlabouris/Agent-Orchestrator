@@ -70,15 +70,9 @@ export const api = {
   getCredentials: () =>
     request<{ credentials: CredentialStatus[] }>('GET', '/api/status/credentials'),
 
-  // -- Tools --
-  getTools: () =>
-    request<{ tools: ToolResponse[] }>('GET', '/api/tools'),
-  createTool: (data: Partial<ToolResponse>) =>
-    request<ToolResponse>('POST', '/api/tools', data),
-  updateTool: (id: string, data: Partial<ToolResponse>) =>
-    request<ToolResponse>('PATCH', `/api/tools/${id}`, data),
-
-  // -- Providers (concurrency pools) --
+  // -- Providers (concrete connection identities + concurrency pools) --
+  getProviderKinds: () =>
+    request<{ kinds: ProviderKindSpec[] }>('GET', '/api/provider-kinds'),
   getProviders: () =>
     request<{ providers: ProviderResponse[] }>('GET', '/api/providers'),
   createProvider: (data: Partial<ProviderResponse>) =>
@@ -87,6 +81,41 @@ export const api = {
     request<ProviderResponse>('PATCH', `/api/providers/${id}`, data),
   deleteProvider: (id: string) =>
     request<void>('DELETE', `/api/providers/${id}`),
+
+  // -- Models (nested under each provider) --
+  getProviderModels: (providerId: string) =>
+    request<{ models: ModelResponse[] }>(
+      'GET',
+      `/api/providers/${encodeURIComponent(providerId)}/models`
+    ),
+  createModel: (providerId: string, data: { model_id: string; display_name: string }) =>
+    request<ModelResponse>(
+      'POST',
+      `/api/providers/${encodeURIComponent(providerId)}/models`,
+      data
+    ),
+  updateModel: (pk: number, data: Partial<Pick<ModelResponse, 'display_name'>>) =>
+    request<ModelResponse>('PATCH', `/api/models/${pk}`, data),
+  deleteModel: (pk: number) =>
+    request<void>('DELETE', `/api/models/${pk}`),
+
+  // -- Harnesses (read-only registry) --
+  getHarnesses: () =>
+    request<{ harnesses: HarnessSpec[] }>('GET', '/api/harnesses'),
+
+  // -- Agent profiles (harness + model + per-harness config) --
+  getAgentProfiles: () =>
+    request<{ profiles: AgentProfileResponse[] }>('GET', '/api/agent-profiles'),
+  createAgentProfile: (data: Partial<AgentProfileResponse>) =>
+    request<AgentProfileResponse>('POST', '/api/agent-profiles', data),
+  updateAgentProfile: (id: string, data: Partial<AgentProfileResponse>) =>
+    request<AgentProfileResponse>(
+      'PATCH',
+      `/api/agent-profiles/${encodeURIComponent(id)}`,
+      data
+    ),
+  deleteAgentProfile: (id: string) =>
+    request<void>('DELETE', `/api/agent-profiles/${encodeURIComponent(id)}`),
 };
 
 // -- Types --
@@ -102,7 +131,7 @@ export interface TaskResponse {
   queue_position: number | null;
   attempt: number;
   max_attempts: number;
-  agent_tool: string | null;
+  agent_profile_id: string | null;
   container_id: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -116,14 +145,18 @@ export interface TaskResponse {
   /** Human-readable container name if one is currently running.
    *  Only populated on the single-task detail endpoint. */
   container_name?: string | null;
-  /** Computed effective tool: task.agent_tool if set, else repo.agent_tool. */
-  effective_agent_tool_id: string | null;
-  /** Whether the effective tool comes from the task override or the repo default. */
-  agent_tool_source: 'task' | 'repo';
-  /** The repo's configured baseline tool, regardless of any task-level override.
-   *  Always present so the UI can label "Use repo default (<name>)" even when
-   *  agent_tool_source === 'task'. */
-  repo_agent_tool: string | null;
+  /** Effective profile id resolved through the chain
+   *  task → repo → settings.default_agent_profile_id. May be null only
+   *  when none of the three is set, in which case the orchestrator can't
+   *  launch the task — useful for the UI to surface "configure a default". */
+  effective_agent_profile_id: string | null;
+  /** Tier the effective profile came from. */
+  agent_profile_source: 'task' | 'repo' | 'global' | 'none';
+  /** Repo's configured default profile id (the second tier in the
+   *  resolution chain). */
+  repo_agent_profile_id: string | null;
+  /** Global default profile id (the third / fallback tier). */
+  global_agent_profile_id: string | null;
 }
 
 export interface TaskEventResponse {
@@ -148,7 +181,10 @@ export interface AttemptResponse {
   verdict: string | null;
   started_at: string | null;
   completed_at: string | null;
-  model: string | null;
+  /** Snapshot of the model_id used at attempt-launch. */
+  model_id: string | null;
+  /** Snapshot of the harness used at attempt-launch. */
+  harness_id: string | null;
   feedback: string | null;
 }
 
@@ -166,11 +202,11 @@ export interface StatusResponse {
   forgejo_base_url: string;
   forgejo_connected: boolean;
   uptime_seconds: number;
-  /** Per-provider active-slot / concurrency-limit breakdown. Empty array when
-   *  no providers are configured (pre-v4 install or opt-out). */
+  /** Per-provider active-slot / concurrency-limit breakdown. */
   providers: Array<{
     id: string;
     display_name: string;
+    kind: ProviderKind;
     concurrency_limit: number;
     active_slots: number;
   }>;
@@ -189,8 +225,8 @@ export interface CreateTaskRequest {
   repo_id: number;
   title: string;
   description: string;
-  agent_tool?: string | null;
-  model?: string | null;
+  /** Per-task agent profile override. Null inherits from repo / global default. */
+  agent_profile_id?: string | null;
   max_attempts?: number;
   human_merge?: boolean;
   human_review?: boolean;
@@ -199,7 +235,7 @@ export interface CreateTaskRequest {
 export interface QueueTaskRequest {
   issue_id: number;
   repo_id: number;
-  agent_tool?: string | null;
+  agent_profile_id?: string | null;
   max_attempts?: number | null;
   human_merge?: boolean;
   human_review?: boolean;
@@ -213,7 +249,7 @@ export type TaskAction =
   | { action: 'reset' }
   | { action: 'requeue' }
   | { action: 'extend'; additional_attempts: number }
-  | { agent_tool: string | null }
+  | { agent_profile_id: string | null }
   | { max_attempts: number };
 
 export interface RepoResponse {
@@ -221,13 +257,17 @@ export interface RepoResponse {
   owner: string;
   name: string;
   base_branch: string;
-  agent_tool: string;
+  /** Repo-default agent profile. Null falls back to
+   *  settings.default_agent_profile_id. */
+  agent_profile_id: string | null;
   install_steps: InstallStep[];
   allow_script_steps: boolean;
   container_memory_mb: number | null;
   container_cpu_cores: number | null;
   merge_strategy: 'squash' | 'merge' | 'rebase';
 }
+
+// -- Install steps --
 
 export type InstallStepKind =
   | 'npm-ci'
@@ -258,36 +298,84 @@ export const INSTALL_STEP_LABELS: Record<InstallStepKind, string> = {
   'go-mod-download': 'go mod download',
 };
 
-export interface ToolResponse {
-  id: string;
+// -- Providers, models, harnesses, agent profiles --
+
+export type ProviderKind =
+  | 'anthropic'
+  | 'claude-subscription'
+  | 'openai'
+  | 'gemini'
+  | 'mistral'
+  | 'deepseek'
+  | 'openrouter'
+  | 'ollama';
+
+export interface ProviderKindSpec {
+  kind: ProviderKind;
   display_name: string;
-  type: string;
-  command_template: string | null;
-  env_vars: Record<string, string>;
-  config_file_path: string | null;
-  config_file_content: string | null;
-  /** NOT NULL since schema v17. Form pre-fill for new tools is 2880. */
-  timeout_minutes: number;
-  provider_id: string | null;
+  description: string;
+  requires_base_url: boolean;
+  container_env_name: string | null;
+  auth_optional: boolean;
 }
 
 export interface ProviderResponse {
   id: string;
   display_name: string;
+  kind: ProviderKind;
   concurrency_limit: number;
+  base_url: string | null;
+  auth_token: string | null;
+  api_key_env_var: string | null;
   notes: string | null;
-  /** Number of tool rows referencing this provider (from GET/PATCH/POST). */
-  tools_using: number;
+  /** How many models reference this provider. */
+  models_count: number;
   /** Number of tasks currently holding a slot against this provider. */
   active_slots: number;
+}
+
+export interface ModelResponse {
+  id: number;
+  provider_id: string;
+  model_id: string;
+  display_name: string;
+}
+
+export type HarnessId = 'claude-sdk' | 'claude-code' | 'opencode' | 'pi';
+
+export interface HarnessSpec {
+  id: HarnessId;
+  display_name: string;
+  runtime: 'sdk' | 'cli';
+  supported_provider_kinds: ProviderKind[];
+}
+
+export interface AgentProfileResponse {
+  id: string;
+  display_name: string;
+  harness_id: HarnessId;
+  /** FK to models.id (surrogate). The provider is reachable via the model. */
+  model_pk: number;
+  config_json: Record<string, unknown>;
+  timeout_minutes: number;
+  /** Stat: how many repos default to this profile. */
+  repos_using: number;
+  /** Stat: how many tasks have this profile as a per-task override. */
+  tasks_using: number;
+  /** Convenience: surface the resolved provider+model so the UI doesn't
+   *  need to walk the chain itself. */
+  provider_id: string | null;
+  model_id: string | null;
 }
 
 export interface CredentialStatus {
   name: string;
   configured: boolean;
   /** "orchestrator" — used by the orchestrator process itself.
-   *  "forwarded" — included in FORWARDED_KEYS, sent into every agent container. */
-  scope: 'orchestrator' | 'forwarded';
+   *  "provider" — points at a provider's `api_key_env_var`. */
+  scope: 'orchestrator' | 'provider';
+  /** Set when scope='provider'. */
+  provider_id: string | null;
 }
 
 export interface ForgejoRepoResponse {

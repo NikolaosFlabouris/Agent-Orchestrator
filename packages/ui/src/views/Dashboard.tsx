@@ -77,9 +77,12 @@ export function Dashboard() {
 
     const disconnect = connectDashboardWs(handler);
 
-    // Fetch tools once for display in task rows (cached in store)
-    if (store.tools.length === 0) {
-      api.getTools().then((res) => store.setTools(res.tools)).catch(() => {});
+    // Fetch agent profiles once for display in task rows (cached in store)
+    if (store.agentProfiles.length === 0) {
+      api
+        .getAgentProfiles()
+        .then((res) => store.setAgentProfiles(res.profiles))
+        .catch(() => {});
     }
  
     // Fetch repos once on mount for the Repos strip
@@ -277,19 +280,28 @@ export function Dashboard() {
 }
 
 function ToolChip({ task }: { task: TaskResponse }) {
-  const tools = useStore((s) => s.tools);
-  const toolId = task.effective_agent_tool_id;
-  if (!toolId) return null;
+  const profiles = useStore((s) => s.agentProfiles);
+  const profileId = task.effective_agent_profile_id;
+  if (!profileId) return null;
 
-  const found = tools.find((t) => t.id === toolId);
-  const name = found?.display_name ?? toolId;
+  const found = profiles.find((p) => p.id === profileId);
+  const name = found?.display_name ?? profileId;
   const truncated = name.length > 25 ? name.slice(0, 24) + '…' : name;
-  const isOverride = task.agent_tool_source === 'task';
+  const source = task.agent_profile_source;
+  const isOverride = source === 'task';
+  const sourceLabel =
+    source === 'task'
+      ? 'task override'
+      : source === 'repo'
+        ? 'repo default'
+        : source === 'global'
+          ? 'global default'
+          : 'unset';
 
   return (
     <span
       className={`text-xs font-mono truncate ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
-      title={`${name}${isOverride ? ' (task override)' : ' (repo default)'}`}
+      title={`${name} (${sourceLabel})`}
     >
       {isOverride && <span className="mr-0.5">•</span>}
       {truncated}

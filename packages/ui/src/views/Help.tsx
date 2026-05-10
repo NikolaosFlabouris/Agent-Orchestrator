@@ -22,7 +22,8 @@ export function Help() {
         <div className="space-y-12 min-w-0">
           <OneTimeSetup />
           <TaskLifecycle />
-          <AgentToolsSection />
+          <ProvidersSection />
+          <AgentProfilesSection />
           <RepositoriesSection />
           <GlobalSettingsSection />
           <RunningTasks />
@@ -38,7 +39,8 @@ function TableOfContents() {
   const sections: Array<{ id: string; label: string }> = [
     { id: 'one-time-setup', label: 'One-time setup' },
     { id: 'task-lifecycle', label: 'Task lifecycle' },
-    { id: 'agent-tools', label: 'Agent Tools' },
+    { id: 'providers', label: 'Providers & Models' },
+    { id: 'agent-profiles', label: 'Agent Profiles' },
     { id: 'repositories', label: 'Repositories' },
     { id: 'global-settings', label: 'Global Settings' },
     { id: 'running-tasks', label: 'Running tasks' },
@@ -102,40 +104,51 @@ function CodeBlock({ children }: { children: React.ReactNode }) {
 function OneTimeSetup() {
   return (
     <section id="one-time-setup">
-      <SectionHeading id="one-time-setup">One-time setup: seed default tools</SectionHeading>
+      <SectionHeading id="one-time-setup">One-time setup</SectionHeading>
       <p className="text-sm text-gray-300">
-        The <Code>agent_tools</Code> table is empty on a fresh install. You need to
-        seed the four documented defaults before a repository can be configured.
-        Run this once on the <strong>orchestrator host</strong> (not from the UI):
+        On first boot the orchestrator's schema migration auto-seeds the
+        standard cloud providers (Anthropic, OpenAI, Gemini, Mistral,
+        DeepSeek, OpenRouter) with a representative model each, plus a
+        default <Code>Claude SDK + Sonnet</Code> agent profile pointed at
+        Anthropic. <Code>settings.default_agent_profile_id</Code> is set
+        to that profile, so the system is usable out of the box as long
+        as <Code>ANTHROPIC_API_KEY</Code> is set in the orchestrator's{' '}
+        <Code>.env</Code>.
       </p>
-      <CodeBlock>{`# from the host, using the running orchestrator container:
-docker compose exec orchestrator node /app/scripts/seed-agent-tools.js
-
-# or, from the repo root on the host:
-npm run seed:tools`}</CodeBlock>
-      <p className="text-sm text-gray-300 mt-3">The seed script inserts:</p>
-      <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
+      <p className="text-sm text-gray-300 mt-3">There's no seed script.</p>
+      <p className="text-sm text-gray-300 mt-3">From the UI, the typical first-run flow is:</p>
+      <ol className="list-decimal list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
-          <Code>claude-agent-sdk</Code> — the Anthropic Claude Agent SDK, invoked
-          in-process as an SDK (not a CLI). Uses the Anthropic API.
+          Open{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Providers &amp; Models
+          </Link>{' '}
+          and verify Anthropic shows a green "credential configured"
+          indicator. Other cloud providers are seeded as rows so they
+          show up in dropdowns; fill in their{' '}
+          <Code>api_key_env_var</Code> (or paste an inline{' '}
+          <Code>auth_token</Code>) when ready.
         </li>
         <li>
-          <Code>claude-code-cli</Code> — the Claude Code CLI (<Code>claude</Code>),
-          invoked as a subprocess. Uses the Anthropic API.
+          To use a self-hosted Ollama server, add a new provider with{' '}
+          <Code>kind: ollama</Code>, point it at the server's{' '}
+          <Code>base_url</Code>, then add the loaded models under it.
         </li>
         <li>
-          <Code>opencode-anthropic</Code> — OpenCode CLI backed by the Anthropic
-          API.
+          Compose a profile under{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Agent Profiles
+          </Link>{' '}
+          if you want anything other than Claude SDK + Sonnet as the default.
         </li>
         <li>
-          <Code>opencode-local</Code> — OpenCode CLI pointed at a local
-          OpenAI-compatible LLM endpoint. No API auth required.
+          Register a repository under{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Repositories
+          </Link>{' '}
+          (see below).
         </li>
-      </ul>
-      <p className="text-sm text-gray-300 mt-3">
-        After seeding, open <Link to="/settings" className="text-blue-400 hover:text-blue-300">Settings &gt; Agent Tools</Link>{' '}
-        to review and adjust each tool (see below).
-      </p>
+      </ol>
     </section>
   );
 }
@@ -233,126 +246,160 @@ function TaskLifecycle() {
   );
 }
 
-function AgentToolsSection() {
+function ProvidersSection() {
   return (
-    <section id="agent-tools">
-      <SectionHeading id="agent-tools">Agent Tools settings</SectionHeading>
+    <section id="providers">
+      <SectionHeading id="providers">Providers &amp; Models</SectionHeading>
       <p className="text-sm text-gray-300">
         Managed under{' '}
         <Link to="/settings" className="text-blue-400 hover:text-blue-300">
-          Settings &gt; Agent Tools
+          Settings &gt; Providers &amp; Models
         </Link>
-        . Each tool is a recipe for invoking a coding agent inside an agent
-        container.
+        . Providers carry the connection identity for an LLM endpoint;
+        models live underneath them as a nested list.
       </p>
 
-      <SubHeading>type: cli vs sdk</SubHeading>
+      <SubHeading>kind</SubHeading>
       <p className="text-sm text-gray-300">
-        <Code>cli</Code> — the harness shells out to a binary (e.g. <Code>claude</Code>,{' '}
-        <Code>opencode</Code>) and streams its stdout. Most tools are CLI.{' '}
-        <Code>sdk</Code> — the harness imports the SDK in-process (currently just{' '}
-        <Code>claude-agent-sdk</Code>). The <Code>command_template</Code> field is
-        not used for SDK tools.
+        Picks the credential shape, the standard env-var name the agent CLI
+        / SDK reads inside the container, and which harnesses can target
+        this provider. One of <Code>anthropic</Code>,{' '}
+        <Code>claude-subscription</Code>, <Code>openai</Code>,{' '}
+        <Code>gemini</Code>, <Code>mistral</Code>, <Code>deepseek</Code>,{' '}
+        <Code>openrouter</Code>, <Code>ollama</Code>. Adding a new kind is
+        a code change.
       </p>
 
-      <SubHeading>command_template</SubHeading>
+      <SubHeading>base_url</SubHeading>
       <p className="text-sm text-gray-300">
-        A shell command that uses the <Code>{'{{PROMPT_FILE}}'}</Code> placeholder
-        to reference the task prompt. The harness replaces{' '}
-        <Code>{'{{PROMPT_FILE}}'}</Code> with the absolute path to a file
-        containing the prompt before running the command. Two common shapes:
+        Required for <Code>kind: ollama</Code>; hidden for cloud kinds
+        (the SDK uses a fixed cloud endpoint). For Ollama on the Docker
+        host, use <Code>host.docker.internal</Code> instead of{' '}
+        <Code>localhost</Code> — the container's loopback isn't the host.
+      </p>
+
+      <SubHeading>api_key_env_var vs auth_token</SubHeading>
+      <p className="text-sm text-gray-300">
+        Each provider declares exactly one of these (or neither, for an
+        unauthenticated Ollama):
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
-          <strong>File flag</strong> — when the CLI takes the prompt via a file
-          argument:
-          <CodeBlock>{`claude --prompt-file {{PROMPT_FILE}} --max-turns 40`}</CodeBlock>
+          <Code>api_key_env_var</Code> — the name of an env var the
+          orchestrator reads from its own <Code>.env</Code> at launch (e.g.{' '}
+          <Code>ANTHROPIC_API_KEY</Code>). Recommended for cloud singletons.
+          Secret stays out of the database.
         </li>
         <li>
-          <strong>Inline string</strong> — when the CLI takes the prompt as a
-          string argument, read the file via <Code>{'$(cat ...)'}</Code> inside
-          double quotes so the content is passed as a single argument and shell
-          metacharacters in the prompt stay inert:
-          <CodeBlock>{`opencode run "$(cat {{PROMPT_FILE}})" --non-interactive`}</CodeBlock>
+          <Code>auth_token</Code> — inline plaintext stored on the provider
+          row. Useful when multi-instancing a kind (two Ollama servers, or
+          two Anthropic accounts), or for a self-hosted server that uses
+          basic-auth.
         </li>
       </ul>
       <p className="text-sm text-gray-300 mt-2">
-        Pick whichever the CLI actually supports. If the flags change in a new
-        version of the CLI, update this field — no code change needed.
+        Whichever path is used, the orchestrator exports the resolved
+        credential into the agent container under the kind's standard
+        name (e.g. always <Code>ANTHROPIC_API_KEY</Code> for{' '}
+        <Code>kind: anthropic</Code>, regardless of what env var on the
+        orchestrator side is called).
       </p>
 
-      <SubHeading>Provider credentials</SubHeading>
+      <SubHeading>concurrency_limit</SubHeading>
       <p className="text-sm text-gray-300">
-        The orchestrator forwards a fixed set of well-known LLM provider keys
-        (<Code>ANTHROPIC_API_KEY</Code>, <Code>CLAUDE_CODE_OAUTH_TOKEN</Code>,{' '}
-        <Code>OPENAI_API_KEY</Code>, <Code>GEMINI_API_KEY</Code>,{' '}
-        <Code>OPENROUTER_API_KEY</Code>, <Code>DEEPSEEK_API_KEY</Code>,{' '}
-        <Code>MISTRAL_API_KEY</Code>) from its own <Code>.env</Code> into every
-        agent container at launch. The underlying CLI/SDK picks up whichever
-        key it needs; unused keys sit harmlessly. Set credentials in the
-        orchestrator's <Code>.env</Code> file and check status under{' '}
+        Caps how many agent containers can run against this provider
+        simultaneously. <Code>0</Code> pauses the provider — no task
+        targeting it launches. Independent of the host resource pool,
+        which gates hardware capacity. Set this to match the provider's
+        upstream rate limits (or, for Ollama, to <Code>1</Code> to
+        serialise on a single GPU).
+      </p>
+
+      <SubHeading>Models</SubHeading>
+      <p className="text-sm text-gray-300">
+        Inside each provider, add the model identifiers you want to expose
+        as a <Code>model_id</Code> +{' '}
+        <Code>display_name</Code> pair. The <Code>model_id</Code> must be
+        what the inference endpoint expects, without provider prefix —
+        harnesses that need <Code>&lt;provider&gt;/&lt;model&gt;</Code>
+        form prefix at launch. Deleting a model returns a 409 if any agent
+        profile references it.
+      </p>
+    </section>
+  );
+}
+
+function AgentProfilesSection() {
+  return (
+    <section id="agent-profiles">
+      <SectionHeading id="agent-profiles">Agent Profiles</SectionHeading>
+      <p className="text-sm text-gray-300">
+        Managed under{' '}
         <Link to="/settings" className="text-blue-400 hover:text-blue-300">
-          Settings &gt; Credentials
+          Settings &gt; Agent Profiles
         </Link>
-        .
+        . A profile is the operator-composed pairing that tasks reference:
+        a code-defined harness, a (provider, model), per-harness config, and
+        a wall-clock timeout.
       </p>
 
-      <SubHeading>env_vars</SubHeading>
+      <SubHeading>harness_id</SubHeading>
       <p className="text-sm text-gray-300">
-        Per-tool environment variables. The Agent Tools form splits this into
-        two views:
+        One of the four shipped harnesses:
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
-          <strong>Provider credential overrides</strong> — for each forwarded
-          key, leave blank to use the orchestrator's <Code>.env</Code> default
-          or set a tool-specific value (e.g. a different{' '}
-          <Code>ANTHROPIC_API_KEY</Code> for an experimental account, or a{' '}
-          <Code>OPENAI_BASE_URL</Code> pointing at a per-tool LLM server).
-          Values typed here are stored in the database.
+          <Code>claude-sdk</Code> — Claude Agent SDK invoked in-process.
+          Targets <Code>kind: anthropic</Code> only. Simplest, most-tested.
+          Used by the bootstrap profile.
         </li>
         <li>
-          <strong>Other environment variables</strong> — arbitrary KEY/VALUE
-          rows for anything not in the forwarded-keys list (e.g. provider
-          model names, log levels, custom flags read from env).
+          <Code>claude-code</Code> — Claude Code CLI subprocess. Targets{' '}
+          <Code>anthropic</Code> or <Code>claude-subscription</Code>.
+        </li>
+        <li>
+          <Code>opencode</Code> — OpenCode CLI subprocess. Targets every
+          provider kind OpenCode supports (cloud + Ollama).
+        </li>
+        <li>
+          <Code>pi</Code> —{' '}
+          <Code>@mariozechner/pi-coding-agent</Code> CLI subprocess. Targets
+          every provider kind pi supports.
         </li>
       </ul>
       <p className="text-sm text-gray-300 mt-2">
-        Per-tool values override the orchestrator's defaults on collision and
-        add anything else to the container's environment. Stored as a flat
-        JSON object on the tool row.
+        Harnesses are code, not config — adding one means a new module
+        under <Code>packages/server/src/harnesses/</Code>, not a UI action.
       </p>
 
-      <SubHeading>config_file</SubHeading>
+      <SubHeading>model_pk</SubHeading>
       <p className="text-sm text-gray-300">
-        Optional. Some agent tools (notably OpenCode for non-built-in
-        providers like Ollama, vLLM, LM Studio) read their configuration from
-        a file rather than env vars or CLI flags. Setting{' '}
-        <Code>config_file_path</Code> + <Code>config_file_content</Code>{' '}
-        causes the orchestrator to write the content to{' '}
-        <Code>/repo/&lt;path&gt;</Code> inside the container before the agent
-        runs. The file is added to <Code>.git/info/exclude</Code> so it never
-        lands in a commit.
+        The model picker is scoped to the chosen harness's
+        supported provider kinds, so you can't accidentally pair{' '}
+        <Code>claude-sdk</Code> with an OpenAI model. (If you do force the
+        mismatch via the API, the launch fails loudly with a clear "harness
+        X doesn't support kind Y" message — the trade-off was no save-time
+        validation.)
       </p>
-      <p className="text-sm text-gray-300 mt-2">
-        Path must be relative — anchored under <Code>/repo</Code>. Tools that
-        need a file outside the workspace (e.g.{' '}
-        <Code>~/.pi/agent/models.json</Code>) inline the file write into{' '}
-        <Code>command_template</Code> instead. The form provides a starter
-        templates dropdown for common cases (OpenCode + Ollama, OpenCode +
-        vLLM, OpenCode + LM Studio).
+
+      <SubHeading>config_json</SubHeading>
+      <p className="text-sm text-gray-300">
+        Per-harness knobs the harness module understands. The form renders
+        a different React component per <Code>harness_id</Code> — empty
+        for harnesses with no operator-tunable knobs, structured fields
+        for harnesses that take options (e.g. <Code>max_turns</Code>).
+        Stored as JSON on the profile row; the harness's{' '}
+        <Code>validateConfig</Code> hook runs server-side on save.
       </p>
 
       <SubHeading>timeout_minutes</SubHeading>
       <p className="text-sm text-gray-300">
         Required wall-clock timeout (minutes) for any agent attempt using
-        this tool. Schema v17 made this a per-tool concern only — there is
-        no longer a global or per-repo fallback. The form pre-fills new
-        tools with <Code>2880</Code> (48 hours); operators are expected to
-        type their actual budget. Typical values:{' '}
-        <Code>120</Code> (2 h) for paid APIs to cap token-burn on a runaway
-        agent, <Code>2880</Code> (48 h) for free local servers where a slow
-        generation is cheap.
+        this profile. Form pre-fills new profiles with <Code>2880</Code>{' '}
+        (48 h); the bootstrap profile uses <Code>120</Code> (2 h).
+        Typical values: <Code>120</Code> for paid APIs to cap token-burn
+        on a runaway agent; <Code>2880</Code> for free local servers
+        where a slow generation is cheap.
       </p>
     </section>
   );
@@ -389,9 +436,10 @@ function RepositoriesSection() {
       <SubHeading>Field reference</SubHeading>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2">
         <li>
-          <Code>agent_tool</Code> — the default agent tool for this repo. Must
-          reference an existing entry from Agent Tools. Can be overridden
-          per-task when queueing.
+          <Code>agent_profile_id</Code> — default agent profile for this
+          repo. Leave blank to inherit{' '}
+          <Code>settings.default_agent_profile_id</Code>. Can be
+          overridden per-task when queueing.
         </li>
         <li>
           <Code>install_steps</Code> — ordered list of typed dependency-install
@@ -408,14 +456,10 @@ function RepositoriesSection() {
           <Code>allow_script_steps</Code> — per-repo toggle that enables the{' '}
           <Code>script</Code> install-step kind, which runs{' '}
           <Code>bash &lt;path&gt;</Code> against a path inside the repo. The
-          script inherits the agent container env (provider keys, agent git
-          token), so anyone with commit access to the repo can change what
-          runs. Default off; flip on consciously per repo.
-        </li>
-        <li>
-          <Code>timeout_minutes</Code> override — cap on agent wall-clock time
-          for this repo. Blank means fall back to the tool's timeout, then the
-          global default.
+          script inherits the agent container env (provider credential under
+          the kind's standard name, agent git token), so anyone with commit
+          access to the repo can change what runs. Default off; flip on
+          consciously per repo.
         </li>
         <li>
           <Code>merge_strategy</Code> — your preferred PR merge style
@@ -467,7 +511,7 @@ function GlobalSettingsSection() {
         <Link to="/settings" className="text-blue-400 hover:text-blue-300">
           Settings &gt; Global Settings
         </Link>
-        . These apply to every repo and tool unless overridden.
+        . These apply to every repo and agent profile unless overridden.
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2 mt-2">
         <li>
@@ -481,18 +525,24 @@ function GlobalSettingsSection() {
           the queue stacks up despite headroom.
         </li>
         <li>
-          Also on this screen: <Code>default_model</Code>.
+          <Code>default_agent_profile_id</Code> — the fallback agent profile
+          when neither the task nor the repo specifies one. Picker is
+          populated from{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Agent Profiles
+          </Link>
+          . The v21 bootstrap seeds this to the Claude SDK + Sonnet
+          profile; switch it to whatever your team uses by default.
         </li>
       </ul>
       <p className="text-xs text-gray-500 mt-3">
-        Wall-clock timeout is now a per-tool concern only — see{' '}
-        <Code>timeout_minutes</Code> on each agent tool. The orchestrator
-        no longer carries a global default; every tool must set its own
-        budget. CLI tools also encode an internal per-turn flag in{' '}
-        <Code>command_template</Code> (e.g. claude-code's{' '}
-        <Code>--max-turns 100</Code>); the SDK harness uses its own
-        default. The wall-clock timeout is the lifetime safety net that
-        kills the container regardless of turn count.
+        Wall-clock timeout is a per-profile concern (see{' '}
+        <Code>timeout_minutes</Code> on each agent profile) — there is no
+        global default. CLI harnesses encode any per-turn flag inside their
+        invocation builder (e.g. claude-code's{' '}
+        <Code>--max-turns 100</Code>); the SDK harness uses the SDK's
+        own default. The wall-clock timeout is the lifetime safety net
+        that kills the container regardless of turn count.
       </p>
       <p className="text-xs text-gray-500 mt-3">
         Several defaults are compile-time constants in{' '}
@@ -541,8 +591,8 @@ function RunningTasks() {
               selected repo and queue it.
             </li>
           </ul>
-          Both modes let you override the agent tool, max attempts, and flag
-          the task for human merge / human review.
+          Both modes let you override the agent profile, max attempts, and
+          flag the task for human merge / human review.
         </li>
       </ul>
 
@@ -554,10 +604,10 @@ function RunningTasks() {
           Click any task to drill in.
         </li>
         <li>
-          <strong>Task Detail</strong> — streams <Code>progress.log</Code> (the
-          agent's live stdout), shows a Timeline of orchestrator events, and
-          lists each attempt with tokens + cost. Tokens and cost are updated
-          when each attempt completes.
+          <strong>Task Detail</strong> — streams <Code>progress.log</Code>{' '}
+          (the agent's live stdout), shows a Timeline of orchestrator events,
+          and lists each attempt with the snapshotted{' '}
+          <Code>harness_id</Code> and <Code>model_id</Code>.
         </li>
         <li>
           <strong>Forgejo</strong> — the actual audit trail: branch{' '}
@@ -620,17 +670,34 @@ function CommonIssues() {
       <SectionHeading id="common-issues">Common issues</SectionHeading>
       <ul className="space-y-4 text-sm text-gray-300">
         <li>
-          <strong>"Agent tool 'X' not found"</strong> — you didn't run the seed
-          script, or the repo's <Code>agent_tool</Code> field references an ID
-          that doesn't exist. Seed (see{' '}
-          <a href="#one-time-setup" className="text-blue-400 hover:text-blue-300">
-            One-time setup
-          </a>
-          ) or edit the repo in{' '}
+          <strong>"Agent profile 'X' not found"</strong> — the repo or task
+          references a profile id that no longer exists. Reassign in{' '}
           <Link to="/settings" className="text-blue-400 hover:text-blue-300">
             Settings &gt; Repositories
           </Link>
+          {' '}or in the task detail view, or recreate the profile under{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Agent Profiles
+          </Link>
           .
+        </li>
+        <li>
+          <strong>"Provider credential missing"</strong> — the profile's
+          provider has <Code>api_key_env_var</Code> pointing at an env var
+          that isn't set on the orchestrator host. Set it in{' '}
+          <Code>.env</Code> and restart, or paste an inline{' '}
+          <Code>auth_token</Code> onto the provider row under{' '}
+          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+            Settings &gt; Providers &amp; Models
+          </Link>
+          .
+        </li>
+        <li>
+          <strong>"Harness X doesn't support kind Y" at task launch</strong>{' '}
+          — a profile pairs a harness with a provider whose kind isn't in
+          its <Code>supported_provider_kinds</Code>. Compatibility is
+          checked at launch (not save) by design. Edit the profile to
+          point at a model whose provider kind the harness supports.
         </li>
         <li>
           <strong>Container never starts</strong> — on the host, check{' '}
@@ -641,15 +708,13 @@ function CommonIssues() {
         </li>
         <li>
           <strong>Container runs but agent errors immediately</strong> — the
-          CLI flags in the tool's <Code>command_template</Code> probably don't
-          match the installed version. Exec into the image to confirm:{' '}
+          underlying CLI's flags may have shifted in a new release. Exec
+          into the image to confirm:{' '}
           <Code>docker run --rm -it orchestrator-agent:latest bash</Code>,
-          then <Code>opencode --help</Code> or <Code>claude --help</Code>.
-          Update the template in{' '}
-          <Link to="/settings" className="text-blue-400 hover:text-blue-300">
-            Settings &gt; Agent Tools
-          </Link>
-          .
+          then <Code>claude --help</Code>, <Code>opencode --help</Code>,
+          or <Code>pi --help</Code>. Fix the matching harness module
+          under <Code>packages/server/src/harnesses/</Code> and rebuild
+          the agent image.
         </li>
         <li>
           <strong>Agent pushes branch but no PR appears</strong> — the

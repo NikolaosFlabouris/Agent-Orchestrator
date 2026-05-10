@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TaskResponse, ToolResponse } from './api.js';
+import type { TaskResponse, AgentProfileResponse } from './api.js';
 import type { HostPool } from './ws.js';
 
 interface Alert {
@@ -9,7 +9,7 @@ interface Alert {
 
 interface DashboardState {
   tasks: TaskResponse[];
-  tools: ToolResponse[];
+  agentProfiles: AgentProfileResponse[];
   hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
@@ -37,7 +37,7 @@ interface DashboardState {
   setForgejoBaseUrl: (url: string) => void;
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
-  setTools: (tools: ToolResponse[]) => void;
+  setAgentProfiles: (profiles: AgentProfileResponse[]) => void;
 }
 
 const ZERO_POOL: HostPool = {
@@ -49,7 +49,7 @@ const ZERO_POOL: HostPool = {
 
 export const useStore = create<DashboardState>((set) => ({
   tasks: [],
-  tools: [],
+  agentProfiles: [],
   hostPool: ZERO_POOL,
   queueDepth: 0,
   paused: false,
@@ -96,5 +96,5 @@ export const useStore = create<DashboardState>((set) => ({
 
   clearAlerts: () => set({ alerts: [] }),
 
-  setTools: (tools) => set({ tools }),
+  setAgentProfiles: (profiles) => set({ agentProfiles: profiles }),
 }));

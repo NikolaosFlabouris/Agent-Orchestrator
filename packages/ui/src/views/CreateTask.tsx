@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
-import type { RepoResponse, ToolResponse, IssueResponse } from '../api.js';
+import type { RepoResponse, AgentProfileResponse, IssueResponse } from '../api.js';
 import ReactMarkdown from 'react-markdown';
 
 type Mode = 'create' | 'queue';
@@ -10,7 +10,7 @@ export function CreateTask() {
   const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>('create');
   const [repos, setRepos] = useState<RepoResponse[]>([]);
-  const [tools, setTools] = useState<ToolResponse[]>([]);
+  const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
   const [repoId, setRepoId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -25,14 +25,14 @@ export function CreateTask() {
   const [selectedIssueId, setSelectedIssueId] = useState<number | null>(null);
 
   // Shared overrides
-  const [agentTool, setAgentTool] = useState<string>('');
+  const [agentProfile, setAgentProfile] = useState<string>('');
   const [maxAttempts, setMaxAttempts] = useState<string>('');
   const [humanMerge, setHumanMerge] = useState(false);
   const [humanReview, setHumanReview] = useState(false);
 
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
-    api.getTools().then((r) => setTools(r.tools)).catch(() => {});
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
   }, []);
 
   // Load issues when repo changes in queue mode
@@ -66,7 +66,7 @@ export function CreateTask() {
           repo_id: repoId,
           title: title.trim(),
           description: description.trim(),
-          agent_tool: agentTool || null,
+          agent_profile_id: agentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : undefined,
           human_merge: humanMerge,
           human_review: humanReview,
@@ -80,7 +80,7 @@ export function CreateTask() {
         await api.queueTask({
           issue_id: selectedIssueId,
           repo_id: repoId,
-          agent_tool: agentTool || null,
+          agent_profile_id: agentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : null,
           human_merge: humanMerge,
           human_review: humanReview,
@@ -227,17 +227,17 @@ export function CreateTask() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">
-                Agent tool
+                Agent profile
               </label>
               <select
-                value={agentTool}
-                onChange={(e) => setAgentTool(e.target.value)}
+                value={agentProfile}
+                onChange={(e) => setAgentProfile(e.target.value)}
                 className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               >
-                <option value="">Repo default</option>
-                {tools.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.display_name}
+                <option value="">Inherit (repo / global default)</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
                   </option>
                 ))}
               </select>

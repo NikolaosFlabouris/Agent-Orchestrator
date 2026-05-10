@@ -3,16 +3,20 @@ import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import type {
   RepoResponse,
-  ToolResponse,
   CredentialStatus,
   ForgejoRepoResponse,
   ProviderResponse,
+  ProviderKind,
+  ProviderKindSpec,
+  ModelResponse,
+  AgentProfileResponse,
+  HarnessSpec,
+  HarnessId,
   HostCapacityResponse,
   InstallStep,
   InstallStepKind,
 } from '../api.js';
 import { INSTALL_STEP_LABELS } from '../api.js';
-import { TEMPLATES } from '../configTemplates.js';
 
 const INSTALL_STEP_KINDS: InstallStepKind[] = [
   'npm-ci',
@@ -26,10 +30,18 @@ const INSTALL_STEP_KINDS: InstallStepKind[] = [
   'go-mod-download',
 ];
 
+type TabKey = 'global' | 'repos' | 'providers' | 'profiles' | 'credentials';
+
+const TAB_LABELS: Record<TabKey, string> = {
+  global: 'Global Settings',
+  repos: 'Repositories',
+  providers: 'Providers & Models',
+  profiles: 'Agent Profiles',
+  credentials: 'Credentials',
+};
+
 export function Settings() {
-  const [tab, setTab] = useState<
-    'global' | 'repos' | 'tools' | 'providers' | 'credentials'
-  >('global');
+  const [tab, setTab] = useState<TabKey>('global');
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -47,54 +59,58 @@ export function Settings() {
 
       <main className="mx-auto max-w-4xl px-6 py-6">
         <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit">
-          {(['global', 'repos', 'tools', 'providers', 'credentials'] as const).map((t) => (
+          {(Object.keys(TAB_LABELS) as TabKey[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`px-4 py-2 rounded text-sm capitalize ${tab === t ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+              className={`px-4 py-2 rounded text-sm ${
+                tab === t
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
             >
-              {t === 'global'
-                ? 'Global Settings'
-                : t === 'repos'
-                  ? 'Repositories'
-                  : t === 'tools'
-                    ? 'Agent Tools'
-                    : t === 'providers'
-                      ? 'Providers'
-                      : 'Credentials'}
+              {TAB_LABELS[t]}
             </button>
           ))}
         </div>
 
         {tab === 'global' && <GlobalSettings />}
         {tab === 'repos' && <RepoSettings />}
-        {tab === 'tools' && <ToolSettings />}
         {tab === 'providers' && <ProviderSettings />}
+        {tab === 'profiles' && <AgentProfileSettings />}
         {tab === 'credentials' && <CredentialSettings />}
       </main>
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Global Settings tab
+// ---------------------------------------------------------------------------
+
 function GlobalSettings() {
   const [settings, setSettings] = useState<Record<string, unknown>>({});
+  const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [capacity, setCapacity] = useState<HostCapacityResponse | null>(null);
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
     api.getHostCapacity().then(setCapacity).catch(() => {});
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
   }, []);
 
   async function handleSave() {
     setSaving(true);
+    setError(null);
     try {
       await api.updateSettings(settings);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // Error
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -164,16 +180,37 @@ function GlobalSettings() {
             }
           />
         </div>
-        <div>
-          <label className="block text-sm font-medium mb-1">Default model</label>
-          <input
-            type="text"
-            value={String(settings.default_model ?? '')}
-            onChange={(e) => update('default_model', e.target.value)}
-            className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
-          />
-        </div>
       </div>
+
+      <div>
+        <label className="block text-sm font-medium mb-1">
+          Default agent profile
+        </label>
+        <select
+          value={String(settings.default_agent_profile_id ?? '')}
+          onChange={(e) => update('default_agent_profile_id', e.target.value)}
+          className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+        >
+          {profiles.length === 0 && (
+            <option value="">No agent profiles configured</option>
+          )}
+          {profiles.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.display_name} ({p.id})
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-gray-500 mt-1">
+          Used when neither the task nor its repo specifies an agent profile.
+          Manage profiles under <em>Agent Profiles</em>.
+        </p>
+      </div>
+
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+          {error}
+        </div>
+      )}
 
       <button
         onClick={handleSave}
@@ -228,21 +265,27 @@ function CapacityHint({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Repos tab
+// ---------------------------------------------------------------------------
+
 function RepoSettings() {
   const [repos, setRepos] = useState<RepoResponse[]>([]);
-  const [tools, setTools] = useState<ToolResponse[]>([]);
+  const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
   const [availableRepos, setAvailableRepos] = useState<ForgejoRepoResponse[]>([]);
   const [editing, setEditing] = useState<Partial<RepoResponse> | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
-    api.getTools().then((r) => setTools(r.tools)).catch(() => {});
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
     api.getAvailableRepos().then((r) => setAvailableRepos(r.repos)).catch(() => {});
   }, []);
 
   async function handleSave() {
     if (!editing) return;
+    setError(null);
     try {
       if (isNew) {
         const repo = await api.createRepo(editing);
@@ -253,40 +296,49 @@ function RepoSettings() {
       }
       setEditing(null);
       setIsNew(false);
-    } catch {
-      // Error
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
     }
   }
 
   return (
     <div className="space-y-4">
-      {repos.map((repo) => (
-        <div
-          key={repo.id}
-          className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
-        >
-          <div>
-            <span className="font-medium">
-              {repo.owner}/{repo.name}
-            </span>
-            <span className="text-gray-500 text-sm ml-3">
-              {repo.agent_tool}
-            </span>
-          </div>
-          <button
-            onClick={() => { setEditing({ ...repo }); setIsNew(false); }}
-            className="text-sm text-blue-400 hover:text-blue-300"
+      {repos.map((repo) => {
+        const profile = repo.agent_profile_id
+          ? profiles.find((p) => p.id === repo.agent_profile_id)
+          : null;
+        return (
+          <div
+            key={repo.id}
+            className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
           >
-            Edit
-          </button>
-        </div>
-      ))}
+            <div>
+              <span className="font-medium">
+                {repo.owner}/{repo.name}
+              </span>
+              <span className="text-gray-500 text-sm ml-3">
+                {profile
+                  ? profile.display_name
+                  : repo.agent_profile_id
+                    ? `${repo.agent_profile_id} (missing)`
+                    : 'inherits global default'}
+              </span>
+            </div>
+            <button
+              onClick={() => { setEditing({ ...repo }); setIsNew(false); }}
+              className="text-sm text-blue-400 hover:text-blue-300"
+            >
+              Edit
+            </button>
+          </div>
+        );
+      })}
 
       <button
         onClick={() => {
           setEditing({
             base_branch: 'main',
-            agent_tool: '',
+            agent_profile_id: null,
             merge_strategy: 'squash',
             install_steps: [],
             allow_script_steps: false,
@@ -304,6 +356,11 @@ function RepoSettings() {
           <h3 className="font-medium">
             {isNew ? 'Add Repository' : `Edit ${editing.owner}/${editing.name}`}
           </h3>
+          {error && (
+            <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+              {error}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             {isNew && (
               <div className="col-span-2">
@@ -338,15 +395,24 @@ function RepoSettings() {
               />
             </div>
             <div>
-              <label className="block text-sm mb-1">Agent tool</label>
+              <label className="block text-sm mb-1">
+                Default agent profile
+              </label>
               <select
-                value={editing.agent_tool ?? ''}
-                onChange={(e) => setEditing({ ...editing, agent_tool: e.target.value })}
+                value={editing.agent_profile_id ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    agent_profile_id: e.target.value || null,
+                  })
+                }
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               >
-                <option value="">Select...</option>
-                {tools.map((t) => (
-                  <option key={t.id} value={t.id}>{t.display_name}</option>
+                <option value="">Inherit (use global default)</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
+                  </option>
                 ))}
               </select>
             </div>
@@ -397,8 +463,6 @@ function RepoSettings() {
             onChangeSteps={(steps) => setEditing({ ...editing, install_steps: steps })}
             onChangeAllowScript={(allow) => {
               const next: Partial<RepoResponse> = { ...editing, allow_script_steps: allow };
-              // Disabling the toggle should also strip any script-kind steps
-              // so a save can't fail validation against a stale gate.
               if (!allow) {
                 next.install_steps = (editing.install_steps ?? []).filter(
                   (s) => s.kind !== 'script'
@@ -415,7 +479,7 @@ function RepoSettings() {
               Save
             </button>
             <button
-              onClick={() => { setEditing(null); setIsNew(false); }}
+              onClick={() => { setEditing(null); setIsNew(false); setError(null); }}
               className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
             >
               Cancel
@@ -426,6 +490,10 @@ function RepoSettings() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Install steps editor (shared by Repos tab)
+// ---------------------------------------------------------------------------
 
 function InstallStepsEditor({
   steps,
@@ -448,9 +516,7 @@ function InstallStepsEditor({
   }
   function addStep(kind: InstallStepKind | 'script') {
     const next: InstallStep =
-      kind === 'script'
-        ? { kind: 'script', path: '' }
-        : { kind };
+      kind === 'script' ? { kind: 'script', path: '' } : { kind };
     onChangeSteps([...steps, next]);
   }
 
@@ -549,10 +615,8 @@ function InstallStepsEditor({
             <span className="text-gray-500 block">
               Lets you add a <span className="font-mono">script</span>-kind step that
               runs <span className="font-mono">bash &lt;path&gt;</span> from inside the
-              repo. The script inherits the agent container's environment, including
-              forwarded provider keys (<span className="font-mono">ANTHROPIC_API_KEY</span>,
-              <span className="font-mono"> FORGEJO_AGENT_TOKEN</span>, etc.). Anyone
-              who can commit to this repo can change what runs.
+              repo. The script inherits the agent container's environment.
+              Anyone who can commit to this repo can change what runs.
             </span>
           </span>
         </label>
@@ -561,581 +625,42 @@ function InstallStepsEditor({
   );
 }
 
-interface CustomEnvRow {
-  key: string;
-  value: string;
-}
-
-function ToolSettings() {
-  const [tools, setTools] = useState<ToolResponse[]>([]);
-  const [providers, setProviders] = useState<ProviderResponse[]>([]);
-  const [credentials, setCredentials] = useState<CredentialStatus[]>([]);
-  const [editing, setEditing] = useState<Partial<ToolResponse> | null>(null);
-  const [isNew, setIsNew] = useState(false);
-  // Per-tool env_vars split into two views the operator interacts with:
-  //  - overrides: known FORWARDED_KEYS the operator can set per-tool
-  //  - custom: arbitrary extras (KEY/VALUE rows)
-  // We re-merge them into a single flat object on save.
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
-  const [customEnv, setCustomEnv] = useState<CustomEnvRow[]>([]);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [serverError, setServerError] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.getTools().then((r) => setTools(r.tools)).catch(() => {});
-    api.getProviders().then((r) => setProviders(r.providers)).catch(() => {});
-    api.getCredentials().then((r) => setCredentials(r.credentials)).catch(() => {});
-  }, []);
-
-  const forwardedKeys = credentials.filter((c) => c.scope === 'forwarded');
-
-  function loadEnvIntoForm(envVars: Record<string, string>) {
-    const forwarded = new Set(forwardedKeys.map((c) => c.name));
-    const o: Record<string, string> = {};
-    const c: CustomEnvRow[] = [];
-    for (const [k, v] of Object.entries(envVars ?? {})) {
-      if (forwarded.has(k)) o[k] = v;
-      else c.push({ key: k, value: v });
-    }
-    setOverrides(o);
-    setCustomEnv(c);
-  }
-
-  function startEdit(tool: ToolResponse) {
-    setEditing({ ...tool });
-    loadEnvIntoForm(tool.env_vars);
-    setErrors({});
-    setServerError(null);
-    setIsNew(false);
-  }
-
-  function startCreate() {
-    setEditing({
-      id: '',
-      display_name: '',
-      type: 'cli',
-      command_template: '',
-      env_vars: {},
-      config_file_path: null,
-      config_file_content: null,
-      // 48 h pre-fill — operators are expected to type their actual budget
-      // (typically 120 min for paid APIs, 2880 for free local servers).
-      // The field is required; null/blank fails save.
-      timeout_minutes: 2880,
-    });
-    setOverrides({});
-    setCustomEnv([]);
-    setErrors({});
-    setServerError(null);
-    setIsNew(true);
-  }
-
-  function applyTemplate(templateId: string) {
-    const tpl = TEMPLATES.find((t) => t.id === templateId);
-    if (!editing || !tpl) return;
-    setEditing({
-      ...editing,
-      config_file_path: tpl.path || null,
-      config_file_content: tpl.content || null,
-    });
-  }
-
-  function buildEnvVarsObject(): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(overrides)) {
-      if (v.trim() !== '') out[k] = v;
-    }
-    for (const row of customEnv) {
-      if (row.key.trim() === '') continue;
-      out[row.key] = row.value;
-    }
-    return out;
-  }
-
-  async function handleSave() {
-    if (!editing) return;
-    setServerError(null);
-    setErrors({});
-
-    const newErrors: Record<string, string> = {};
-    if (isNew && !editing.id) newErrors.id = 'This field is required';
-    if (!editing.display_name) newErrors.display_name = 'This field is required';
-    if (!editing.command_template) newErrors.command_template = 'This field is required';
-    if (
-      typeof editing.timeout_minutes !== 'number' ||
-      !Number.isInteger(editing.timeout_minutes) ||
-      editing.timeout_minutes < 1
-    ) {
-      newErrors.timeout_minutes = 'Required: a positive integer (minutes)';
-    }
-
-    const path = editing.config_file_path?.trim() ?? '';
-    const content = editing.config_file_content ?? '';
-    if (path && !content) {
-      newErrors.config_file = 'Config file path is set but content is empty';
-    }
-    if (!path && content) {
-      newErrors.config_file = 'Config file content is set but path is empty';
-    }
-    if (path.startsWith('/')) {
-      newErrors.config_file = 'Path must be relative (anchored under /repo)';
-    } else if (path.split(/[\\/]/).includes('..')) {
-      newErrors.config_file = 'Path must not contain ".."';
-    }
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
-      return;
-    }
-
-    const envVars = buildEnvVarsObject();
-    const payload = {
-      ...editing,
-      env_vars: envVars,
-      config_file_path: path || null,
-      config_file_content: content || null,
-    };
-    try {
-      if (isNew) {
-        const tool = await api.createTool(payload);
-        setTools((prev) => [...prev, tool]);
-      } else {
-        const tool = await api.updateTool(editing.id!, payload);
-        setTools((prev) => prev.map((t) => (t.id === tool.id ? tool : t)));
-      }
-      setEditing(null);
-      setIsNew(false);
-    } catch (e: any) {
-      setServerError(e.message || 'An unexpected error occurred');
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      {tools.length === 0 && !editing ? (
-        <p className="text-gray-500 text-sm">No agent tools configured</p>
-      ) : (
-        tools.map((tool) => (
-          <div
-            key={tool.id}
-            className="bg-gray-900 border border-gray-800 rounded p-4"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="font-medium">{tool.display_name}</span>
-                <span className="text-gray-500 text-sm ml-2">({tool.id})</span>
-                <span className="text-gray-500 text-sm ml-2">
-                  Type: {tool.type}
-                </span>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => startEdit(tool)}
-                  className="text-sm text-blue-400 hover:text-blue-300"
-                >
-                  Edit
-                </button>
-              </div>
-            </div>
-            {tool.command_template && (
-              <div className="mt-2 text-xs font-mono text-gray-400 truncate">
-                {tool.command_template}
-              </div>
-            )}
-            {Object.keys(tool.env_vars).length > 0 && (
-              <div className="mt-2 text-xs text-gray-500">
-                Env: {Object.entries(tool.env_vars).map(([k, v]) => `${k}=${v}`).join(', ')}
-              </div>
-            )}
-          </div>
-        ))
-      )}
-
-      <button
-        onClick={startCreate}
-        className="text-sm text-blue-400 hover:text-blue-300"
-      >
-        + Add tool
-      </button>
-
-      {editing && (
-        <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
-           <h3 className="font-medium">
-             {isNew ? 'Add Agent Tool' : `Edit ${editing.display_name}`}
-           </h3>
-           {serverError && (
-             <div className="bg-red-900/50 border border-red-700 text-red-200 px-3 py-2 rounded text-sm">
-               {serverError}
-             </div>
-           )}
-           <div className="grid grid-cols-2 gap-4">
-
-            <div>
-              <label className="block text-sm mb-1">ID</label>
-               <input
-                 value={editing.id ?? ''}
-                 onChange={(e) => {
-                   setEditing({ ...editing, id: e.target.value });
-                   if (errors.id) setErrors({ ...errors, id: '' });
-                 }}
-                 disabled={!isNew}
-                 placeholder="e.g. opencode-local"
-                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm disabled:text-gray-500 ${
-                   errors.id ? 'border-red-500' : 'border-gray-700'
-                 }`}
-               />
-               {errors.id && <p className="text-red-500 text-xs mt-1">{errors.id}</p>}
-
-            </div>
-            <div>
-              <label className="block text-sm mb-1">Display name</label>
-               <input
-                 value={editing.display_name ?? ''}
-                 onChange={(e) => {
-                   setEditing({ ...editing, display_name: e.target.value });
-                   if (errors.display_name) setErrors({ ...errors, display_name: '' });
-                 }}
-                 placeholder="e.g. OpenCode (Local LLM)"
-                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm ${
-                   errors.display_name ? 'border-red-500' : 'border-gray-700'
-                 }`}
-               />
-               {errors.display_name && <p className="text-red-500 text-xs mt-1">{errors.display_name}</p>}
-
-            </div>
-            <div>
-              <label className="block text-sm mb-1">Type</label>
-              <select
-                value={editing.type ?? 'cli'}
-                onChange={(e) => setEditing({ ...editing, type: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="cli">cli</option>
-                <option value="sdk">sdk</option>
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">
-                Timeout (minutes)
-                <span className="text-red-400 ml-0.5">*</span>
-                <span className="text-gray-500 font-normal"> — required; typical: 120 (2h) for paid APIs, 2880 (48h) for free local servers</span>
-              </label>
-              <input
-                type="number"
-                min={1}
-                value={editing.timeout_minutes ?? ''}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  setEditing({
-                    ...editing,
-                    timeout_minutes: Number.isFinite(n) && n > 0 ? n : (undefined as any),
-                  });
-                  if (errors.timeout_minutes) setErrors({ ...errors, timeout_minutes: '' });
-                }}
-                placeholder="2880"
-                className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm ${
-                  errors.timeout_minutes ? 'border-red-500' : 'border-gray-700'
-                }`}
-              />
-              {errors.timeout_minutes && (
-                <p className="text-red-500 text-xs mt-1">{errors.timeout_minutes}</p>
-              )}
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">
-                Provider (concurrency pool)
-                <span className="text-gray-500 font-normal"> — optional; tools sharing a provider serialise against its limit</span>
-              </label>
-              <select
-                value={editing.provider_id ?? ''}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    provider_id: e.target.value || null,
-                  })
-                }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="">No provider (counts only against host resource pool)</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.display_name} (limit {p.concurrency_limit})
-                  </option>
-                ))}
-              </select>
-              {providers.length === 0 && (
-                <p className="text-xs text-gray-500 mt-1">
-                  No providers configured yet. Add one under the Providers tab
-                  to pool this tool with others.
-                </p>
-              )}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm mb-1">Command template</label>
-               <input
-                 value={editing.command_template ?? ''}
-                 onChange={(e) => {
-                   setEditing({ ...editing, command_template: e.target.value });
-                   if (errors.command_template) setErrors({ ...errors, command_template: '' });
-                 }}
-                 placeholder='e.g. opencode run "$(cat {{PROMPT_FILE}})" --non-interactive'
-                 className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono ${
-                   errors.command_template ? 'border-red-500' : 'border-gray-700'
-                 }`}
-               />
-               {errors.command_template && <p className="text-red-500 text-xs mt-1">{errors.command_template}</p>}
-
-          </div>
-          {/* Provider credential overrides — per-tool overrides of FORWARDED_KEYS
-              defaults set in the orchestrator's .env. Stored in the DB. */}
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Provider credential overrides
-              <span className="text-gray-500 font-normal"> — leave blank to use the orchestrator's .env value</span>
-            </label>
-            <p className="text-xs text-yellow-500/80 mb-2">
-              Values typed here are stored in the database. Use only when this tool needs a different key/token than the orchestrator default.
-            </p>
-            {forwardedKeys.length === 0 && (
-              <p className="text-xs text-gray-500">
-                Loading credential list...
-              </p>
-            )}
-            {forwardedKeys.map((key) => (
-              <div key={key.name} className="flex items-center gap-2 mb-1.5">
-                <span className="font-mono text-xs text-gray-300 w-56 shrink-0">
-                  {key.name}
-                </span>
-                <input
-                  type="text"
-                  value={overrides[key.name] ?? ''}
-                  onChange={(e) =>
-                    setOverrides({ ...overrides, [key.name]: e.target.value })
-                  }
-                  placeholder={
-                    key.configured
-                      ? 'using .env value'
-                      : 'not set in .env — override required for this tool to use it'
-                  }
-                  className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
-                />
-              </div>
-            ))}
-          </div>
-
-          {/* Other env vars — arbitrary KEY=VALUE pairs forwarded into the
-              container in addition to the FORWARDED_KEYS defaults. */}
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Other environment variables
-              <span className="text-gray-500 font-normal"> — anything outside the standard provider keys</span>
-            </label>
-            {customEnv.map((row, i) => (
-              <div key={i} className="flex items-center gap-2 mb-1.5">
-                <input
-                  type="text"
-                  value={row.key}
-                  onChange={(e) => {
-                    const next = [...customEnv];
-                    next[i] = { ...next[i], key: e.target.value };
-                    setCustomEnv(next);
-                  }}
-                  placeholder="KEY"
-                  className="w-56 shrink-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
-                />
-                <input
-                  type="text"
-                  value={row.value}
-                  onChange={(e) => {
-                    const next = [...customEnv];
-                    next[i] = { ...next[i], value: e.target.value };
-                    setCustomEnv(next);
-                  }}
-                  placeholder="value"
-                  className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    setCustomEnv(customEnv.filter((_, idx) => idx !== i))
-                  }
-                  className="text-red-400 hover:text-red-300 px-2 text-sm"
-                  title="Remove row"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={() => setCustomEnv([...customEnv, { key: '', value: '' }])}
-              className="text-xs text-blue-400 hover:text-blue-300"
-            >
-              + Add row
-            </button>
-          </div>
-
-          {/* Config file — drop a file into /repo before the agent runs.
-              Used by tools (e.g. OpenCode) that read structured config from
-              a file rather than env vars. */}
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Config file
-              <span className="text-gray-500 font-normal"> — optional; written to /repo/&lt;path&gt; before the agent starts</span>
-            </label>
-            <div className="mb-2">
-              <select
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) applyTemplate(e.target.value);
-                  e.target.value = '';
-                }}
-                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
-              >
-                <option value="">Apply starter template…</option>
-                {TEMPLATES.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <input
-              type="text"
-              value={editing.config_file_path ?? ''}
-              onChange={(e) => {
-                setEditing({ ...editing, config_file_path: e.target.value });
-                if (errors.config_file) setErrors({ ...errors, config_file: '' });
-              }}
-              placeholder="e.g. opencode.json (relative to /repo)"
-              className={`w-full bg-gray-800 border rounded px-3 py-2 text-sm font-mono mb-2 ${
-                errors.config_file ? 'border-red-500' : 'border-gray-700'
-              }`}
-            />
-            <textarea
-              value={editing.config_file_content ?? ''}
-              onChange={(e) => {
-                setEditing({ ...editing, config_file_content: e.target.value });
-                if (errors.config_file) setErrors({ ...errors, config_file: '' });
-              }}
-              placeholder="(leave blank for no config file)"
-              className={`w-full bg-gray-800 border rounded px-3 py-2 text-xs font-mono min-h-[120px] ${
-                errors.config_file ? 'border-red-500' : 'border-gray-700'
-              }`}
-            />
-            {errors.config_file && (
-              <p className="text-red-500 text-xs mt-1">{errors.config_file}</p>
-            )}
-            {editing.config_file_path && editing.config_file_content && (
-              <p className="text-xs text-gray-500 mt-1">
-                Will write to <span className="font-mono">/repo/{editing.config_file_path}</span> inside the container.
-              </p>
-            )}
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={handleSave}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
-            >
-              Save
-            </button>
-            <button
-              onClick={() => { setEditing(null); setIsNew(false); }}
-              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CredentialSettings() {
-  const [credentials, setCredentials] = useState<CredentialStatus[]>([]);
-
-  useEffect(() => {
-    api.getCredentials().then((r) => setCredentials(r.credentials)).catch(() => {});
-  }, []);
-
-  const orchestrator = credentials.filter((c) => c.scope === 'orchestrator');
-  const forwarded = credentials.filter((c) => c.scope === 'forwarded');
-
-  function row(cred: CredentialStatus) {
-    return (
-      <div
-        key={cred.name}
-        className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3"
-      >
-        <span className="font-mono text-sm">{cred.name}</span>
-        {cred.configured ? (
-          <span className="text-green-400 text-sm">configured</span>
-        ) : (
-          <span className="text-red-400 text-sm">not set</span>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <p className="text-sm text-gray-400">
-        Credentials are loaded from environment variables. To update, modify
-        the orchestrator's <span className="font-mono">.env</span> file and
-        restart the orchestrator.
-      </p>
-
-      {credentials.length === 0 ? (
-        <p className="text-gray-500 text-sm">Loading...</p>
-      ) : (
-        <>
-          <div>
-            <h3 className="text-sm font-medium mb-2">
-              Orchestrator-only secrets
-              <span className="text-gray-500 font-normal text-xs ml-2">
-                used by the orchestrator process; never sent to agent containers
-              </span>
-            </h3>
-            <div className="space-y-2">{orchestrator.map(row)}</div>
-          </div>
-
-          <div>
-            <h3 className="text-sm font-medium mb-2">
-              Provider keys forwarded to agent containers
-              <span className="text-gray-500 font-normal text-xs ml-2">
-                set here as defaults; per-tool overrides live under Agent Tools
-              </span>
-            </h3>
-            <div className="space-y-2">{forwarded.map(row)}</div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
-// Providers — concurrency-pool management
+// Providers & Models tab
 // ---------------------------------------------------------------------------
 
 function ProviderSettings() {
   const [providers, setProviders] = useState<ProviderResponse[]>([]);
+  const [kinds, setKinds] = useState<ProviderKindSpec[]>([]);
   const [editing, setEditing] = useState<Partial<ProviderResponse> | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   function refresh(): void {
     api.getProviders().then((r) => setProviders(r.providers)).catch(() => {});
   }
-  useEffect(refresh, []);
+
+  useEffect(() => {
+    refresh();
+    api.getProviderKinds().then((r) => setKinds(r.kinds)).catch(() => {});
+  }, []);
 
   function startCreate(): void {
-    setEditing({ id: '', display_name: '', concurrency_limit: 1, notes: '' });
+    setEditing({
+      id: '',
+      display_name: '',
+      kind: 'anthropic',
+      concurrency_limit: 5,
+      base_url: null,
+      auth_token: null,
+      api_key_env_var: 'ANTHROPIC_API_KEY',
+      notes: null,
+    });
     setIsNew(true);
     setError(null);
   }
+
   function startEdit(p: ProviderResponse): void {
     setEditing({ ...p });
     setIsNew(false);
@@ -1151,7 +676,11 @@ function ProviderSettings() {
       } else {
         await api.updateProvider(editing.id!, {
           display_name: editing.display_name,
+          kind: editing.kind,
           concurrency_limit: editing.concurrency_limit,
+          base_url: editing.base_url,
+          auth_token: editing.auth_token,
+          api_key_env_var: editing.api_key_env_var,
           notes: editing.notes,
         });
       }
@@ -1159,7 +688,7 @@ function ProviderSettings() {
       setIsNew(false);
       refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(e instanceof Error ? e.message : 'Save failed');
     }
   }
 
@@ -1170,84 +699,43 @@ function ProviderSettings() {
       await api.deleteProvider(id);
       refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(e instanceof Error ? e.message : 'Delete failed');
     }
   }
+
+  const editingKindSpec = editing?.kind
+    ? kinds.find((k) => k.kind === editing.kind)
+    : undefined;
 
   return (
     <div className="space-y-4">
       <div className="text-sm text-gray-400">
-        Providers define concurrency pools for upstream LLM constraints. Tools
-        assigned to the same provider serialise against its{' '}
-        <span className="font-mono">concurrency_limit</span>; tools on different
-        providers run in parallel. All tasks (with or without a provider) also
-        consume from the host resource pool (memory + CPU) configured under
-        Global Settings. Set{' '}
-        <span className="font-mono">concurrency_limit: 0</span> to pause a
-        provider (its tools won't launch until raised).
+        Providers carry the connection identity for an LLM endpoint: kind, URL
+        (for self-hosted), and credential. Each provider has its own
+        concurrency limit. Cloud kinds (Anthropic, OpenAI…) are typically
+        singletons with the API key in the orchestrator's <span className="font-mono">.env</span>.
+        Self-hosted (Ollama) can have multiple instances with different URLs.
       </div>
 
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+          {error}
+        </div>
+      )}
+
       {providers.length === 0 && !editing ? (
-        <p className="text-gray-500 text-sm">
-          No providers configured. Tools with no assigned provider share the
-          global pool.
-        </p>
+        <p className="text-gray-500 text-sm">No providers configured.</p>
       ) : (
         providers.map((p) => (
-          <div
+          <ProviderRow
             key={p.id}
-            className="bg-gray-900 border border-gray-800 rounded p-4"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="font-medium">{p.display_name}</span>
-                <span className="text-gray-500 text-sm ml-2">({p.id})</span>
-              </div>
-              <div className="flex items-center gap-3 text-sm">
-                <span
-                  className={
-                    p.concurrency_limit === 0
-                      ? 'text-yellow-400'
-                      : p.active_slots >= p.concurrency_limit
-                        ? 'text-orange-400'
-                        : 'text-gray-300'
-                  }
-                  title={
-                    p.concurrency_limit === 0
-                      ? 'Paused — no tasks launch'
-                      : `${p.active_slots} active / ${p.concurrency_limit} limit`
-                  }
-                >
-                  {p.active_slots}/{p.concurrency_limit}
-                  {p.concurrency_limit === 0 ? ' (paused)' : ''}
-                </span>
-                <span className="text-gray-500">
-                  {p.tools_using} tool{p.tools_using === 1 ? '' : 's'}
-                </span>
-                <button
-                  onClick={() => startEdit(p)}
-                  className="text-blue-400 hover:text-blue-300"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDelete(p.id)}
-                  disabled={p.tools_using > 0}
-                  className="text-red-400 hover:text-red-300 disabled:text-gray-600 disabled:cursor-not-allowed"
-                  title={
-                    p.tools_using > 0
-                      ? 'Reassign the tools using this provider first'
-                      : 'Delete provider'
-                  }
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-            {p.notes && (
-              <div className="mt-2 text-xs text-gray-500">{p.notes}</div>
-            )}
-          </div>
+            provider={p}
+            kinds={kinds}
+            expanded={expandedId === p.id}
+            onExpand={() => setExpandedId(expandedId === p.id ? null : p.id)}
+            onEdit={() => startEdit(p)}
+            onDelete={() => handleDelete(p.id)}
+          />
         ))
       )}
 
@@ -1258,16 +746,11 @@ function ProviderSettings() {
         + Add provider
       </button>
 
-      {editing && (
+      {editing && editingKindSpec && (
         <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
           <h3 className="font-medium">
             {isNew ? 'Add Provider' : `Edit ${editing.display_name}`}
           </h3>
-          {error && (
-            <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
-              {error}
-            </div>
-          )}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm mb-1">ID</label>
@@ -1275,7 +758,7 @@ function ProviderSettings() {
                 value={editing.id ?? ''}
                 onChange={(e) => setEditing({ ...editing, id: e.target.value })}
                 disabled={!isNew}
-                placeholder="e.g. ollama-local"
+                placeholder="e.g. ollama-gpu"
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
               />
             </div>
@@ -1286,14 +769,44 @@ function ProviderSettings() {
                 onChange={(e) =>
                   setEditing({ ...editing, display_name: e.target.value })
                 }
-                placeholder="e.g. Ollama (local)"
+                placeholder="e.g. Ollama (GPU box)"
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">Kind</label>
+              <select
+                value={editing.kind ?? 'anthropic'}
+                onChange={(e) => {
+                  const newKind = e.target.value as ProviderKind;
+                  const spec = kinds.find((k) => k.kind === newKind);
+                  setEditing({
+                    ...editing,
+                    kind: newKind,
+                    // Reset auth fields to the new kind's defaults when
+                    // switching, so an operator doesn't accidentally save an
+                    // anthropic provider with an ollama URL.
+                    base_url: spec?.requires_base_url ? editing.base_url ?? '' : null,
+                    api_key_env_var: spec?.container_env_name ?? null,
+                    auth_token: null,
+                  });
+                }}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                {kinds.map((k) => (
+                  <option key={k.kind} value={k.kind}>
+                    {k.display_name}
+                  </option>
+                ))}
+              </select>
+              {editingKindSpec && (
+                <p className="text-xs text-gray-500 mt-1">{editingKindSpec.description}</p>
+              )}
             </div>
             <div>
               <label className="block text-sm mb-1">
                 Concurrency limit
-                <span className="text-gray-500 font-normal"> — 0 pauses all assigned tools</span>
+                <span className="text-gray-500 font-normal"> — 0 pauses all profiles using this provider</span>
               </label>
               <input
                 type="number"
@@ -1308,15 +821,74 @@ function ProviderSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
+            {editingKindSpec.requires_base_url && (
+              <div>
+                <label className="block text-sm mb-1">
+                  Base URL <span className="text-red-400">*</span>
+                </label>
+                <input
+                  value={editing.base_url ?? ''}
+                  onChange={(e) =>
+                    setEditing({ ...editing, base_url: e.target.value })
+                  }
+                  placeholder="http://192.168.1.10:11434"
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                />
+              </div>
+            )}
+            {editingKindSpec.container_env_name && (
+              <div className="col-span-2">
+                <label className="block text-sm mb-1">
+                  API key env var
+                  <span className="text-gray-500 font-normal">
+                    {' '}— name of the env var on the orchestrator's host that holds the API key.
+                    The orchestrator reads it at launch and exports the value into the agent
+                    container as <span className="font-mono">{editingKindSpec.container_env_name}</span>.
+                  </span>
+                </label>
+                <input
+                  value={editing.api_key_env_var ?? ''}
+                  onChange={(e) =>
+                    setEditing({
+                      ...editing,
+                      api_key_env_var: e.target.value || null,
+                    })
+                  }
+                  placeholder={editingKindSpec.container_env_name}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+                />
+              </div>
+            )}
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">
+                Auth token (inline)
+                <span className="text-gray-500 font-normal">
+                  {' '}— optional. For self-hosted servers with bearer auth, OR
+                  for cloud kinds when you want to multi-instance without using
+                  the env-var pointer above. Stored in the database as plaintext.
+                </span>
+              </label>
+              <input
+                type="password"
+                value={editing.auth_token ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    auth_token: e.target.value || null,
+                  })
+                }
+                placeholder={editingKindSpec.auth_optional ? '(optional)' : ''}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+              />
+            </div>
           </div>
           <div>
             <label className="block text-sm mb-1">Notes (optional)</label>
             <textarea
               value={editing.notes ?? ''}
               onChange={(e) =>
-                setEditing({ ...editing, notes: e.target.value })
+                setEditing({ ...editing, notes: e.target.value || null })
               }
-              placeholder="e.g. Ollama 0.11 on the GPU box, OLLAMA_NUM_PARALLEL=1"
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm min-h-[60px]"
             />
           </div>
@@ -1339,6 +911,645 @@ function ProviderSettings() {
             </button>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderRow({
+  provider,
+  kinds,
+  expanded,
+  onExpand,
+  onEdit,
+  onDelete,
+}: {
+  provider: ProviderResponse;
+  kinds: ProviderKindSpec[];
+  expanded: boolean;
+  onExpand: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const kindSpec = kinds.find((k) => k.kind === provider.kind);
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="font-medium">{provider.display_name}</span>
+          <span className="text-gray-500 text-sm ml-2">({provider.id})</span>
+          <span className="text-gray-500 text-sm ml-3">
+            kind: {kindSpec?.display_name ?? provider.kind}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-sm">
+          <span
+            className={
+              provider.concurrency_limit === 0
+                ? 'text-yellow-400'
+                : provider.active_slots >= provider.concurrency_limit
+                  ? 'text-orange-400'
+                  : 'text-gray-300'
+            }
+            title={
+              provider.concurrency_limit === 0
+                ? 'Paused — no tasks launch'
+                : `${provider.active_slots} active / ${provider.concurrency_limit} limit`
+            }
+          >
+            {provider.active_slots}/{provider.concurrency_limit}
+            {provider.concurrency_limit === 0 ? ' (paused)' : ''}
+          </span>
+          <span className="text-gray-500">
+            {provider.models_count} model{provider.models_count === 1 ? '' : 's'}
+          </span>
+          <button
+            onClick={onExpand}
+            className="text-blue-400 hover:text-blue-300"
+          >
+            {expanded ? 'Collapse' : 'Models'}
+          </button>
+          <button
+            onClick={onEdit}
+            className="text-blue-400 hover:text-blue-300"
+          >
+            Edit
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={provider.models_count > 0}
+            className="text-red-400 hover:text-red-300 disabled:text-gray-600 disabled:cursor-not-allowed"
+            title={
+              provider.models_count > 0
+                ? 'Delete or reassign the provider\'s models first'
+                : 'Delete provider'
+            }
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+      {provider.notes && (
+        <div className="mt-2 text-xs text-gray-500">{provider.notes}</div>
+      )}
+      {expanded && <ProviderModels providerId={provider.id} />}
+    </div>
+  );
+}
+
+function ProviderModels({ providerId }: { providerId: string }) {
+  const [models, setModels] = useState<ModelResponse[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [draftId, setDraftId] = useState('');
+  const [draftName, setDraftName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  function refresh(): void {
+    api
+      .getProviderModels(providerId)
+      .then((r) => setModels(r.models))
+      .catch(() => {});
+  }
+  useEffect(refresh, [providerId]);
+
+  async function handleAdd(): Promise<void> {
+    setError(null);
+    try {
+      await api.createModel(providerId, {
+        model_id: draftId.trim(),
+        display_name: draftName.trim(),
+      });
+      setDraftId('');
+      setDraftName('');
+      setAdding(false);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Add failed');
+    }
+  }
+
+  async function handleDelete(pk: number): Promise<void> {
+    if (!window.confirm('Delete this model?')) return;
+    setError(null);
+    try {
+      await api.deleteModel(pk);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed');
+    }
+  }
+
+  return (
+    <div className="mt-4 border-t border-gray-800 pt-4">
+      <h4 className="text-sm font-medium mb-2">Models</h4>
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-200 text-xs rounded px-2 py-1 mb-2">
+          {error}
+        </div>
+      )}
+      {models.length === 0 ? (
+        <p className="text-xs text-gray-500">No models configured.</p>
+      ) : (
+        <ul className="space-y-1 mb-2">
+          {models.map((m) => (
+            <li
+              key={m.id}
+              className="flex items-center justify-between bg-gray-800 rounded px-3 py-1.5 text-xs"
+            >
+              <span>
+                <span className="font-mono">{m.model_id}</span>
+                <span className="text-gray-500 ml-2">{m.display_name}</span>
+              </span>
+              <button
+                onClick={() => handleDelete(m.id)}
+                className="text-red-400 hover:text-red-300"
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <div className="flex items-center gap-2 mt-2">
+          <input
+            value={draftId}
+            onChange={(e) => setDraftId(e.target.value)}
+            placeholder="model_id (e.g. claude-sonnet-4-6)"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
+          />
+          <input
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            placeholder="display name"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+          />
+          <button
+            onClick={handleAdd}
+            disabled={!draftId.trim() || !draftName.trim()}
+            className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-3 py-1 rounded text-xs"
+          >
+            Add
+          </button>
+          <button
+            onClick={() => {
+              setAdding(false);
+              setDraftId('');
+              setDraftName('');
+              setError(null);
+            }}
+            className="text-gray-400 hover:text-gray-200 px-2 text-xs"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          className="text-xs text-blue-400 hover:text-blue-300"
+        >
+          + Add model
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Agent Profiles tab
+// ---------------------------------------------------------------------------
+
+function AgentProfileSettings() {
+  const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
+  const [harnesses, setHarnesses] = useState<HarnessSpec[]>([]);
+  const [providers, setProviders] = useState<ProviderResponse[]>([]);
+  const [allModels, setAllModels] = useState<Map<string, ModelResponse[]>>(new Map());
+  const [editing, setEditing] = useState<Partial<AgentProfileResponse> | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function refresh(): void {
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
+  }
+
+  useEffect(() => {
+    refresh();
+    api.getHarnesses().then((r) => setHarnesses(r.harnesses)).catch(() => {});
+    api
+      .getProviders()
+      .then((r) => {
+        setProviders(r.providers);
+        // Pre-fetch each provider's models so the model picker is responsive.
+        // Use allSettled so a 404 on a single provider (e.g. just deleted)
+        // doesn't blank out the whole map — surviving entries still
+        // populate the dropdown.
+        Promise.allSettled(
+          r.providers.map((p) =>
+            api.getProviderModels(p.id).then((m) => [p.id, m.models] as const)
+          )
+        ).then((results) => {
+          const entries = results
+            .filter(
+              (r): r is PromiseFulfilledResult<readonly [string, ModelResponse[]]> =>
+                r.status === 'fulfilled'
+            )
+            .map((r) => r.value);
+          setAllModels(new Map(entries));
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  function startCreate(): void {
+    setEditing({
+      id: '',
+      display_name: '',
+      harness_id: 'claude-sdk',
+      model_pk: 0,
+      config_json: {},
+      timeout_minutes: 120,
+    });
+    setIsNew(true);
+    setError(null);
+  }
+
+  function startEdit(p: AgentProfileResponse): void {
+    setEditing({ ...p });
+    setIsNew(false);
+    setError(null);
+  }
+
+  async function handleSave(): Promise<void> {
+    if (!editing) return;
+    setError(null);
+    try {
+      if (isNew) {
+        await api.createAgentProfile(editing);
+      } else {
+        await api.updateAgentProfile(editing.id!, {
+          display_name: editing.display_name,
+          harness_id: editing.harness_id,
+          model_pk: editing.model_pk,
+          config_json: editing.config_json,
+          timeout_minutes: editing.timeout_minutes,
+        });
+      }
+      setEditing(null);
+      setIsNew(false);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    }
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    if (!window.confirm(`Delete profile ${id}?`)) return;
+    setError(null);
+    try {
+      await api.deleteAgentProfile(id);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed');
+    }
+  }
+
+  const editingHarness = editing?.harness_id
+    ? harnesses.find((h) => h.id === editing.harness_id)
+    : undefined;
+
+  // Build the model dropdown filtered by the chosen harness's supported
+  // provider kinds. Show all models from supported providers; the harness
+  // throws at launch time if the operator picks an unsupported pairing
+  // (no save-time validation per E3 — but a hint helps).
+  const modelOptions = providers
+    .filter((p) =>
+      editingHarness ? editingHarness.supported_provider_kinds.includes(p.kind) : true
+    )
+    .flatMap((p) => {
+      const models = allModels.get(p.id) ?? [];
+      return models.map((m) => ({ provider: p, model: m }));
+    });
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-gray-400">
+        An agent profile pairs a harness (Claude SDK, Claude Code, OpenCode, Pi)
+        with a specific model from one of your providers, plus any harness-
+        specific configuration. Tasks reference profiles either directly
+        (per-task override), or inherit from their repo's default, or fall
+        back to the global default under <em>Global Settings</em>.
+      </div>
+
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {profiles.length === 0 && !editing ? (
+        <p className="text-gray-500 text-sm">
+          No agent profiles configured. Add one below.
+        </p>
+      ) : (
+        profiles.map((p) => {
+          const harness = harnesses.find((h) => h.id === p.harness_id);
+          return (
+            <div
+              key={p.id}
+              className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
+            >
+              <div>
+                <span className="font-medium">{p.display_name}</span>
+                <span className="text-gray-500 text-sm ml-2">({p.id})</span>
+                <div className="text-gray-500 text-xs mt-1">
+                  {harness?.display_name ?? p.harness_id} ·{' '}
+                  <span className="font-mono">
+                    {p.provider_id}/{p.model_id}
+                  </span>{' '}
+                  · timeout {p.timeout_minutes}m · {p.repos_using} repo
+                  {p.repos_using === 1 ? '' : 's'}, {p.tasks_using} task
+                  {p.tasks_using === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
+                <button
+                  onClick={() => startEdit(p)}
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDelete(p.id)}
+                  className="text-red-400 hover:text-red-300"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          );
+        })
+      )}
+
+      <button
+        onClick={startCreate}
+        className="text-sm text-blue-400 hover:text-blue-300"
+      >
+        + Add agent profile
+      </button>
+
+      {editing && editingHarness && (
+        <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
+          <h3 className="font-medium">
+            {isNew ? 'Add Agent Profile' : `Edit ${editing.display_name}`}
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm mb-1">ID</label>
+              <input
+                value={editing.id ?? ''}
+                onChange={(e) => setEditing({ ...editing, id: e.target.value })}
+                disabled={!isNew}
+                placeholder="e.g. claude-sdk-sonnet"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Display name</label>
+              <input
+                value={editing.display_name ?? ''}
+                onChange={(e) =>
+                  setEditing({ ...editing, display_name: e.target.value })
+                }
+                placeholder="e.g. Claude SDK + Sonnet"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Harness</label>
+              <select
+                value={editing.harness_id ?? 'claude-sdk'}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    harness_id: e.target.value as HarnessId,
+                    config_json: {}, // reset knobs when harness changes
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                {harnesses.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.display_name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Supports kinds: {editingHarness.supported_provider_kinds.join(', ')}
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm mb-1">
+                Timeout (minutes) <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={editing.timeout_minutes ?? 2880}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    timeout_minutes: parseInt(e.target.value, 10) || 1,
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">
+                Model
+                <span className="text-gray-500 font-normal">
+                  {' '}— filtered to providers compatible with this harness
+                </span>
+              </label>
+              {modelOptions.length === 0 ? (
+                <p className="text-xs text-yellow-400">
+                  No models available for harness '{editingHarness.id}'. Add
+                  models to a {editingHarness.supported_provider_kinds.join(' / ')}{' '}
+                  provider under <em>Providers & Models</em>.
+                </p>
+              ) : (
+                <select
+                  value={editing.model_pk ?? 0}
+                  onChange={(e) =>
+                    setEditing({
+                      ...editing,
+                      model_pk: parseInt(e.target.value, 10),
+                    })
+                  }
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                >
+                  <option value={0}>Select model…</option>
+                  {modelOptions.map(({ provider, model }) => (
+                    <option key={model.id} value={model.id}>
+                      {provider.display_name} — {model.display_name} (
+                      <span>{model.model_id}</span>)
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
+
+          <HarnessConfigForm
+            harnessId={editingHarness.id}
+            config={editing.config_json ?? {}}
+            onChange={(cfg) => setEditing({ ...editing, config_json: cfg })}
+          />
+
+          <div className="flex gap-3">
+            <button
+              onClick={handleSave}
+              disabled={!editing.model_pk}
+              className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-4 py-2 rounded text-sm"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => {
+                setEditing(null);
+                setIsNew(false);
+                setError(null);
+              }}
+              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Per-harness config form. Each harness has its own component matched
+ *  by id. Empty for v1 harnesses with no operator-tunable knobs. */
+function HarnessConfigForm({
+  harnessId,
+  config,
+  onChange,
+}: {
+  harnessId: HarnessId;
+  config: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
+}) {
+  if (harnessId === 'claude-code') {
+    const maxTurns = typeof config.max_turns === 'number' ? config.max_turns : 100;
+    return (
+      <div>
+        <label className="block text-sm mb-1">
+          max_turns
+          <span className="text-gray-500 font-normal">
+            {' '}— passed to <span className="font-mono">claude --max-turns N</span>
+          </span>
+        </label>
+        <input
+          type="number"
+          min={1}
+          value={maxTurns}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            onChange({ ...config, max_turns: Number.isFinite(n) && n > 0 ? n : 100 });
+          }}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+        />
+      </div>
+    );
+  }
+  // claude-sdk, opencode, pi: no operator-tunable knobs in v1.
+  return (
+    <p className="text-xs text-gray-500">
+      No harness-specific configuration for {harnessId}.
+    </p>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Credentials tab
+// ---------------------------------------------------------------------------
+
+function CredentialSettings() {
+  const [credentials, setCredentials] = useState<CredentialStatus[]>([]);
+
+  useEffect(() => {
+    api.getCredentials().then((r) => setCredentials(r.credentials)).catch(() => {});
+  }, []);
+
+  const orchestrator = credentials.filter((c) => c.scope === 'orchestrator');
+  const provider = credentials.filter((c) => c.scope === 'provider');
+
+  function row(cred: CredentialStatus) {
+    return (
+      <div
+        key={`${cred.scope}-${cred.name}-${cred.provider_id ?? ''}`}
+        className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3"
+      >
+        <div>
+          <span className="font-mono text-sm">{cred.name}</span>
+          {cred.provider_id && (
+            <span className="text-gray-500 text-xs ml-2">
+              for provider <span className="font-mono">{cred.provider_id}</span>
+            </span>
+          )}
+        </div>
+        {cred.configured ? (
+          <span className="text-green-400 text-sm">configured</span>
+        ) : (
+          <span className="text-red-400 text-sm">not set</span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <p className="text-sm text-gray-400">
+        Credentials are loaded from environment variables on the orchestrator
+        host. To update, modify the orchestrator's <span className="font-mono">.env</span>{' '}
+        file and restart. Provider credentials can also be configured inline
+        on a per-provider basis under <em>Providers & Models</em> (stored in
+        the database rather than the env).
+      </p>
+
+      {credentials.length === 0 ? (
+        <p className="text-gray-500 text-sm">Loading...</p>
+      ) : (
+        <>
+          <div>
+            <h3 className="text-sm font-medium mb-2">
+              Orchestrator-only secrets
+              <span className="text-gray-500 font-normal text-xs ml-2">
+                used by the orchestrator process; never sent to agent containers
+              </span>
+            </h3>
+            <div className="space-y-2">{orchestrator.map(row)}</div>
+          </div>
+
+          <div>
+            <h3 className="text-sm font-medium mb-2">
+              Provider keys forwarded to agent containers
+              <span className="text-gray-500 font-normal text-xs ml-2">
+                derived from each provider's <span className="font-mono">api_key_env_var</span>
+              </span>
+            </h3>
+            {provider.length === 0 ? (
+              <p className="text-gray-500 text-sm">
+                No providers reference an env-var pointer.
+              </p>
+            ) : (
+              <div className="space-y-2">{provider.map(row)}</div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
