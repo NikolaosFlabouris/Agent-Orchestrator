@@ -145,22 +145,6 @@ function createTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
 
-    -- agent_tools is the legacy table replaced by providers + models +
-    -- agent_profiles in schema v21. Kept in createTables so the v3/v4/v9
-    -- migration ALTERs run cleanly on fresh installs (the migration chain
-    -- runs even for first-run); v21 then drops it.
-    CREATE TABLE IF NOT EXISTS agent_tools (
-      id TEXT PRIMARY KEY,
-      display_name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      command_template TEXT,
-      env_vars TEXT NOT NULL DEFAULT '{}',
-      config_file_path TEXT,
-      config_file_content TEXT,
-      timeout_minutes INTEGER NOT NULL DEFAULT 2880,
-      provider_id TEXT
-    );
-
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
@@ -245,6 +229,17 @@ function createTables(db: Database.Database): void {
 // ---------------------------------------------------------------------------
 // Migrations
 // ---------------------------------------------------------------------------
+//
+// The schema is the cumulative result of an earlier 21-step migration chain
+// that the orchestrator no longer carries. createTables produces the final
+// shape directly; first-run seeding (settings + bootstrap providers/models/
+// profile) runs once when the schema_version row is missing.
+//
+// If/when a future schema change is needed, add a `version < N` block here
+// and bump CURRENT_SCHEMA_VERSION. The orchestrator refuses to boot against
+// a DB whose schema_version is newer than CURRENT_SCHEMA_VERSION (caller
+// downgraded) or older than the lowest supported version (no migration
+// path).
 
 function runMigrations(db: Database.Database): void {
   const row = db
@@ -253,614 +248,43 @@ function runMigrations(db: Database.Database): void {
   const version = row ? parseInt(row.value, 10) : 0;
   _isFirstRun = version === 0;
 
-  if (version < 1) {
+  if (_isFirstRun) {
+    // Fresh install: createTables already produced the v21 shape. Seed
+    // settings + bootstrap providers/models/profile. seedBootstrapProfile
+    // throws if its own invariants don't hold, which leaves the DB in a
+    // half-initialised state — the next boot retries cleanly because
+    // schema_version still hasn't been recorded.
     seedDefaultSettings(db);
+    seedBootstrapProfile(db);
     db.prepare(
-      "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', '1')"
-    ).run();
+      "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
+    ).run(String(CURRENT_SCHEMA_VERSION));
+    return;
   }
 
-  if (version < 2) {
-    // Add task_events table (created by CREATE TABLE IF NOT EXISTS above for new installs,
-    // this migration handles existing databases upgrading from version 1)
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS task_events (
-        id INTEGER PRIMARY KEY,
-        task_id INTEGER NOT NULL REFERENCES tasks(id),
-        event_type TEXT NOT NULL,
-        message TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now'))
-      );
-      CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
-    `);
-    db.prepare("UPDATE settings SET value = '2' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 3) {
-    // Per-tool timeout override. Null means fall through to repo/global.
-    // Useful for raising the limit on free/local tools (e.g. OpenCode + Ollama
-    // on a 30B parameter model) without loosening API-backed tool budgets.
-    const cols = db
-      .prepare("PRAGMA table_info(agent_tools)")
-      .all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'timeout_minutes')) {
-      db.exec('ALTER TABLE agent_tools ADD COLUMN timeout_minutes INTEGER');
-    }
-    db.prepare("UPDATE settings SET value = '3' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 4) {
-    // Provider-scoped concurrency pools. A provider represents an upstream
-    // resource (e.g. a specific Ollama server, an Anthropic API key's rate-
-    // limit bucket) and carries a concurrency_limit. Tools assigned to the
-    // same provider serialise; tools on different providers run in parallel.
-    // Tools with NULL provider_id are not subject to provider-pool gating —
-    // only the host resource pool gates them (preserves pre-v4 semantics for
-    // existing installs — no tools are auto-assigned; the user opts in by
-    // creating providers in the UI).
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS providers (
-        id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
-        notes TEXT
-      );
-    `);
-    const toolCols = db
-      .prepare("PRAGMA table_info(agent_tools)")
-      .all() as Array<{ name: string }>;
-    if (!toolCols.some((c) => c.name === 'provider_id')) {
-      db.exec(
-        'ALTER TABLE agent_tools ADD COLUMN provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL'
-      );
-    }
-    db.prepare("UPDATE settings SET value = '4' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 5) {
-    // Reserved — used by an earlier version of the orchestrator to rewrite
-    // legacy `${TASK_PROMPT}` agent_tools.command_template entries to the
-    // current `$(cat {{PROMPT_FILE}})` placeholder form. Removed once all
-    // active installs were several versions past it; resurrecting an
-    // install older than v5 would launch agents with empty prompts and
-    // need a manual re-seed of agent_tools. Bumping schema_version keeps
-    // the version sequence intact.
-    db.prepare("UPDATE settings SET value = '5' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 6) {
-    // Step-checkpoint table for idempotent orchestrator operations.
-    // Both new installs (via createTables) and existing databases go through
-    // this path — CREATE TABLE IF NOT EXISTS makes it safe to run twice.
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS task_steps (
-        id INTEGER PRIMARY KEY,
-        task_id INTEGER NOT NULL REFERENCES tasks(id),
-        attempt_number INTEGER NOT NULL,
-        step_name TEXT NOT NULL,
-        result_json TEXT NOT NULL,
-        completed_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(task_id, attempt_number, step_name)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_task_steps_task_attempt
-        ON task_steps(task_id, attempt_number);
-    `);
-    db.prepare("UPDATE settings SET value = '6' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 7) {
-    // Drop repos.model and repos.max_turns. These were per-repo overrides of
-    // settings.default_model / settings.default_max_turns, but they only ever
-    // took effect for SDK tools — CLI tools hardcode model/max-turns inside
-    // their command_template. The repo-level layer was a silent footgun on
-    // CLI tools (the override appeared to do nothing) and unused enough on
-    // SDK tools that the per-task override + global default cover the real
-    // workflow. Dropping leaves resolution as: task.model > default_model,
-    // and max_turns > default_max_turns (no repo layer).
-    const cols = db
-      .prepare("PRAGMA table_info(repos)")
-      .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'model')) {
-      db.exec('ALTER TABLE repos DROP COLUMN model');
-    }
-    if (cols.some((c) => c.name === 'max_turns')) {
-      db.exec('ALTER TABLE repos DROP COLUMN max_turns');
-    }
-    db.prepare("UPDATE settings SET value = '7' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 8) {
-    // Drop repos.image_type. The previous orchestrator-agent-{node,python,go}
-    // hierarchy is collapsed into a single orchestrator-agent:latest image
-    // that ships all three toolchains, so picking a language image per-repo
-    // is no longer meaningful. Cache buckets for all three languages are
-    // always mounted (see docker.ts); empty buckets cost ~0 bytes.
-    const cols = db
-      .prepare("PRAGMA table_info(repos)")
-      .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'image_type')) {
-      db.exec('ALTER TABLE repos DROP COLUMN image_type');
-    }
-    db.prepare("UPDATE settings SET value = '8' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 9) {
-    // Drop agent_tools.auth_type and agent_tools.auth_config. The orchestrator
-    // now forwards a fixed set of well-known LLM provider keys to every agent
-    // container at launch (see credentials.ts). Tools no longer declare their
-    // own credentials — the underlying CLI/SDK picks up whichever forwarded
-    // key it needs, and unused keys sit harmlessly. This removes a
-    // per-tool/per-credential plumbing layer that didn't earn its complexity.
-    const cols = db
-      .prepare("PRAGMA table_info(agent_tools)")
-      .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'auth_type')) {
-      db.exec('ALTER TABLE agent_tools DROP COLUMN auth_type');
-    }
-    if (cols.some((c) => c.name === 'auth_config')) {
-      db.exec('ALTER TABLE agent_tools DROP COLUMN auth_config');
-    }
-    db.prepare("UPDATE settings SET value = '9' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 10) {
-    // Split agent_tools.env_vars dual-purpose JSON. Until v10, env_vars
-    // either held a flat key/value map (forwarded as container env vars) OR
-    // a config-shaped object (top-level provider/permission/agent key) that
-    // the orchestrator silently rerouted into /repo/opencode.json. This
-    // migration adds dedicated config_file_path and config_file_content
-    // columns and moves any config-shaped env_vars into them, leaving
-    // env_vars as flat-only (key/value overrides for FORWARDED_KEYS plus
-    // arbitrary extras). Existing OpenCode-style data lands at
-    // path='opencode.json' to preserve runtime behaviour.
-    const cols = db
-      .prepare("PRAGMA table_info(agent_tools)")
-      .all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'config_file_path')) {
-      db.exec('ALTER TABLE agent_tools ADD COLUMN config_file_path TEXT');
-    }
-    if (!cols.some((c) => c.name === 'config_file_content')) {
-      db.exec('ALTER TABLE agent_tools ADD COLUMN config_file_content TEXT');
-    }
-
-    const tools = db
-      .prepare('SELECT id, env_vars FROM agent_tools')
-      .all() as Array<{ id: string; env_vars: string }>;
-    const updateStmt = db.prepare(
-      'UPDATE agent_tools SET config_file_path = ?, config_file_content = ?, env_vars = ? WHERE id = ?'
+  if (version > CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `Database schema_version ${version} is newer than this orchestrator ` +
+      `supports (max ${CURRENT_SCHEMA_VERSION}). The orchestrator was downgraded? ` +
+      `Restore from a backup taken with the matching binary.`
     );
-    for (const tool of tools) {
-      try {
-        const parsed = JSON.parse(tool.env_vars || '{}');
-        if (
-          parsed &&
-          typeof parsed === 'object' &&
-          ('provider' in parsed ||
-            'permission' in parsed ||
-            'agent' in parsed)
-        ) {
-          updateStmt.run(
-            'opencode.json',
-            JSON.stringify(parsed, null, 2),
-            '{}',
-            tool.id
-          );
-        }
-      } catch {
-        // Invalid JSON in env_vars — leave as-is.
-      }
-    }
-
-    db.prepare("UPDATE settings SET value = '10' WHERE key = 'schema_version'").run();
   }
 
-  if (version < 11) {
-    // Drop poll_interval_seconds and default_max_attempts from settings.
-    // Both moved to compile-time constants in constants.ts:
-    //  - POLL_INTERVAL_SECONDS: a fallback poller cadence has no real per-
-    //    install tuning case (60s is the right tradeoff between recovery
-    //    latency and Forgejo API load).
-    //  - DEFAULT_MAX_ATTEMPTS: the per-task override (settable at create
-    //    time and editable on the Task Detail page) covers the legitimate
-    //    customisation case; a global default of 7 is hardcoded.
-    db.prepare(
-      "DELETE FROM settings WHERE key IN ('poll_interval_seconds', 'default_max_attempts')"
-    ).run();
-    db.prepare("UPDATE settings SET value = '11' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 12) {
-    // Drop workspace_retention_days from settings — moved to the
-    // WORKSPACE_RETENTION_DAYS constant. The cleanup pass also dropped its
-    // "merged workspaces live forever" carve-out and gained an orphan-
-    // detection sweep (workspaces with no task row); both apply uniformly
-    // at the constant's retention. No real per-install tuning case for the
-    // retention window.
-    db.prepare(
-      "DELETE FROM settings WHERE key = 'workspace_retention_days'"
-    ).run();
-    db.prepare("UPDATE settings SET value = '12' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 13) {
-    // Drop disk_threshold_bytes from settings. The "disk usage exceeds
-    // threshold" alert it drove was at the wrong abstraction layer (fixed
-    // bytes against a specific subdir, not actual filesystem free space)
-    // and largely redundant with OS-level disk monitoring. The dashboard
-    // still shows /workspaces and /caches sizes for at-a-glance visibility;
-    // the warning alert and its threshold are gone.
-    db.prepare(
-      "DELETE FROM settings WHERE key = 'disk_threshold_bytes'"
-    ).run();
-    db.prepare("UPDATE settings SET value = '13' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 14) {
-    // Drop all cost-tracking. The pricing-driven cost calculation was based
-    // on `attempts.input_tokens / output_tokens` and the `model_pricing`
-    // setting, but the harness layer has always recorded `meta.json.model`
-    // (the user's intended alias, e.g. 'sonnet') rather than the actual
-    // model id reported by the agent's stream — so the pricing lookup
-    // missed every time and `cost_usd` was always 0 on default installs.
-    // Rather than fix the bug + maintain a pricing table that needs hand-
-    // updating whenever Anthropic publishes new prices, we drop the whole
-    // feature: dashboard daily cost, per-attempt cost, the pricing setting
-    // itself, and the underlying token columns.
-    const cols = db
-      .prepare("PRAGMA table_info(attempts)")
-      .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'cost_usd')) {
-      db.exec('ALTER TABLE attempts DROP COLUMN cost_usd');
-    }
-    if (cols.some((c) => c.name === 'input_tokens')) {
-      db.exec('ALTER TABLE attempts DROP COLUMN input_tokens');
-    }
-    if (cols.some((c) => c.name === 'output_tokens')) {
-      db.exec('ALTER TABLE attempts DROP COLUMN output_tokens');
-    }
-    db.prepare("DELETE FROM settings WHERE key = 'model_pricing'").run();
-    db.prepare("UPDATE settings SET value = '14' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 15) {
-    // Move merge_strategy from a global setting to a per-repo column. Backfill
-    // existing repos with the prior global value (or 'squash' if unset). At
-    // merge time, the orchestrator queries the repo's Forgejo-side allowed
-    // strategies and resolves an effective value (see merge-strategy.ts) —
-    // so the per-repo preference is honoured only when the repo allows it.
-    const cols = db
-      .prepare("PRAGMA table_info(repos)")
-      .all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'merge_strategy')) {
-      // DEFAULT 'squash' matches the app-level preference. Existing installs
-      // that explicitly set the prior global value get backfilled below —
-      // only repos with no inherited preference take the new default.
-      db.exec(
-        "ALTER TABLE repos ADD COLUMN merge_strategy TEXT NOT NULL DEFAULT 'squash'"
-      );
-    }
-    const globalRow = db
-      .prepare("SELECT value FROM settings WHERE key = 'merge_strategy'")
-      .get() as { value: string } | undefined;
-    if (globalRow && ['squash', 'merge', 'rebase'].includes(globalRow.value)) {
-      db.prepare('UPDATE repos SET merge_strategy = ?').run(globalRow.value);
-    }
-    db.prepare("DELETE FROM settings WHERE key = 'merge_strategy'").run();
-    db.prepare("UPDATE settings SET value = '15' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 16) {
-    // Drop default_max_turns. CLI tools that want a per-turn cap encode it
-    // in their command_template (e.g. claude-code's `--max-turns 100`); the
-    // SDK harness no longer reads a turn cap from meta.json. The lifetime
-    // safety net is `agent_timeout_minutes` (per-tool override available),
-    // which kills the container at the wall-clock deadline regardless of
-    // turn count. Removing this collapses one knob with no real per-install
-    // tuning case.
-    db.prepare("DELETE FROM settings WHERE key = 'default_max_turns'").run();
-    db.prepare("UPDATE settings SET value = '16' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 17) {
-    // Collapse the timeout-resolution chain. Until v17:
-    //   tool.timeout_minutes ?? repo.timeout_minutes ?? settings.agent_timeout_minutes ?? 30
-    // From v17: tool.timeout_minutes (NOT NULL).
-    //
-    // Drop:
-    //   - settings.agent_timeout_minutes (global)
-    //   - repos.timeout_minutes (per-repo override)
-    // Backfill any null tool.timeout_minutes with 2880 (48h, the form
-    // pre-fill default), then enforce NOT NULL via a recreate-table dance
-    // since SQLite ALTER TABLE can't add NOT NULL to an existing column.
-    db.prepare(
-      "UPDATE agent_tools SET timeout_minutes = 2880 WHERE timeout_minutes IS NULL"
-    ).run();
-
-    // SQLite limitation: can't promote an existing nullable column to NOT
-    // NULL. Recreate-table dance: new table with the constraint, copy data,
-    // swap. The other columns must match the v16 shape exactly.
-    db.exec(`
-      CREATE TABLE agent_tools_v17 (
-        id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        type TEXT NOT NULL,
-        command_template TEXT,
-        env_vars TEXT NOT NULL DEFAULT '{}',
-        config_file_path TEXT,
-        config_file_content TEXT,
-        timeout_minutes INTEGER NOT NULL DEFAULT 2880,
-        provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
-      );
-      INSERT INTO agent_tools_v17
-        SELECT id, display_name, type, command_template, env_vars,
-               config_file_path, config_file_content,
-               timeout_minutes, provider_id
-        FROM agent_tools;
-      DROP TABLE agent_tools;
-      ALTER TABLE agent_tools_v17 RENAME TO agent_tools;
-    `);
-
-    // Drop per-repo timeout override.
-    const repoCols = db
-      .prepare("PRAGMA table_info(repos)")
-      .all() as Array<{ name: string }>;
-    if (repoCols.some((c) => c.name === 'timeout_minutes')) {
-      db.exec('ALTER TABLE repos DROP COLUMN timeout_minutes');
-    }
-
-    // Drop global agent_timeout_minutes.
-    db.prepare(
-      "DELETE FROM settings WHERE key = 'agent_timeout_minutes'"
-    ).run();
-
-    db.prepare("UPDATE settings SET value = '17' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 18) {
-    // Drop default_container_memory_mb and default_container_cpu_cores from
-    // settings. The per-repo override (repos.container_memory_mb /
-    // repos.container_cpu_cores) is the load-bearing knob — operators
-    // tune resource limits per repo when a heavy workload OOMs, not
-    // globally. The defaults move to constants.ts; existing per-repo
-    // overrides are unaffected.
-    db.prepare(
-      "DELETE FROM settings WHERE key IN ('default_container_memory_mb', 'default_container_cpu_cores')"
-    ).run();
-    db.prepare("UPDATE settings SET value = '18' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 19) {
-    // Replace the count-based `max_concurrency` global cap with a
-    // resource-pool model: `max_agent_memory_mb` and `max_agent_cpu_cores`.
-    // The count-based model was a leaky proxy for host capacity — it
-    // assumed every container was DEFAULT_CONTAINER_*-sized, which broke
-    // when per-repo overrides changed container size. The resource pool
-    // tracks actual MB/cores claimed by active containers and refuses
-    // launch if a candidate would exceed either dimension. Per-provider
-    // limits (providers.concurrency_limit) remain unchanged — they
-    // address upstream LLM-provider constraints, not local hardware.
-    //
-    // Backfill: if the operator had a non-default `max_concurrency`,
-    // multiply by the default container size to derive a sensible
-    // starting pool. Otherwise use the seeded defaults (20480 MB / 10).
-    const oldRow = db
-      .prepare("SELECT value FROM settings WHERE key = 'max_concurrency'")
-      .get() as { value: string } | undefined;
-    const oldMax = oldRow ? parseInt(oldRow.value, 10) : NaN;
-    const memMb = Number.isFinite(oldMax) && oldMax > 0
-      ? oldMax * 4096 // DEFAULT_CONTAINER_MEMORY_MB
-      : 20480;
-    const cpu = Number.isFinite(oldMax) && oldMax > 0
-      ? oldMax * 2 // DEFAULT_CONTAINER_CPU_CORES
-      : 10;
-
-    db.prepare(
-      "INSERT OR REPLACE INTO settings (key, value) VALUES ('max_agent_memory_mb', ?)"
-    ).run(String(memMb));
-    db.prepare(
-      "INSERT OR REPLACE INTO settings (key, value) VALUES ('max_agent_cpu_cores', ?)"
-    ).run(String(cpu));
-    db.prepare("DELETE FROM settings WHERE key = 'max_concurrency'").run();
-    db.prepare("UPDATE settings SET value = '19' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 20) {
-    // Replace `repos.pre_agent_script` (free-text shell command) with two
-    // structured columns: a JSON array of typed install steps, and an
-    // explicit per-repo opt-in for the `script` escape hatch. The free-text
-    // form had an open shell-injection surface (interpolated unquoted into
-    // execSync / bash) and inherited every FORWARDED_KEY at runtime, so
-    // even though the trust model is "operator-only", we tighten it.
-    //
-    // Backfill: try to recognise the existing string as one of the safe
-    // patterns the UI used to validate against (npm ci/install, yarn
-    // install, pnpm install, pip install -r). Match → translate to a
-    // typed step at root cwd. No match → leave as [] and log a one-time
-    // warning so the operator notices and reconfigures via the UI.
-    const cols = db
-      .prepare('PRAGMA table_info(repos)')
-      .all() as Array<{ name: string }>;
-    if (cols.some((c) => c.name === 'install_steps')) {
-      db.prepare("UPDATE settings SET value = '20' WHERE key = 'schema_version'").run();
-      return;
-    }
-
-    db.exec("ALTER TABLE repos ADD COLUMN install_steps TEXT NOT NULL DEFAULT '[]'");
-    db.exec('ALTER TABLE repos ADD COLUMN allow_script_steps INTEGER NOT NULL DEFAULT 0');
-
-    if (cols.some((c) => c.name === 'pre_agent_script')) {
-      const existing = db
-        .prepare(
-          "SELECT id, owner, name, pre_agent_script FROM repos WHERE pre_agent_script IS NOT NULL AND pre_agent_script != ''"
-        )
-        .all() as Array<{
-          id: number;
-          owner: string;
-          name: string;
-          pre_agent_script: string;
-        }>;
-      const update = db.prepare('UPDATE repos SET install_steps = ? WHERE id = ?');
-      for (const repo of existing) {
-        const step = translatePreAgentScript(repo.pre_agent_script);
-        if (step) {
-          update.run(JSON.stringify([step]), repo.id);
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[migration v20] repo ${repo.owner}/${repo.name} (id=${repo.id}) had a non-standard pre_agent_script (${JSON.stringify(repo.pre_agent_script)}); install_steps left empty. Reconfigure under Settings → Repositories.`
-          );
-        }
-      }
-      db.exec('ALTER TABLE repos DROP COLUMN pre_agent_script');
-    }
-
-    db.prepare("UPDATE settings SET value = '20' WHERE key = 'schema_version'").run();
-  }
-
-  if (version < 21) {
-    // Replace the monolithic `agent_tools` row with a three-layer
-    // composition: providers (concrete connection identity), models
-    // (provider-scoped model_ids), and agent_profiles (the operator-
-    // composed pairing). Hard cut — no data preservation.
-    //
-    // Wrapped in a transaction so a process crash mid-migration leaves
-    // schema_version=20 and the next boot retries cleanly. Without this,
-    // a partial v21 (e.g. wiped providers but no bootstrap seed) could
-    // leave the install unbootable.
-    //
-    // Operations:
-    //   1. Fail in-flight tasks (no clean re-resolution path post-cut).
-    //   2. Drop legacy `agent_tools`.
-    //   3. Wipe legacy `providers` rows (we re-seed under the new schema).
-    //   4. Extend `providers` with: kind, base_url, auth_token,
-    //      api_key_env_var.
-    //   5. Create `models` and `agent_profiles` (createTables also runs at
-    //      boot, so for fresh installs these already exist via IF NOT
-    //      EXISTS — the CREATE here is for upgrade-in-place).
-    //   6. Repos: drop `agent_tool`, add `agent_profile_id`.
-    //   7. Tasks: drop `agent_tool` and `model`, add `agent_profile_id`.
-    //   8. Attempts: rename `model` → `model_id`, add `harness_id`.
-    //   9. Drop `default_model` setting; (re-)seed bootstrap provider +
-    //      model + profile + `default_agent_profile_id` setting.
-    //
-    // Each step is PRAGMA-guarded so the migration is idempotent: on a
-    // fresh install where createTables already produced the new shape,
-    // every step finds a no-op condition.
-    const runV21 = db.transaction(() => {
-      // 1. Fail in-flight tasks. Statuses considered active for this
-      //    purpose: queued (waiting), preparing, in-progress, in-review,
-      //    changes-needed. Terminal statuses (merged, failed, cancelled,
-      //    awaiting-human-*, needs-human-review, reset) are left alone.
-      db.prepare(
-        `UPDATE tasks
-         SET status = 'failed', completed_at = COALESCE(completed_at, datetime('now'))
-         WHERE status IN ('queued','preparing','in-progress','in-review','changes-needed')`
-      ).run();
-
-      // 2. Drop legacy agent_tools.
-      db.exec('DROP TABLE IF EXISTS agent_tools');
-
-      // 3. Wipe legacy providers (we re-seed under the new schema below).
-      db.exec('DELETE FROM providers');
-
-      // 4. Extend providers.
-      const providerCols = db
-        .prepare('PRAGMA table_info(providers)')
-        .all() as Array<{ name: string }>;
-      if (!providerCols.some((c) => c.name === 'kind')) {
-        // Rows were just wiped, so NOT NULL DEFAULT is safe in one shot.
-        db.exec("ALTER TABLE providers ADD COLUMN kind TEXT NOT NULL DEFAULT 'anthropic'");
-      }
-      if (!providerCols.some((c) => c.name === 'base_url')) {
-        db.exec('ALTER TABLE providers ADD COLUMN base_url TEXT');
-      }
-      if (!providerCols.some((c) => c.name === 'auth_token')) {
-        db.exec('ALTER TABLE providers ADD COLUMN auth_token TEXT');
-      }
-      if (!providerCols.some((c) => c.name === 'api_key_env_var')) {
-        db.exec('ALTER TABLE providers ADD COLUMN api_key_env_var TEXT');
-      }
-
-      // 5. Ensure models + agent_profiles exist (createTables handles fresh
-      //    installs but be defensive for upgrade-in-place).
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS models (
-          id INTEGER PRIMARY KEY,
-          provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
-          model_id TEXT NOT NULL,
-          display_name TEXT NOT NULL,
-          UNIQUE(provider_id, model_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_models_provider_id ON models(provider_id);
-
-        CREATE TABLE IF NOT EXISTS agent_profiles (
-          id TEXT PRIMARY KEY,
-          display_name TEXT NOT NULL,
-          harness_id TEXT NOT NULL,
-          model_pk INTEGER NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
-          config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
-          timeout_minutes INTEGER NOT NULL DEFAULT 2880
-        );
-        CREATE INDEX IF NOT EXISTS idx_agent_profiles_model_pk ON agent_profiles(model_pk);
-      `);
-
-      // 6. Repos: agent_tool → agent_profile_id.
-      const repoCols = db
-        .prepare('PRAGMA table_info(repos)')
-        .all() as Array<{ name: string }>;
-      if (!repoCols.some((c) => c.name === 'agent_profile_id')) {
-        db.exec(
-          'ALTER TABLE repos ADD COLUMN agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
-        );
-      }
-      if (repoCols.some((c) => c.name === 'agent_tool')) {
-        db.exec('ALTER TABLE repos DROP COLUMN agent_tool');
-      }
-
-      // 7. Tasks: drop agent_tool + model, add agent_profile_id.
-      const taskCols = db
-        .prepare('PRAGMA table_info(tasks)')
-        .all() as Array<{ name: string }>;
-      if (!taskCols.some((c) => c.name === 'agent_profile_id')) {
-        db.exec(
-          'ALTER TABLE tasks ADD COLUMN agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
-        );
-      }
-      if (taskCols.some((c) => c.name === 'agent_tool')) {
-        db.exec('ALTER TABLE tasks DROP COLUMN agent_tool');
-      }
-      if (taskCols.some((c) => c.name === 'model')) {
-        db.exec('ALTER TABLE tasks DROP COLUMN model');
-      }
-
-      // 8. Attempts: rename model → model_id, add harness_id.
-      const attemptCols = db
-        .prepare('PRAGMA table_info(attempts)')
-        .all() as Array<{ name: string }>;
-      if (
-        attemptCols.some((c) => c.name === 'model') &&
-        !attemptCols.some((c) => c.name === 'model_id')
-      ) {
-        db.exec('ALTER TABLE attempts RENAME COLUMN model TO model_id');
-      }
-      if (!attemptCols.some((c) => c.name === 'harness_id')) {
-        db.exec('ALTER TABLE attempts ADD COLUMN harness_id TEXT');
-      }
-
-      // 9. Drop default_model + bootstrap seed.
-      db.prepare("DELETE FROM settings WHERE key = 'default_model'").run();
-      seedBootstrapProfile(db);
-
-      db.prepare("UPDATE settings SET value = '21' WHERE key = 'schema_version'").run();
-    });
-    runV21();
+  if (version < CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `Database schema_version ${version} predates this orchestrator's baseline ` +
+      `(${CURRENT_SCHEMA_VERSION}). Migration code for older versions has been ` +
+      `removed; reset the database (delete /data/orchestrator.db) and let the ` +
+      `next boot recreate the schema, or restore from a more recent backup.`
+    );
   }
 }
 
-/** v21 bootstrap: seed the standard cloud providers + a starter model on
- *  Anthropic + a default Claude SDK profile, then point
- *  `settings.default_agent_profile_id` at it.
+
+/** First-run bootstrap: seed the standard cloud providers, representative
+ *  models per provider, and a default Claude SDK profile, then point
+ *  `settings.default_agent_profile_id` at it. Called once from
+ *  `runMigrations` when no `schema_version` row exists.
  *
  *  - Providers other than Anthropic are seeded as rows with no credentials
  *    so the operator can see them in the UI and fill in the connection
@@ -931,11 +355,10 @@ function seedBootstrapProfile(db: Database.Database): void {
     .get() as { id: number } | undefined;
   if (!sonnetRow) {
     throw new Error(
-      'v21 bootstrap: failed to find seeded Anthropic sonnet model. ' +
-      'This indicates a partial migration state — the providers/models seed ' +
-      'did not complete. Inspect the orchestrator DB and either restore ' +
-      'from backup or manually seed an Anthropic provider + sonnet model + ' +
-      'default agent profile, then bump schema_version to 21.'
+      'First-run bootstrap: failed to find the seeded Anthropic sonnet model. ' +
+      'This indicates a partial seed — providers + models did not all insert. ' +
+      'Reset the database (delete /data/orchestrator.db) and let the next boot ' +
+      'recreate the schema and re-seed.'
     );
   }
 
@@ -951,33 +374,15 @@ function seedBootstrapProfile(db: Database.Database): void {
   ).run();
 }
 
-/** v20 backfill helper: map a legacy `pre_agent_script` string to a typed
- *  install step where the command is one of the patterns the UI used to mark
- *  as safe. Returns null for anything else. Kept narrow on purpose — better
- *  to leave install_steps empty and let the operator see the warning than to
- *  guess at exotic commands and run something unexpected. */
-function translatePreAgentScript(
-  script: string
-): { kind: string; cwd?: string } | null {
-  const s = script.trim();
-  if (/^npm\s+ci$/.test(s)) return { kind: 'npm-ci' };
-  if (/^npm\s+install$/.test(s)) return { kind: 'npm-install' };
-  if (/^yarn\s+install$/.test(s)) return { kind: 'yarn-install' };
-  if (/^pnpm\s+install$/.test(s)) return { kind: 'pnpm-install' };
-  if (/^pip\s+install\s+-r\s+\S+$/.test(s)) return { kind: 'pip-requirements' };
-  return null;
-}
-
 function seedDefaultSettings(db: Database.Database): void {
   const defaults: Record<string, string> = {
-    schema_version: '1',
     // Default resource pool: sized for a typical 24+ GB / 8+ core dev host.
     // Operators tune via Settings → Global Settings.
     max_agent_memory_mb: '20480',
     max_agent_cpu_cores: '10',
-    // `default_agent_profile_id` is set by the v21 migration after the
-    // bootstrap profile is created (it can't be seeded here because the
-    // profile row doesn't exist yet at v1).
+    // `default_agent_profile_id` is set by seedBootstrapProfile after the
+    // profile row exists. `schema_version` is set by runMigrations after
+    // both seeders complete.
   };
 
   const insert = db.prepare(
