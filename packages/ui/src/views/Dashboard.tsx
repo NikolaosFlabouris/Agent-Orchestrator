@@ -16,26 +16,59 @@ const ACTIVE_STATUSES = new Set([
 ]);
 
 export function Dashboard() {
-  const store = useStore();
+  // Selector-based subscriptions: each call subscribes only to its
+  // slice, so Dashboard re-renders only when a slice it actually
+  // reads changes — not on every store mutation. Action references
+  // are stable across renders, so the action selectors are
+  // effectively free (Object.is returns true on every read).
+  const tasks = useStore((s) => s.tasks);
+  const hostPool = useStore((s) => s.hostPool);
+  const queueDepth = useStore((s) => s.queueDepth);
+  const paused = useStore((s) => s.paused);
+  const dailyCompletions = useStore((s) => s.dailyCompletions);
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+  const alerts = useStore((s) => s.alerts);
+
+  const setStatus = useStore((s) => s.setStatus);
+  const setHostPool = useStore((s) => s.setHostPool);
+
   const [pools, setPools] = useState<StatusResponse['providers']>([]);
   const [repos, setRepos] = useState<RepoResponse[]>([]);
- 
+
   useEffect(() => {
+    // Actions are pulled from `getState()` inside the effect so we
+    // don't add subscriptions for things we only invoke (never read
+    // as values). Same identity guarantee as the selector pattern,
+    // just without the unused subscription overhead.
+    const {
+      setDailyCompletions,
+      setForgejoBaseUrl,
+      setHostPool: setHostPoolFn,
+      setSnapshot,
+      updateTask,
+      addTask,
+      removeTask,
+      setStatus: setStatusFn,
+      bumpResourceVersion,
+      setAgentProfiles,
+      agentProfiles: initialAgentProfiles,
+    } = useStore.getState();
+
     // Pull status immediately and every 5 s. Daily completions come from the
     // same payload; providers are sampled often so the Pools row stays close
     // to live.
     const refresh = () => {
-        api.getStatus().then((s) => {
-          store.setDailyCompletions(s.daily_completions);
-          store.setForgejoBaseUrl(s.forgejo_base_url);
-          store.setHostPool({
-            memory_used_mb: s.host_pool.memory_used_mb,
-            memory_total_mb: s.host_pool.memory_total_mb,
-            cpu_used_cores: s.host_pool.cpu_used_cores,
-            cpu_total_cores: s.host_pool.cpu_total_cores,
-          });
-          setPools(s.providers ?? []);
-        }).catch(() => {});
+      api.getStatus().then((s) => {
+        setDailyCompletions(s.daily_completions);
+        setForgejoBaseUrl(s.forgejo_base_url);
+        setHostPoolFn({
+          memory_used_mb: s.host_pool.memory_used_mb,
+          memory_total_mb: s.host_pool.memory_total_mb,
+          cpu_used_cores: s.host_pool.cpu_used_cores,
+          cpu_total_cores: s.host_pool.cpu_total_cores,
+        });
+        setPools(s.providers ?? []);
+      }).catch(() => {});
     };
     refresh();
     const timer = window.setInterval(refresh, 5_000);
@@ -48,7 +81,7 @@ export function Dashboard() {
     // if a webhook was dropped.
     const refreshTasks = () => {
       api.getTasks().then((res) => {
-        for (const task of res.tasks) store.updateTask(task);
+        for (const task of res.tasks) updateTask(task);
       }).catch(() => {});
     };
     refreshTasks();
@@ -58,36 +91,50 @@ export function Dashboard() {
     const handler = (event: DashboardWsEvent) => {
       switch (event.type) {
         case 'snapshot':
-          store.setSnapshot(event);
+          setSnapshot(event);
           break;
         case 'task_updated':
-          store.updateTask(event.task);
+          updateTask(event.task);
           break;
         case 'task_created':
-          store.addTask(event.task);
+          addTask(event.task);
           break;
         case 'task_removed':
-          store.removeTask(event.taskId);
+          removeTask(event.taskId);
           break;
         case 'status_changed':
-          store.setStatus(event);
+          setStatusFn(event);
+          break;
+        case 'resource_changed':
+          // Bump the version counter so Settings tabs / other consumers
+          // refetch. For profiles specifically the Dashboard itself
+          // holds a cached display-name lookup, so refetch it inline.
+          bumpResourceVersion(event.resource);
+          if (event.resource === 'profiles') {
+            api
+              .getAgentProfiles()
+              .then((res) => setAgentProfiles(res.profiles))
+              .catch(() => {});
+          }
           break;
       }
     };
 
     const disconnect = connectDashboardWs(handler);
 
-    // Fetch agent profiles once for display in task rows (cached in store)
-    if (store.agentProfiles.length === 0) {
+    // Fetch agent profiles once for display in task rows (cached in
+    // store). Subsequent updates arrive via the resource_changed event
+    // handler above.
+    if (initialAgentProfiles.length === 0) {
       api
         .getAgentProfiles()
-        .then((res) => store.setAgentProfiles(res.profiles))
+        .then((res) => setAgentProfiles(res.profiles))
         .catch(() => {});
     }
- 
+
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
- 
+
     return () => {
       disconnect();
       window.clearInterval(timer);
@@ -95,11 +142,11 @@ export function Dashboard() {
     };
   }, []);
 
-  const activeTasks = store.tasks.filter((t) => ACTIVE_STATUSES.has(t.status));
-  const queuedTasks = store.tasks
+  const activeTasks = tasks.filter((t) => ACTIVE_STATUSES.has(t.status));
+  const queuedTasks = tasks
     .filter((t) => t.status === 'queued')
     .sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
-  const completedTasks = store.tasks
+  const completedTasks = tasks
     .filter((t) => !ACTIVE_STATUSES.has(t.status) && t.status !== 'queued')
     .sort((a, b) => {
       const aNull = a.completed_at === null;
@@ -117,29 +164,29 @@ export function Dashboard() {
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">Agent Orchestrator</h1>
           <div className="flex items-center gap-6 text-sm">
-            <span className={store.paused ? 'text-yellow-400' : 'text-green-400'}>
-              {store.paused ? 'Paused' : 'Running'}
+            <span className={paused ? 'text-yellow-400' : 'text-green-400'}>
+              {paused ? 'Paused' : 'Running'}
             </span>
-            <HostPoolDisplay pool={store.hostPool} />
-            <span>Queue: {store.queueDepth}</span>
-            <span>Today: {store.dailyCompletions} tasks</span>
+            <HostPoolDisplay pool={hostPool} />
+            <span>Queue: {queueDepth}</span>
+            <span>Today: {dailyCompletions} tasks</span>
             <button
               onClick={async () => {
-                if (store.paused) {
+                if (paused) {
                   await api.resume();
-                  store.setStatus({ paused: false, hostPool: store.hostPool, queueDepth: store.queueDepth });
+                  setStatus({ paused: false, hostPool, queueDepth });
                 } else {
                   await api.pause();
-                  store.setStatus({ paused: true, hostPool: store.hostPool, queueDepth: store.queueDepth });
+                  setStatus({ paused: true, hostPool, queueDepth });
                 }
               }}
               className={`px-3 py-1 rounded text-xs font-medium ${
-                store.paused
+                paused
                   ? 'bg-green-900 text-green-300 hover:bg-green-800'
                   : 'bg-yellow-900 text-yellow-300 hover:bg-yellow-800'
               }`}
             >
-              {store.paused ? 'Resume' : 'Pause'}
+              {paused ? 'Resume' : 'Pause'}
             </button>
             <Link
               to="/settings"
@@ -153,9 +200,9 @@ export function Dashboard() {
              >
                Help
              </Link>
-             {store.forgejoBaseUrl && (
+             {forgejoBaseUrl && (
                <a
-                 href={store.forgejoBaseUrl}
+                 href={forgejoBaseUrl}
                  target="_blank"
                  rel="noreferrer noopener"
                  className="text-blue-400 hover:text-blue-300"
@@ -176,19 +223,19 @@ export function Dashboard() {
              const full =
                p.concurrency_limit > 0 &&
                p.active_slots >= p.concurrency_limit;
-             const paused = p.concurrency_limit === 0;
+             const isPaused = p.concurrency_limit === 0;
              return (
                <span
                  key={p.id}
                  className={
-                   paused
+                   isPaused
                      ? 'text-yellow-400'
                      : full
                        ? 'text-orange-400'
                        : 'text-gray-300'
                  }
                  title={
-                   paused
+                   isPaused
                      ? `${p.display_name}: paused (concurrency_limit = 0)`
                      : full
                        ? `${p.display_name}: at limit — candidate tasks on this provider will wait`
@@ -196,20 +243,20 @@ export function Dashboard() {
                  }
                >
                  {p.display_name}: {p.active_slots}/{p.concurrency_limit}
-                 {paused ? ' (paused)' : ''}
+                 {isPaused ? ' (paused)' : ''}
                </span>
              );
            })}
          </div>
        )}
- 
-       {repos.length > 0 && store.forgejoBaseUrl && (
+
+       {repos.length > 0 && forgejoBaseUrl && (
          <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
            <span className="text-gray-500 uppercase tracking-wide">Repos</span>
            {repos.map((r) => (
              <a
                key={r.id}
-               href={`${store.forgejoBaseUrl}/${r.owner}/${r.name}`}
+               href={`${forgejoBaseUrl}/${r.owner}/${r.name}`}
                target="_blank"
                rel="noreferrer noopener"
                className="text-gray-300 hover:text-blue-300"
@@ -219,8 +266,8 @@ export function Dashboard() {
            ))}
          </div>
        )}
- 
-       <AlertBanner alerts={store.alerts} />
+
+       <AlertBanner alerts={alerts} />
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
         {/* Active tasks */}

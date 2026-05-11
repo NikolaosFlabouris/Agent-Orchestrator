@@ -20,6 +20,7 @@ import {
   insertAttempt,
   updateAttempt,
   getRunningAttempt,
+  getLatestAttempt,
   getTasks,
 } from './db.js';
 import {
@@ -349,18 +350,32 @@ export class Scheduler {
       result = { status: 'failure', error_message: 'No result.json produced by agent' };
     }
 
-    // Read role from meta.json
+    // Read role from the latest attempt row. The attempts table is the
+    // authoritative record of what kind of run this was; meta.json on
+    // disk is a stale on-orchestrator-restart-rebuilt artifact and can
+    // be missing entirely on the recovery path. Falling back to
+    // meta.json is a last-resort heuristic for the case where the
+    // attempt row insert was somehow skipped.
     let role: 'develop' | 'review' = 'develop';
-    const metaPath = path.join(taskDir, 'meta.json');
-    try {
-      const raw = await fsp.readFile(metaPath, 'utf-8');
-      const meta = JSON.parse(raw) as TaskMeta;
-      role = meta.role;
-    } catch {
-      this.log.warn(
-        { event: 'meta_missing', task_id: task.id },
-        'meta.json not found — assuming develop role'
-      );
+    const latestAttempt = getLatestAttempt(task.id);
+    if (latestAttempt) {
+      role = latestAttempt.role as 'develop' | 'review';
+    } else {
+      const metaPath = path.join(taskDir, 'meta.json');
+      try {
+        const raw = await fsp.readFile(metaPath, 'utf-8');
+        const meta = JSON.parse(raw) as TaskMeta;
+        role = meta.role;
+        this.log.warn(
+          { event: 'role_fallback_meta', task_id: task.id },
+          'No attempt row for task — recovered role from meta.json'
+        );
+      } catch {
+        this.log.warn(
+          { event: 'meta_missing', task_id: task.id },
+          'meta.json not found and no attempt row — assuming develop role'
+        );
+      }
     }
 
     // Record container exit event
@@ -427,9 +442,22 @@ export class Scheduler {
       ...getTasks({ status: 'in-review' }),
     ].filter((t) => t.container_id !== null);
 
-    const activeByProvider = countActiveByProvider(active, (t) =>
-      this.providerIdForTask(t)
-    );
+    // Snapshot provider resolution once per tick keyed by task id. Both
+    // the active-task accounting AND the per-candidate pool gate read
+    // through this cache so they cannot disagree if settings or
+    // profiles change mid-tick (e.g. the operator points
+    // default_agent_profile_id at a different provider between the
+    // accounting build and the candidate loop). The same task id always
+    // bucket-counts and gate-checks against the same provider key.
+    const providerIdCache = new Map<number, string | null>();
+    const cachedProviderIdForTask = (t: Task): string | null => {
+      if (!providerIdCache.has(t.id)) {
+        providerIdCache.set(t.id, this.providerIdForTask(t));
+      }
+      return providerIdCache.get(t.id) ?? null;
+    };
+
+    const activeByProvider = countActiveByProvider(active, cachedProviderIdForTask);
     const limitByProvider = limitMapFromProviders(getProviders());
 
     const candidates = getCandidates();
@@ -461,7 +489,7 @@ export class Scheduler {
 
       // Provider pool check — skip if this candidate's pool is saturated.
       // A later candidate on a different (idle) provider can still launch.
-      const providerKey = resolveProviderKey(task, this.providerIdForTask(task));
+      const providerKey = resolveProviderKey(task, cachedProviderIdForTask(task));
       if (!canLaunchInPool(providerKey, activeByProvider, limitByProvider)) {
         continue;
       }
@@ -617,7 +645,12 @@ export class Scheduler {
       /* best effort */
     }
 
-    // Record attempt with snapshot of harness + model used
+    // Record attempt with a snapshot of the profile/harness/model
+    // resolved at this exact launch moment. Captured here — not at
+    // queue time and not deferred to later reads — because this is
+    // the single queued→in-progress transition for this attempt and
+    // operator edits to the profile after this point must not change
+    // what this attempt audits as having run with (H5).
     const attempt = insertAttempt({
       task_id: task.id,
       attempt_number: task.attempt,
@@ -625,6 +658,7 @@ export class Scheduler {
       status: 'running',
       model_id: ctx.invocation.resolved_model,
       harness_id: ctx.harness.id,
+      timeout_minutes_snapshot: ctx.profile.timeout_minutes,
     });
     activeState.set(task.id, {
       currentAttemptId: attempt.id,
@@ -712,7 +746,9 @@ export class Scheduler {
       /* best effort */
     }
 
-    // Record attempt with snapshot of harness + model used
+    // Record attempt with snapshot of harness + model + timeout used.
+    // Same snapshot policy as launchDevContainer — review attempts are
+    // also a queued→in-progress transition for the review run.
     const attempt = insertAttempt({
       task_id: task.id,
       attempt_number: task.attempt,
@@ -720,6 +756,7 @@ export class Scheduler {
       status: 'running',
       model_id: ctx.invocation.resolved_model,
       harness_id: ctx.harness.id,
+      timeout_minutes_snapshot: ctx.profile.timeout_minutes,
     });
     const state = activeState.get(task.id) ?? {
       currentAttemptId: 0,
@@ -787,7 +824,7 @@ export class Scheduler {
     container: { id: string; wait: () => Promise<{ StatusCode: number }> },
     taskId: number
   ): void {
-    waitForContainer(container as any).then(() => {
+    waitForContainer(container).then(() => {
       this.log.info(
         { event: 'container_wait_resolved', task_id: taskId },
         'Container wait callback fired'
@@ -957,25 +994,58 @@ export class Scheduler {
     if (state) {
       attemptId = state.currentAttemptId;
     } else {
-      // Recovery path: activeState is empty after restart.
-      // Look up the attempt row by composite key, or create a new one.
+      // Recovery path: activeState is empty after restart. Pull role
+      // AND the resolved harness/model snapshot from meta.json so the
+      // late-created attempt row carries the same audit trail it would
+      // have had on the happy path. meta.json is written by
+      // writeTaskFiles at launch time so it's the closest thing we have
+      // to a captured launch context after an orchestrator crash.
       const metaPath = path.join(getTaskDir(task), 'meta.json');
       let role: 'develop' | 'review' = 'develop';
+      let modelSnapshot: string | null = null;
+      let harnessSnapshot: string | null = null;
+      let timeoutSnapshot: number | null = null;
       try {
         const raw = await fsp.readFile(metaPath, 'utf-8');
-        role = JSON.parse(raw).role ?? 'develop';
-      } catch { /* default to develop */ }
+        const meta = JSON.parse(raw);
+        role = meta.role ?? 'develop';
+        modelSnapshot =
+          typeof meta.model === 'string' && meta.model.length > 0
+            ? meta.model
+            : null;
+        harnessSnapshot =
+          typeof meta.harness_id === 'string' && meta.harness_id.length > 0
+            ? meta.harness_id
+            : null;
+        // meta.max_runtime_minutes was written from profile.timeout_minutes
+        // at launch time (see writeTaskFiles). It's the same value the
+        // happy-path insertAttempt would have snapshotted, so the
+        // recovered attempt carries an audit-equivalent row.
+        timeoutSnapshot =
+          typeof meta.max_runtime_minutes === 'number' &&
+          Number.isFinite(meta.max_runtime_minutes) &&
+          meta.max_runtime_minutes > 0
+            ? meta.max_runtime_minutes
+            : null;
+      } catch { /* default to develop, no snapshots */ }
 
       const existing = getRunningAttempt(task.id, task.attempt, role);
       if (existing) {
         attemptId = existing.id;
       } else {
-        // Orchestrator crashed before creating the attempt row — create one now
+        // Orchestrator crashed before creating the attempt row — create
+        // one now with whatever snapshot fields we could recover from
+        // meta.json. Missing snapshots stay null (the original launch's
+        // context is lost; null is still better than fabricating
+        // values).
         const newAttempt = insertAttempt({
           task_id: task.id,
           attempt_number: task.attempt,
           role,
           status: 'running',
+          model_id: modelSnapshot,
+          harness_id: harnessSnapshot,
+          timeout_minutes_snapshot: timeoutSnapshot,
         });
         attemptId = newAttempt.id;
       }

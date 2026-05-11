@@ -1,5 +1,7 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
-import type { Provider, Model } from '@orchestrator/shared';
+import { sq } from './shell.js';
+import { assertOnlyKnownKeys } from './config.js';
+import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
 
 /** Pi (pi-coding-agent) CLI harness. Bash-executed in the container.
  *
@@ -8,19 +10,68 @@ import type { Provider, Model } from '@orchestrator/shared';
  *  write files to /repo via the bind mount; it has no way to drop a
  *  file at /home/agent/... before the agent container starts. So Pi's
  *  config file is created at run-time by the agent_command itself —
- *  the command begins with a mkdir + printf that lays the file down
- *  before invoking pi.
+ *  the command begins with a `jq -n` invocation that constructs the
+ *  JSON and writes it to ~/.pi/agent/models.json.
  *
- *  This keeps the HarnessInvocation contract clean: `config_files` only
- *  carries /repo-bound files; non-/repo paths are the harness's
- *  responsibility to bootstrap from its command.
+ *  Provider-kind handling:
+ *    - Cloud kinds (anthropic, openai, gemini, mistral, deepseek,
+ *      openrouter): pi has built-in provider definitions and reads
+ *      the standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+ *      GEMINI_API_KEY, …) which the scheduler exports via
+ *      buildProviderEnv. The orchestrator writes a minimal models.json
+ *      that declares the provider + model so pi recognises the
+ *      `--model <pi-provider>/<model_id>` argument; no credential
+ *      lives in the file.
+ *    - For ollama: pi has no built-in Ollama definition, so the JSON
+ *      declares the OpenAI-completions-compatible endpoint with URL
+ *      and apiKey. The apiKey value is sourced at runtime from
+ *      `$OLLAMA_AUTH_TOKEN` (orchestrator-exported) so the literal
+ *      token never lives in agent_command / meta.json (H2).
+ *
+ *  Pi internal names vs orchestrator ProviderKind names — pi names its
+ *  built-in Gemini provider "google" while reading GEMINI_API_KEY. All
+ *  other cloud kinds use the same name on both sides. PI_PROVIDER_NAMES
+ *  below is the canonical mapping; bumping it requires re-verifying
+ *  against pi-mono/packages/ai/src/env-api-keys.ts.
  *
  *  Operator-tunable knobs (config_json): none for v1. */
+
+/** Map orchestrator ProviderKind → pi's internal provider name. Pi
+ *  expects the `--model` argument in `<pi-name>/<model_id>` form and
+ *  models.json uses the same name as a key, so both must agree. Only
+ *  populated for the kinds the harness actually supports; ollama is
+ *  handled by a custom (non-built-in) provider stanza so it's not in
+ *  this map. */
+const PI_PROVIDER_NAMES: Partial<Record<ProviderKind, string>> = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  // Pi's built-in provider for Gemini is named "google" (it reads
+  // GEMINI_API_KEY internally for that provider — see pi-mono's
+  // env-api-keys.ts). Keep this mapping aligned with the upstream
+  // source if a future pi version renames it.
+  gemini: 'google',
+  mistral: 'mistral',
+  deepseek: 'deepseek',
+  openrouter: 'openrouter',
+};
+
 export const piHarness: HarnessSpec = {
   id: 'pi',
   display_name: 'Pi CLI',
   runtime: 'cli',
-  supported_provider_kinds: ['anthropic', 'ollama'] as const,
+  // Mirrors PI_PROVIDER_NAMES (cloud kinds) plus ollama (custom
+  // provider via models.json). claude-subscription is excluded — pi's
+  // subscription path uses an interactive /login OAuth flow that
+  // doesn't work in the sealed agent container.
+  supported_provider_kinds: [
+    'anthropic',
+    'openai',
+    'gemini',
+    'mistral',
+    'deepseek',
+    'openrouter',
+    'ollama',
+  ] as const,
   buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
     if (!piHarness.supported_provider_kinds.includes(provider.kind)) {
       throw new Error(
@@ -29,15 +80,12 @@ export const piHarness: HarnessSpec = {
         `Profile '${profile.id}' uses model '${model.model_id}' on provider '${provider.id}'.`
       );
     }
-    const piProvider = provider.kind === 'ollama' ? 'ollama' : 'anthropic';
-    const resolved_model = `${piProvider}/${model.model_id}`;
-    const modelsJson = JSON.stringify(buildPiModelsJson(provider, model));
-    // Single-quote-wrapped printf '%s' arg so JSON's double quotes don't
-    // need escaping. The shell sees only the single-quoted literal.
-    const escaped = modelsJson.replace(/'/g, `'\\''`);
+    const piProviderName = piProviderNameFor(provider.kind);
+    const resolved_model = `${piProviderName}/${model.model_id}`;
+    const writeConfig = buildPiConfigWriteCommand(provider, model, piProviderName);
     const agent_command =
-      `mkdir -p ~/.pi/agent && printf '%s' '${escaped}' > ~/.pi/agent/models.json && ` +
-      `pi -p --mode json --no-session --model ${resolved_model} @${promptFilePath}`;
+      `mkdir -p ~/.pi/agent && ${writeConfig} && ` +
+      `pi -p --mode json --no-session --model ${sq(resolved_model)} @${sq(promptFilePath)}`;
     return {
       agent_command,
       config_files: [],
@@ -45,12 +93,39 @@ export const piHarness: HarnessSpec = {
       resolved_model,
     };
   },
+  validateConfig(config_json: Record<string, unknown>): void {
+    // No tunable knobs for v1 — reject anything to catch typos early.
+    assertOnlyKnownKeys(config_json, [], 'pi');
+  },
 };
 
-function buildPiModelsJson(
+/** Resolve the pi-side provider name for a given orchestrator
+ *  ProviderKind. For ollama we hardcode 'ollama' (custom provider, not
+ *  in PI_PROVIDER_NAMES); for everything else we read the map and
+ *  throw if the kind isn't covered, which would indicate
+ *  supported_provider_kinds drifted from the map without updating
+ *  both. */
+function piProviderNameFor(kind: ProviderKind): string {
+  if (kind === 'ollama') return 'ollama';
+  const name = PI_PROVIDER_NAMES[kind];
+  if (!name) {
+    throw new Error(
+      `Pi harness: no provider-name mapping for kind '${kind}'. ` +
+      `Update PI_PROVIDER_NAMES in pi.ts.`
+    );
+  }
+  return name;
+}
+
+/** Build the shell snippet that writes `~/.pi/agent/models.json` at
+ *  agent-container runtime. Uses `jq -n` to construct the JSON from
+ *  jq variables — guarantees correct JSON escaping regardless of
+ *  input contents. */
+function buildPiConfigWriteCommand(
   provider: Provider,
-  model: Model
-): Record<string, unknown> {
+  model: Model,
+  piProviderName: string
+): string {
   if (provider.kind === 'ollama') {
     if (!provider.base_url) {
       throw new Error(
@@ -58,30 +133,33 @@ function buildPiModelsJson(
         `Configure the Ollama server URL under Settings → Providers.`
       );
     }
-    return {
-      providers: {
-        ollama: {
-          baseUrl: provider.base_url.replace(/\/+$/, '') + '/v1',
-          api: 'openai-completions',
-          // pi's schema requires apiKey; Ollama ignores unless front-door auth.
-          apiKey: provider.auth_token ?? 'ollama',
-          compat: {
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: false,
-          },
-          models: [{ id: model.model_id }],
-        },
-      },
-    };
+    const baseUrl = provider.base_url.replace(/\/+$/, '') + '/v1';
+    // `${OLLAMA_AUTH_TOKEN:-ollama}` falls back to the literal "ollama"
+    // (Ollama's no-auth placeholder) when the env var is unset, so
+    // vanilla local Ollama works without any credential configured.
+    return (
+      `jq -n ` +
+      `--arg token "\${OLLAMA_AUTH_TOKEN:-ollama}" ` +
+      `--arg url ${sq(baseUrl)} ` +
+      `--arg model_id ${sq(model.model_id)} ` +
+      `'{providers:{ollama:{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
+      `compat:{supportsDeveloperRole:false,supportsReasoningEffort:false},` +
+      `models:[{id:$model_id}]}}}' ` +
+      `> ~/.pi/agent/models.json`
+    );
   }
-  // Anthropic: minimal entry; pi reads ANTHROPIC_API_KEY from env. We
-  // emit the file anyway so pi's startup doesn't complain about a
-  // missing config in the no-session container.
-  return {
-    providers: {
-      anthropic: {
-        models: [{ id: model.model_id }],
-      },
-    },
-  };
+
+  // Cloud kinds: minimal stanza declaring the built-in provider name
+  // and the model. Pi reads the standard env var the scheduler exports
+  // (per ProviderKindSpec.container_env_name) for the actual credential.
+  // The provider key is quoted in the jq filter so multi-word pi names
+  // (none today, but a hedge against future additions like
+  // "google-vertex") parse correctly.
+  return (
+    `jq -n ` +
+    `--arg provider ${sq(piProviderName)} ` +
+    `--arg model_id ${sq(model.model_id)} ` +
+    `'{providers:{($provider):{models:[{id:$model_id}]}}}' ` +
+    `> ~/.pi/agent/models.json`
+  );
 }

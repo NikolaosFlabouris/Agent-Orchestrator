@@ -15,7 +15,13 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 21;
+const CURRENT_SCHEMA_VERSION = 22;
+/** Oldest schema_version this binary can forward-migrate from. Anything
+ *  older predates the migration code that's still in the tree; the
+ *  operator must reset the DB. v21 was the post-collapse baseline (see
+ *  commit 7e5fe33); migrations from there forward are kept inline as
+ *  `version < N` blocks in runMigrations. */
+const MIN_MIGRATABLE_VERSION = 21;
 
 let _db: Database.Database;
 
@@ -124,9 +130,16 @@ function createTables(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
 
+    -- ON DELETE CASCADE: when a task is deleted, its attempts/events/
+    -- steps go with it. Orphaned audit rows for a non-existent task
+    -- aren't useful. The orchestrator has no deleteTask path today,
+    -- but operators sometimes hand-delete bad rows; this guards that
+    -- case from SQL errors. Existing pre-collapse installs may have
+    -- NO ACTION here — that's accepted drift since deleteTask doesn't
+    -- exist as a feature.
     CREATE TABLE IF NOT EXISTS attempts (
       id INTEGER PRIMARY KEY,
-      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       attempt_number INTEGER,
       role TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -140,7 +153,14 @@ function createTables(db: Database.Database): void {
       -- the agent profile or model row.
       model_id TEXT,
       -- Snapshot of the harness id resolved at attempt-launch time.
-      harness_id TEXT
+      harness_id TEXT,
+      -- Snapshot of profile.timeout_minutes captured at attempt-launch
+      -- time. Read by alerts.checkAlerts when computing the stuck-task
+      -- threshold so a profile edit mid-flight doesn't retroactively
+      -- shorten the threshold for already-running attempts (H5a). NULL
+      -- on pre-v22 rows; consumers fall back to a live profile read
+      -- when the snapshot is absent.
+      timeout_minutes_snapshot INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
@@ -203,7 +223,7 @@ function createTables(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS task_events (
       id INTEGER PRIMARY KEY,
-      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       event_type TEXT NOT NULL,
       message TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
@@ -213,7 +233,7 @@ function createTables(db: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS task_steps (
       id INTEGER PRIMARY KEY,
-      task_id INTEGER NOT NULL REFERENCES tasks(id),
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       attempt_number INTEGER NOT NULL,
       step_name TEXT NOT NULL,
       result_json TEXT NOT NULL,
@@ -230,16 +250,21 @@ function createTables(db: Database.Database): void {
 // Migrations
 // ---------------------------------------------------------------------------
 //
-// The schema is the cumulative result of an earlier 21-step migration chain
-// that the orchestrator no longer carries. createTables produces the final
-// shape directly; first-run seeding (settings + bootstrap providers/models/
-// profile) runs once when the schema_version row is missing.
+// The schema was originally the cumulative result of a 21-step migration
+// chain that commit 7e5fe33 collapsed into the single createTables block.
+// v21 is the baseline (`MIN_MIGRATABLE_VERSION`); forward migrations from
+// there live as `version < N` blocks in this function.
 //
-// If/when a future schema change is needed, add a `version < N` block here
-// and bump CURRENT_SCHEMA_VERSION. The orchestrator refuses to boot against
-// a DB whose schema_version is newer than CURRENT_SCHEMA_VERSION (caller
-// downgraded) or older than the lowest supported version (no migration
-// path).
+// To add a new schema change:
+//   1. Update createTables to include the new shape (so fresh installs get
+//      it directly).
+//   2. Bump CURRENT_SCHEMA_VERSION.
+//   3. Add a `if (version < N) { db.exec("ALTER TABLE ..."); }` block
+//      below so existing installs can forward-migrate.
+//
+// The orchestrator refuses to boot against a DB whose schema_version is
+// newer than CURRENT_SCHEMA_VERSION (binary was downgraded) or older than
+// MIN_MIGRATABLE_VERSION (no migration code present).
 
 function runMigrations(db: Database.Database): void {
   const row = db
@@ -249,16 +274,19 @@ function runMigrations(db: Database.Database): void {
   _isFirstRun = version === 0;
 
   if (_isFirstRun) {
-    // Fresh install: createTables already produced the v21 shape. Seed
-    // settings + bootstrap providers/models/profile. seedBootstrapProfile
-    // throws if its own invariants don't hold, which leaves the DB in a
-    // half-initialised state — the next boot retries cleanly because
-    // schema_version still hasn't been recorded.
-    seedDefaultSettings(db);
-    seedBootstrapProfile(db);
-    db.prepare(
-      "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
-    ).run(String(CURRENT_SCHEMA_VERSION));
+    // Fresh install: createTables already produced the current shape.
+    // Seed settings + bootstrap providers/models/profile + record
+    // schema_version, all in a single transaction. If anything throws
+    // inside the closure SQLite rolls back the whole bootstrap, leaving
+    // the DB in a clean unconfigured state so the next boot retries
+    // from scratch with no half-applied rows mixed into operator edits.
+    db.transaction(() => {
+      seedDefaultSettings(db);
+      seedBootstrapProfile(db);
+      db.prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
+      ).run(String(CURRENT_SCHEMA_VERSION));
+    })();
     return;
   }
 
@@ -270,13 +298,36 @@ function runMigrations(db: Database.Database): void {
     );
   }
 
-  if (version < CURRENT_SCHEMA_VERSION) {
+  if (version < MIN_MIGRATABLE_VERSION) {
     throw new Error(
-      `Database schema_version ${version} predates this orchestrator's baseline ` +
-      `(${CURRENT_SCHEMA_VERSION}). Migration code for older versions has been ` +
-      `removed; reset the database (delete /data/orchestrator.db) and let the ` +
-      `next boot recreate the schema, or restore from a more recent backup.`
+      `Database schema_version ${version} predates the lowest forward-migratable ` +
+      `version (${MIN_MIGRATABLE_VERSION}). Reset the database ` +
+      `(delete /data/orchestrator.db) and let the next boot recreate the schema, ` +
+      `or restore from a more recent backup.`
     );
+  }
+
+  // Forward migrations. Each block is a single ALTER (or batch) wrapped
+  // in the surrounding transaction so a partial apply rolls back. The
+  // schema_version write at the end is part of the same transaction;
+  // if any ALTER throws the version stays at its previous value and
+  // the next boot retries.
+  if (version < CURRENT_SCHEMA_VERSION) {
+    db.transaction(() => {
+      if (version < 22) {
+        // H5a: snapshot profile.timeout_minutes onto the attempt row so
+        // alerts.checkAlerts uses the threshold that was in effect at
+        // attempt-launch, not the live profile value. Nullable on
+        // existing rows; the alerts consumer falls back to a live read
+        // when the snapshot is absent.
+        db.exec(
+          "ALTER TABLE attempts ADD COLUMN timeout_minutes_snapshot INTEGER"
+        );
+      }
+      db.prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
+      ).run(String(CURRENT_SCHEMA_VERSION));
+    })();
   }
 }
 
@@ -362,11 +413,14 @@ function seedBootstrapProfile(db: Database.Database): void {
     );
   }
 
+  // timeout_minutes matches the column default (2880 min = 2 days) and
+  // the documented UI default. Operators with shorter-run preferences
+  // tune this per-profile via the Settings UI.
   db.prepare(
     `INSERT OR IGNORE INTO agent_profiles
        (id, display_name, harness_id, model_pk, config_json, timeout_minutes)
      VALUES (?, ?, ?, ?, ?, ?)`
-  ).run('default-claude-sdk', 'Claude SDK + Sonnet', 'claude-sdk', sonnetRow.id, '{}', 120);
+  ).run('default-claude-sdk', 'Claude SDK + Sonnet', 'claude-sdk', sonnetRow.id, '{}', 2880);
 
   db.prepare(
     `INSERT OR REPLACE INTO settings (key, value)
@@ -526,11 +580,17 @@ export function insertAttempt(attempt: {
   started_at?: string;
   model_id?: string | null;
   harness_id?: string | null;
+  /** Snapshot of profile.timeout_minutes at launch. Persisted so a
+   *  later profile edit can't move the stuck-task threshold under an
+   *  already-running attempt. */
+  timeout_minutes_snapshot?: number | null;
 }): Attempt {
   const result = getDb()
     .prepare(
-      `INSERT INTO attempts (task_id, attempt_number, role, status, started_at, model_id, harness_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO attempts
+         (task_id, attempt_number, role, status, started_at,
+          model_id, harness_id, timeout_minutes_snapshot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       attempt.task_id,
@@ -539,7 +599,8 @@ export function insertAttempt(attempt: {
       attempt.status,
       attempt.started_at ?? new Date().toISOString(),
       attempt.model_id ?? null,
-      attempt.harness_id ?? null
+      attempt.harness_id ?? null,
+      attempt.timeout_minutes_snapshot ?? null
     );
 
   return getDb()
@@ -582,6 +643,19 @@ export function getAttempts(taskId: number): Attempt[] {
   return getDb()
     .prepare('SELECT * FROM attempts WHERE task_id = ? ORDER BY id ASC')
     .all(taskId) as Attempt[];
+}
+
+/** Most recently inserted attempt for a task. Used by the
+ *  container-exit handler to recover the run's role (develop vs
+ *  review) from the authoritative DB row rather than the meta.json
+ *  file dropped into the workspace, which can be missing or stale
+ *  after orchestrator restarts. */
+export function getLatestAttempt(taskId: number): Attempt | undefined {
+  return getDb()
+    .prepare(
+      'SELECT * FROM attempts WHERE task_id = ? ORDER BY id DESC LIMIT 1'
+    )
+    .get(taskId) as Attempt | undefined;
 }
 
 /**
@@ -805,6 +879,76 @@ export function getAgentProfiles(): AgentProfile[] {
   return rows.map((r) => hydrateAgentProfile(r)!);
 }
 
+/** Bulk variant: returns every profile pre-joined with its model row and
+ *  with `repos_using` / `tasks_using` counts in a single SQL pass.
+ *  Replaces the N+1 pattern of `getAgentProfiles().map(p =>
+ *  countReposUsingProfile(p.id) + countTasksUsingProfile(p.id) +
+ *  getModel(p.model_pk))` on the Settings list-load path. */
+export interface AgentProfileWithJoinedStats extends AgentProfile {
+  repos_using: number;
+  tasks_using: number;
+  provider_id: string | null;
+  model_id: string | null;
+}
+
+export function getAgentProfilesWithStats(): AgentProfileWithJoinedStats[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT
+         ap.*,
+         m.provider_id AS joined_provider_id,
+         m.model_id    AS joined_model_id,
+         (SELECT COUNT(*) FROM repos r  WHERE r.agent_profile_id = ap.id) AS repos_using,
+         (SELECT COUNT(*) FROM tasks t  WHERE t.agent_profile_id = ap.id) AS tasks_using
+       FROM agent_profiles ap
+       LEFT JOIN models m ON m.id = ap.model_pk
+       ORDER BY ap.id`
+    )
+    .all() as Record<string, unknown>[];
+  return rows.map((row) => {
+    const base = hydrateAgentProfile(row)!;
+    return {
+      ...base,
+      repos_using: Number(row.repos_using ?? 0),
+      tasks_using: Number(row.tasks_using ?? 0),
+      provider_id: (row.joined_provider_id as string | null) ?? null,
+      model_id: (row.joined_model_id as string | null) ?? null,
+    };
+  });
+}
+
+/** Single-pass per-provider active-slot tally for the dashboard.
+ *
+ *  Walks the chain `task → task.agent_profile_id → repo.agent_profile_id
+ *  → settings.default_agent_profile_id`, then jumps the resolved profile
+ *  to its model's `provider_id`. Implemented as one SQL join rather
+ *  than N tasks × 4 helper-fn calls in JS.
+ *
+ *  The returned Map's key is the resolved provider id, or '' (empty
+ *  string) for tasks where no profile could be resolved.
+ *
+ *  "Active" = status IN (preparing, in-progress, in-review) AND
+ *  container_id IS NOT NULL — same filter the JS-side enrichers use. */
+export function getActivePerProviderCounts(): Map<string, number> {
+  const rows = getDb()
+    .prepare(
+      `SELECT COALESCE(m.provider_id, '') AS provider_id, COUNT(*) AS n
+       FROM tasks t
+       LEFT JOIN repos r ON r.id = t.repo_id
+       LEFT JOIN settings s ON s.key = 'default_agent_profile_id'
+       LEFT JOIN agent_profiles ap
+         ON ap.id = COALESCE(t.agent_profile_id, r.agent_profile_id, s.value)
+       LEFT JOIN models m ON m.id = ap.model_pk
+       WHERE t.status IN ('preparing','in-progress','in-review')
+         AND t.container_id IS NOT NULL
+       GROUP BY COALESCE(m.provider_id, '')`
+    )
+    .all() as { provider_id: string; n: number }[];
+  const out = new Map<string, number>();
+  for (const row of rows) out.set(row.provider_id, row.n);
+  return out;
+}
+
 export function insertAgentProfile(p: AgentProfile): void {
   getDb()
     .prepare(
@@ -856,7 +1000,22 @@ export function updateAgentProfile(
 }
 
 export function deleteAgentProfile(id: string): void {
-  getDb().prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
+  // `settings.default_agent_profile_id` is a plain key/value row, not a
+  // foreign key — SQLite cannot cascade-clear it on profile delete. We
+  // do it in application code, transactionally, so the pointer never
+  // dangles. Route-layer delete-safety checks should still refuse this
+  // delete when the profile is in use (repos/tasks/the global default
+  // pointing at it), but if the operator bypasses the route — direct
+  // DB edit, future code path — we still maintain referential integrity
+  // for the settings pointer instead of leaving it dangling.
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare(
+      `DELETE FROM settings
+         WHERE key = 'default_agent_profile_id' AND value = ?`
+    ).run(id);
+    db.prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
+  })();
 }
 
 export function countReposUsingProfile(profileId: string): number {
@@ -908,9 +1067,17 @@ export function getSetting(key: SettingsKey): string | undefined {
   return row?.value;
 }
 
+/** Read an integer setting. Returns 0 when the setting is missing, the
+ *  empty string, or not parseable as an integer — callers that need to
+ *  distinguish "unset" from "set to 0" should use `getSetting` directly
+ *  and parse themselves. The current consumers (`max_agent_memory_mb`,
+ *  `max_agent_cpu_cores`) treat 0 as "pool saturated / paused", which
+ *  is a safe default for the missing case. */
 export function getSettingInt(key: SettingsKey): number {
   const value = getSetting(key);
-  return value ? parseInt(value, 10) : 0;
+  if (value === undefined || value === '') return 0;
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export function updateSetting(key: SettingsKey, value: string): void {

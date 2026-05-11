@@ -14,20 +14,22 @@ const INT_KEYS = new Set<SettingsKey>([
   'max_agent_cpu_cores',
 ]);
 
+/** Build the GET response payload from current DB state. Shared between
+ *  GET and PATCH so PATCH can return the post-update view directly. */
+function buildSettingsPayload(): Record<string, unknown> {
+  const all = getAllSettings();
+  const result: Record<string, unknown> = {};
+  for (const key of EDITABLE_KEYS) {
+    const raw = all[key];
+    if (raw === undefined) continue;
+    result[key] = INT_KEYS.has(key) ? parseInt(raw, 10) : raw;
+  }
+  return result;
+}
+
 export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/settings
-  app.get('/api/settings', async () => {
-    const all = getAllSettings();
-    const result: Record<string, unknown> = {};
-
-    for (const key of EDITABLE_KEYS) {
-      const raw = all[key];
-      if (raw === undefined) continue;
-      result[key] = INT_KEYS.has(key) ? parseInt(raw, 10) : raw;
-    }
-
-    return result;
-  });
+  app.get('/api/settings', async () => buildSettingsPayload());
 
   // PATCH /api/settings — partial update
   app.patch('/api/settings', async (request, reply) => {
@@ -43,6 +45,19 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
 
       const strValue =
         typeof value === 'object' ? JSON.stringify(value) : String(value);
+
+      // Per-key validation, before persisting any update in the batch.
+      // Numeric keys must parse as positive integers — a 0 or non-
+      // numeric here is almost always a typo and would silently zero
+      // out the host resource pool, pausing all task launches.
+      if (INT_KEYS.has(key as SettingsKey)) {
+        const n = Number(strValue);
+        if (!Number.isInteger(n) || n < 1) {
+          return reply.status(400).send({
+            error: `${key} must be a positive integer`,
+          });
+        }
+      }
 
       // Validate default_agent_profile_id points at an existing profile.
       // Empty string is rejected — the orchestrator can't launch tasks
@@ -64,7 +79,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       updateSetting(key as SettingsKey, strValue);
     }
 
-    // Return updated settings
-    return reply.redirect('/api/settings');
+    // Inline the updated payload rather than 302-redirecting to GET.
+    // Clients that follow redirects still see the right body; clients
+    // that don't (fetch with redirect:'manual', some test harnesses)
+    // get the data straight away.
+    return buildSettingsPayload();
   });
 }

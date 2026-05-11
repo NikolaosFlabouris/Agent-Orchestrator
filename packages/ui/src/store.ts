@@ -7,6 +7,17 @@ interface Alert {
   message: string;
 }
 
+/** Monotonic per-resource counter the server bumps via the WS
+ *  `resource_changed` event. Components that hold a cached view of one
+ *  of these resources (Settings tabs, the Dashboard's profile lookup)
+ *  add the relevant version to their useEffect deps and refetch when
+ *  it ticks. Cheaper than re-broadcasting full payloads from the WS. */
+export interface ResourceVersions {
+  providers: number;
+  models: number;
+  profiles: number;
+}
+
 interface DashboardState {
   tasks: TaskResponse[];
   agentProfiles: AgentProfileResponse[];
@@ -16,6 +27,7 @@ interface DashboardState {
   dailyCompletions: number;
   forgejoBaseUrl: string;
   alerts: Alert[];
+  resourceVersions: ResourceVersions;
 
   // Actions
   setSnapshot: (data: {
@@ -38,6 +50,9 @@ interface DashboardState {
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
   setAgentProfiles: (profiles: AgentProfileResponse[]) => void;
+  /** Bump the version counter for one resource. Called by the WS
+   *  handler in Dashboard when a `resource_changed` event arrives. */
+  bumpResourceVersion: (resource: keyof ResourceVersions) => void;
 }
 
 const ZERO_POOL: HostPool = {
@@ -56,6 +71,7 @@ export const useStore = create<DashboardState>((set) => ({
   dailyCompletions: 0,
   forgejoBaseUrl: '',
   alerts: [],
+  resourceVersions: { providers: 0, models: 0, profiles: 0 },
 
   setSnapshot: (data) =>
     set({
@@ -97,4 +113,12 @@ export const useStore = create<DashboardState>((set) => ({
   clearAlerts: () => set({ alerts: [] }),
 
   setAgentProfiles: (profiles) => set({ agentProfiles: profiles }),
+
+  bumpResourceVersion: (resource) =>
+    set((state) => ({
+      resourceVersions: {
+        ...state.resourceVersions,
+        [resource]: state.resourceVersions[resource] + 1,
+      },
+    })),
 }));

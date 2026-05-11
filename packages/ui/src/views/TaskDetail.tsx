@@ -126,7 +126,16 @@ export function TaskDetail() {
   async function handleAgentProfileChange(newProfileId: string) {
     if (!task) return;
     const newProfile = newProfileId || null; // empty string → null (inherit)
-    const prevProfile = task.agent_profile_id;
+
+    // Capture the FULL pre-PATCH source-of-truth fields so rollback
+    // restores exactly what the server told us last, instead of
+    // reconstructing the source label from local state (which might
+    // drift if global/repo defaults changed since the last refetch).
+    const prevSnapshot = {
+      agent_profile_id: task.agent_profile_id,
+      effective_agent_profile_id: task.effective_agent_profile_id,
+      agent_profile_source: task.agent_profile_source,
+    };
 
     // Optimistic update — sync derived fields so the select label stays
     // consistent before the getTask refetch resolves.
@@ -151,23 +160,10 @@ export function TaskDetail() {
     try {
       await api.patchTask(task.id, { agent_profile_id: newProfile });
     } catch (err) {
-      // Roll back only when the PATCH itself failed (server hasn't persisted the change).
-      setTask((prev) => {
-        if (!prev) return prev;
-        const inherited = prev.repo_agent_profile_id ?? prev.global_agent_profile_id;
-        return {
-          ...prev,
-          agent_profile_id: prevProfile,
-          effective_agent_profile_id: prevProfile ?? inherited,
-          agent_profile_source: prevProfile !== null
-            ? 'task'
-            : prev.repo_agent_profile_id !== null
-              ? 'repo'
-              : prev.global_agent_profile_id !== null
-                ? 'global'
-                : 'none',
-        };
-      });
+      // Server didn't persist the change — restore the exact captured
+      // snapshot. No source-label reconstruction; we're trusting what
+      // the server reported originally.
+      setTask((prev) => (prev ? { ...prev, ...prevSnapshot } : prev));
       setAgentProfileError(err instanceof Error ? err.message : 'Failed to update agent profile');
       return;
     }

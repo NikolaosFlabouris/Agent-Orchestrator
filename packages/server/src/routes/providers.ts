@@ -6,9 +6,6 @@ import {
   updateProvider,
   deleteProvider,
   countModelsUsingProvider,
-  getTasks,
-  getRepo,
-  getAgentProfile,
   getModel,
   getModelsByProvider,
   getModelByProviderAndId,
@@ -16,12 +13,12 @@ import {
   updateModel,
   deleteModel,
   countProfilesUsingModel,
-  getSetting,
+  getActivePerProviderCounts,
 } from '../db.js';
-import { resolveProviderKey } from '../scheduler-pools.js';
 import type { Provider, ProviderKind, Model } from '@orchestrator/shared';
 import { PROVIDER_KINDS } from '@orchestrator/shared';
-import { listProviderKinds } from '../providers/kinds.js';
+import { getProviderKindSpec, listProviderKinds } from '../providers/kinds.js';
+import { broadcastResourceChanged } from '../ws/dashboard.js';
 
 interface ProviderWithStats extends Provider {
   /** How many models point at this provider. */
@@ -30,30 +27,38 @@ interface ProviderWithStats extends Provider {
   active_slots: number;
 }
 
-function enrich(provider: Provider): ProviderWithStats {
-  const active = [
-    ...getTasks({ status: 'preparing' }),
-    ...getTasks({ status: 'in-progress' }),
-    ...getTasks({ status: 'in-review' }),
-  ].filter((t) => t.container_id !== null);
+/** Strict allow-list of characters real-world model identifiers use.
+ *  Defence-in-depth against shell-metacharacter smuggling via DB rows
+ *  that later flow into harness `agent_command` strings. */
+const MODEL_ID_RE = /^[A-Za-z0-9._:/+@-]+$/;
 
-  let activeSlots = 0;
-  for (const task of active) {
-    const repo = getRepo(task.repo_id);
-    const profileId =
-      task.agent_profile_id ??
-      repo?.agent_profile_id ??
-      getSetting('default_agent_profile_id');
-    const profile = profileId ? getAgentProfile(profileId) : undefined;
-    const model = profile ? getModel(profile.model_pk) : undefined;
-    const key = resolveProviderKey(task, model?.provider_id);
-    if (key === provider.id) activeSlots++;
-  }
+/** Same allow-list applied to provider ids (operator-supplied). */
+const PROVIDER_ID_RE = /^[A-Za-z0-9._-]+$/;
 
+/** True when an exception is a better-sqlite3 UNIQUE constraint
+ *  violation. Lets us turn TOCTOU races on (provider_id, model_id)
+ *  inserts into a friendly 409 instead of a 500. */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    typeof (err as { code: unknown }).code === 'string' &&
+    (err as { code: string }).code.startsWith('SQLITE_CONSTRAINT_UNIQUE')
+  );
+}
+
+/** Pre-computed map of provider_id → active slot count, shared across
+ *  one batch of `enrich(provider)` calls so we don't walk the task list
+ *  N times per dashboard refresh. Pass an empty Map for the single-
+ *  provider POST/PATCH paths if you don't want the overhead. */
+function enrich(
+  provider: Provider,
+  activeCounts: Map<string, number>
+): ProviderWithStats {
   return {
     ...provider,
     models_count: countModelsUsingProvider(provider.id),
-    active_slots: activeSlots,
+    active_slots: activeCounts.get(provider.id) ?? 0,
   };
 }
 
@@ -90,9 +95,31 @@ function validateProviderShape(
   const notes =
     body.notes === undefined || body.notes === null ? null : String(body.notes);
 
-  // Ollama (the only self-hosted kind today) requires base_url.
-  if (kindRaw === 'ollama' && !baseUrl) {
-    return { error: 'base_url is required for ollama providers' };
+  // Data-driven per-kind validation, sourced from ProviderKindSpec. As
+  // new kinds are added (or existing ones flip required/optional flags)
+  // they pick up validation here automatically — no string compares.
+  const spec = getProviderKindSpec(kindRaw as ProviderKind);
+  if (spec.requires_base_url && !baseUrl) {
+    return {
+      error: `base_url is required for ${spec.display_name} providers`,
+    };
+  }
+  if (!spec.auth_optional && !authToken && !apiKeyEnvVar) {
+    return {
+      error:
+        `${spec.display_name} providers require a credential. ` +
+        `Set either auth_token (inline) or api_key_env_var (orchestrator-side env var).`,
+    };
+  }
+  // api_key_env_var must be a syntactically valid env-var name. Anything
+  // else is almost certainly a typo (e.g. accidentally pasting the key
+  // value into this field) and would silently fail at task launch.
+  if (apiKeyEnvVar && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnvVar)) {
+    return {
+      error:
+        "api_key_env_var must be a valid environment variable name " +
+        "(letters, digits, underscores; cannot start with a digit)",
+    };
   }
 
   return {
@@ -116,7 +143,11 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
 
   // GET /api/providers
   app.get('/api/providers', async () => {
-    return { providers: getProviders().map(enrich) };
+    // One SQL pass for the active-slot counts, shared across every
+    // provider in the response. Previously this was an O(providers ×
+    // active_tasks × 4 queries) walk per dashboard refresh.
+    const activeCounts = getActivePerProviderCounts();
+    return { providers: getProviders().map((p) => enrich(p, activeCounts)) };
   });
 
   // POST /api/providers
@@ -124,6 +155,12 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const body = request.body as Record<string, unknown>;
     const id = String(body.id ?? '').trim();
     if (!id) return reply.status(400).send({ error: 'id is required' });
+    if (!PROVIDER_ID_RE.test(id)) {
+      return reply.status(400).send({
+        error:
+          "id may only contain letters, digits, and the characters '.', '-', '_'",
+      });
+    }
     if (getProvider(id)) {
       return reply
         .status(409)
@@ -132,8 +169,20 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const v = validateProviderShape(body);
     if ('error' in v) return reply.status(400).send({ error: v.error });
 
-    insertProvider({ id, ...v.value });
-    return reply.status(201).send(enrich(getProvider(id)!));
+    try {
+      insertProvider({ id, ...v.value });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        return reply
+          .status(409)
+          .send({ error: `Provider '${id}' already exists` });
+      }
+      throw err;
+    }
+    broadcastResourceChanged('providers');
+    return reply
+      .status(201)
+      .send(enrich(getProvider(id)!, getActivePerProviderCounts()));
   });
 
   // PATCH /api/providers/:id
@@ -162,7 +211,8 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       if ('error' in v) return reply.status(400).send({ error: v.error });
 
       updateProvider(request.params.id, v.value);
-      return enrich(getProvider(request.params.id)!);
+      broadcastResourceChanged('providers');
+      return enrich(getProvider(request.params.id)!, getActivePerProviderCounts());
     }
   );
 
@@ -181,6 +231,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       deleteProvider(request.params.id);
+      broadcastResourceChanged('providers');
       return reply.status(204).send();
     }
   );
@@ -213,21 +264,63 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
           .status(400)
           .send({ error: 'model_id and display_name are required' });
       }
+      // model_id flows into shell-built `agent_command` strings (the
+      // CLI harnesses single-quote it, but we also enforce a strict
+      // character set here so an out-of-band DB edit can't smuggle
+      // metacharacters past defence-in-depth). Allow only the chars
+      // real-world model ids actually use: letters, digits, and
+      // `.-_:/+@`. Reject anything else with a clear message.
+      if (!MODEL_ID_RE.test(modelId)) {
+        return reply.status(400).send({
+          error:
+            "model_id may only contain letters, digits, and the characters '.', '-', '_', ':', '/', '+', '@'",
+        });
+      }
       if (getModelByProviderAndId(provider.id, modelId)) {
         return reply.status(409).send({
           error: `Model '${modelId}' already exists for provider '${provider.id}'`,
         });
       }
-      const inserted = insertModel({
-        provider_id: provider.id,
-        model_id: modelId,
-        display_name: displayName,
-      });
-      return reply.status(201).send(inserted);
+      try {
+        const inserted = insertModel({
+          provider_id: provider.id,
+          model_id: modelId,
+          display_name: displayName,
+        });
+        broadcastResourceChanged('models');
+        return reply.status(201).send(inserted);
+      } catch (err) {
+        // Race: a concurrent POST created the same (provider_id,
+        // model_id) between our existence check and the insert. The
+        // UNIQUE constraint trips; report as 409, not 500.
+        if (isUniqueViolation(err)) {
+          return reply.status(409).send({
+            error: `Model '${modelId}' already exists for provider '${provider.id}'`,
+          });
+        }
+        throw err;
+      }
     }
   );
 
   // PATCH /api/models/:pk — update by surrogate PK.
+  //
+  // Editable fields are deliberately restricted to `display_name` only.
+  //
+  // DO NOT add `model_id` (or `provider_id`) to this allowlist without
+  // first auditing every consumer that reads model.model_id at launch
+  // time. The harness modules build their `agent_command` strings from
+  // model.model_id and snapshot the resolved value onto the attempt
+  // row at the queued→in-progress transition (H5). Allowing model_id
+  // edits while a profile pointing at this model has in-flight
+  // attempts would create drift between the on-disk agent_command
+  // (built at launch from the OLD value, still running with the OLD
+  // value via meta.json) and the row's `model_id` column (which
+  // operators would expect to be the source of truth).
+  //
+  // If editing model_id is genuinely needed, the safer design is:
+  // create a new model row, repoint the profile, leave the old row.
+  // The H5 audit assumption is that model_id is immutable per row.
   app.patch<{ Params: { pk: string } }>(
     '/api/models/:pk',
     async (request, reply) => {
@@ -238,6 +331,20 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const existing = getModel(pk);
       if (!existing) return reply.status(404).send({ error: 'Model not found' });
       const body = request.body as Record<string, unknown>;
+      // Explicit rejection of model_id / provider_id PATCHes — see the
+      // comment above for the H5 reasoning.
+      if ('model_id' in body) {
+        return reply.status(400).send({
+          error:
+            'model_id is immutable. Create a new model row and repoint ' +
+            'any profile using this one if you need a different inference id.',
+        });
+      }
+      if ('provider_id' in body) {
+        return reply.status(400).send({
+          error: 'provider_id is immutable on an existing model row.',
+        });
+      }
       const updates: Partial<Pick<Model, 'display_name'>> = {};
       if ('display_name' in body) {
         const v = String(body.display_name ?? '').trim();
@@ -249,6 +356,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         updates.display_name = v;
       }
       updateModel(pk, updates);
+      broadcastResourceChanged('models');
       return getModel(pk);
     }
   );
@@ -270,6 +378,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       deleteModel(pk);
+      broadcastResourceChanged('models');
       return reply.status(204).send();
     }
   );

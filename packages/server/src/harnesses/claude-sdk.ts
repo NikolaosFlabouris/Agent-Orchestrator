@@ -1,4 +1,5 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
+import { assertOnlyKnownKeys } from './config.js';
 
 /** Claude Agent SDK harness. Programmatic streaming via the TypeScript
  *  SDK; the in-container `harness-sdk.ts` script reads the model from
@@ -30,5 +31,9 @@ export const claudeSdkHarness: HarnessSpec = {
       // Claude SDK accepts the bare model id (no `<provider>/...` prefix).
       resolved_model: model.model_id,
     };
+  },
+  validateConfig(config_json: Record<string, unknown>): void {
+    // No tunable knobs for v1 — reject anything to catch typos early.
+    assertOnlyKnownKeys(config_json, [], 'claude-sdk');
   },
 };

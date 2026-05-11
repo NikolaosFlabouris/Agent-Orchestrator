@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type { RepoResponse, AgentProfileResponse, IssueResponse } from '../api.js';
+import { useStore } from '../store.js';
 import ReactMarkdown from 'react-markdown';
 
 type Mode = 'create' | 'queue';
@@ -30,10 +31,18 @@ export function CreateTask() {
   const [humanMerge, setHumanMerge] = useState(false);
   const [humanReview, setHumanReview] = useState(false);
 
+  // Bumped by the Dashboard WS handler whenever an agent profile is
+  // created/edited/deleted on the server. Drives a refetch so this
+  // form's dropdown stays in sync with the Agent Profiles tab.
+  const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
-    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
+  }, [profilesVersion]);
 
   // Load issues when repo changes in queue mode
   useEffect(() => {
@@ -192,7 +201,7 @@ export function CreateTask() {
               {!repoId ? (
                 <p className="text-gray-500 text-sm">Select a repository first</p>
               ) : issues.length === 0 ? (
-                <p className="text-gray-500 text-sm">No queeable issues found</p>
+                <p className="text-gray-500 text-sm">No queueable issues found</p>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto">
                   {issues.map((issue) => (

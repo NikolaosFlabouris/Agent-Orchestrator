@@ -320,10 +320,10 @@ function ProvidersSection() {
         Inside each provider, add the model identifiers you want to expose
         as a <Code>model_id</Code> +{' '}
         <Code>display_name</Code> pair. The <Code>model_id</Code> must be
-        what the inference endpoint expects, without provider prefix —
-        harnesses that need <Code>&lt;provider&gt;/&lt;model&gt;</Code>
-        form prefix at launch. Deleting a model returns a 409 if any agent
-        profile references it.
+        what the inference endpoint expects, without any provider prefix —
+        harnesses that need the <Code>&lt;provider&gt;/&lt;model&gt;</Code>{' '}
+        form add the prefix themselves at launch time. Deleting a model
+        returns a 409 if any agent profile references it.
       </p>
     </section>
   );
@@ -396,10 +396,10 @@ function AgentProfilesSection() {
       <p className="text-sm text-gray-300">
         Required wall-clock timeout (minutes) for any agent attempt using
         this profile. Form pre-fills new profiles with <Code>2880</Code>{' '}
-        (48 h); the bootstrap profile uses <Code>120</Code> (2 h).
-        Typical values: <Code>120</Code> for paid APIs to cap token-burn
-        on a runaway agent; <Code>2880</Code> for free local servers
-        where a slow generation is cheap.
+        (48 h), matching the DB column default and the seeded bootstrap
+        profile. Typical values: <Code>120</Code> for paid APIs to cap
+        token-burn on a runaway agent; <Code>2880</Code> for free local
+        servers where a slow generation is cheap.
       </p>
     </section>
   );

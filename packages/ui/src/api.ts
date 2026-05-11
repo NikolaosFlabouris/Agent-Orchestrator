@@ -341,7 +341,20 @@ export interface ModelResponse {
   display_name: string;
 }
 
-export type HarnessId = 'claude-sdk' | 'claude-code' | 'opencode' | 'pi';
+/** The set of harness ids the client currently knows about. New
+ *  harnesses added server-side without a corresponding client deploy
+ *  appear at runtime — `HarnessId` widens to `string` so that case
+ *  doesn't fail typecheck or runtime narrowing, but the literal union
+ *  still gives autocomplete / exhaustiveness hints in switch-like
+ *  blocks for the known set. Concretely:
+ *    - `harness.id === 'claude-sdk'` continues to narrow correctly.
+ *    - An unknown id from the server (e.g. a new 'cursor' harness) is
+ *      still assignable to `HarnessId` and flows through dropdowns
+ *      and lookups without TS errors.
+ *  See `HarnessConfigForm` in Settings/AgentProfileSettings.tsx for the
+ *  fall-through "no config UI" handling of unknown ids. */
+export type KnownHarnessId = 'claude-sdk' | 'claude-code' | 'opencode' | 'pi';
+export type HarnessId = KnownHarnessId | (string & {});
 
 export interface HarnessSpec {
   id: HarnessId;

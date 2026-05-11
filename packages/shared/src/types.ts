@@ -55,6 +55,13 @@ export interface Attempt {
   /** Snapshot of the harness id resolved at attempt-launch time. Same
    *  reasoning as model_id — robust against profile edits mid-task. */
   harness_id: string | null;
+  /** Snapshot of profile.timeout_minutes captured at attempt-launch
+   *  time. Used by alerts.checkAlerts to compute the stuck-task
+   *  threshold so a profile edit mid-flight can't retroactively
+   *  shorten the threshold for an already-running attempt (H5a).
+   *  Null for pre-v22 attempts; consumers fall back to a live profile
+   *  read in that case. */
+  timeout_minutes_snapshot: number | null;
 }
 
 export type AttemptRole = 'develop' | 'review';

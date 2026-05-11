@@ -381,6 +381,80 @@ async function writeLocalGitExclude(
 
 const REPO_ROOT_PREFIX = '/repo/';
 
+/** Validate a harness-supplied target path. Returns the workdir-relative
+ *  path on success, or an Error with a human-readable reason on failure.
+ *
+ *  Defence layers:
+ *    1. Path must start with `/repo/` (per the documented contract).
+ *    2. After stripping the prefix, normalize and reject any path that
+ *       escapes the workdir (`..` segments, absolute paths via `//`).
+ *    3. Verified after `mkdir` (just before writeFile) by lstat'ing the
+ *       target's parent chain and refusing if any component is a symlink
+ *       pointing outside the workdir. A repo-tree-planted symlink at
+ *       `/repo/opencode.json` -> `/etc/passwd` would otherwise be
+ *       followed by `fsp.writeFile`. */
+function validateHarnessConfigPath(
+  fullPath: string,
+  workdir: string
+): { rel: string; target: string } | { error: string } {
+  if (!fullPath.startsWith(REPO_ROOT_PREFIX)) {
+    return { error: 'path must be absolute under /repo/' };
+  }
+  const rel = fullPath.slice(REPO_ROOT_PREFIX.length);
+  // posix.normalize collapses `.`/`..` and `//`. If the result still
+  // contains `..` segments (escapes the root) or is absolute, reject.
+  const normalized = path.posix.normalize(rel);
+  if (
+    normalized.startsWith('..') ||
+    normalized.startsWith('/') ||
+    normalized.split('/').includes('..')
+  ) {
+    return { error: 'path must not escape /repo/' };
+  }
+  if (normalized === '' || normalized === '.') {
+    return { error: 'path must not be empty' };
+  }
+  const target = path.join(workdir, normalized);
+  // Final guard: after path.join, the resolved target must still live
+  // strictly under workdir. (path.posix.normalize above already covers
+  // the simple cases; this is the belt-and-braces check that handles
+  // platform-specific quirks like Windows backslashes.)
+  const workdirReal = path.resolve(workdir) + path.sep;
+  if (!(path.resolve(target) + path.sep).startsWith(workdirReal)) {
+    return { error: 'path resolves outside the task workspace' };
+  }
+  return { rel: normalized, target };
+}
+
+/** Walk from the workdir down to (but excluding) `target` and refuse if
+ *  any intermediate component is a symlink. Symlinks pointing inside the
+ *  workdir would be fine if we resolved them, but a symlink at e.g.
+ *  `/repo/opencode.json` pointing at `/etc/passwd` would let
+ *  `fsp.writeFile(target)` overwrite an arbitrary file. Easier to refuse
+ *  symlinks in the harness-config path entirely than to canonicalize. */
+async function assertNoSymlinkOnPath(target: string, workdir: string): Promise<void> {
+  const rel = path.relative(workdir, target);
+  const parts = rel.split(path.sep);
+  // Walk components: workdir/parts[0], workdir/parts[0]/parts[1], ...
+  let current = workdir;
+  for (const part of parts) {
+    if (!part) continue;
+    current = path.join(current, part);
+    let st: fs.Stats;
+    try {
+      st = await fsp.lstat(current);
+    } catch {
+      // Doesn't exist yet — fine, writeFile / mkdir will create it.
+      return;
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to follow symlink at ${current} while writing harness config`
+      );
+    }
+  }
+}
+
 export async function writeHarnessConfigFiles(
   task: Task,
   files: HarnessConfigFile[],
@@ -389,59 +463,49 @@ export async function writeHarnessConfigFiles(
 ): Promise<void> {
   if (files.length === 0) return;
 
+  const workdir = getWorkdir(task);
   const repoExcludeEntries: string[] = [];
   for (const file of files) {
-    if (!file.path.startsWith(REPO_ROOT_PREFIX)) {
-      log.warn(
-        {
-          event: 'harness_config_invalid_path',
-          task_id: task.id,
-          harness_id: harnessId,
-          path: file.path,
-        },
-        'Rejecting harness config file: path must be absolute under /repo/'
+    const v = validateHarnessConfigPath(file.path, workdir);
+    if ('error' in v) {
+      // Refuse to launch rather than silently continue with no config —
+      // a missing opencode.json would mean OpenCode uses default
+      // provider settings, silently routing the run to the wrong place.
+      throw new Error(
+        `Harness '${harnessId}' supplied invalid config path '${file.path}': ${v.error}`
       );
-      continue;
     }
-    const rel = file.path.slice(REPO_ROOT_PREFIX.length);
-    if (rel.split(/[\\/]/).includes('..')) {
-      log.warn(
-        {
-          event: 'harness_config_invalid_path',
-          task_id: task.id,
-          harness_id: harnessId,
-          path: file.path,
-        },
-        'Rejecting harness config file: path must not contain ..'
-      );
-      continue;
-    }
-    const target = path.join(getWorkdir(task), rel);
     try {
-      await fsp.mkdir(path.dirname(target), { recursive: true });
-      await fsp.writeFile(target, file.content);
+      await fsp.mkdir(path.dirname(v.target), { recursive: true });
+      await assertNoSymlinkOnPath(v.target, workdir);
+      await fsp.writeFile(v.target, file.content);
       if (process.platform === 'linux') {
         try {
-          await fsp.chown(target, 1000, 1000);
+          await fsp.chown(v.target, AGENT_UID, AGENT_GID);
         } catch {
           /* best effort */
         }
       }
-      repoExcludeEntries.push(rel);
+      repoExcludeEntries.push(v.rel);
       log.info(
         {
           event: 'harness_config_written',
           task_id: task.id,
           harness_id: harnessId,
-          path: target,
+          path: v.target,
         },
         'Wrote harness config file'
       );
     } catch (err) {
-      log.warn(
+      log.error(
         { event: 'harness_config_write_failed', task_id: task.id, err },
         'Failed to write harness config file'
       );
+      // Hard failure: aborting the launch is better than running the
+      // agent against the wrong provider config (or no config at all).
+      throw err instanceof Error
+        ? err
+        : new Error(String(err));
     }
   }
 
@@ -449,7 +513,7 @@ export async function writeHarnessConfigFiles(
   // salvage `git add -A` doesn't sweep them into a commit. Local-only
   // file; never lands in upstream config.
   if (repoExcludeEntries.length > 0) {
-    await writeLocalGitExclude(getWorkdir(task), repoExcludeEntries);
+    await writeLocalGitExclude(workdir, repoExcludeEntries);
   }
 }
 

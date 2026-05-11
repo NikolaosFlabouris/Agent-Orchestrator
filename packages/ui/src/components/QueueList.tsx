@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   DndContext,
@@ -20,10 +20,17 @@ export function QueueList({ tasks }: { tasks: TaskResponse[] }) {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
-  // Sync with parent when tasks array identity or length changes
-  if (tasks !== items && tasks.length !== items.length) {
-    setItems(tasks);
-  }
+  // Sync local optimistic state with the parent's task list whenever
+  // the parent provides a new array. Most server-driven reorders are
+  // same-length (just position changes), so the previous
+  // `length !== items.length` guard skipped them and the local order
+  // diverged from the server's. We resync on any identity change. Done
+  // inside useEffect rather than directly during render to keep
+  // StrictMode quiet.
+  useEffect(() => {
+    if (tasks !== items) setItems(tasks);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks]);
 
   async function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -115,6 +122,8 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
       <span
         {...attributes}
         {...listeners}
+        role="button"
+        aria-label="Drag to reorder queue position"
         className="text-gray-600 select-none cursor-grab active:cursor-grabbing px-1"
       >
         ::

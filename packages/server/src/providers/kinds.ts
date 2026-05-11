@@ -98,7 +98,15 @@ const SPECS: Record<ProviderKind, ProviderKindSpec> = {
     description:
       'Local or remote Ollama server. Multi-instance: register one provider row per server.',
     requires_base_url: true,
-    container_env_name: null, // Ollama is configured via opencode.json / pi models.json, not an env var.
+    // OLLAMA_AUTH_TOKEN is an orchestrator convention — Ollama's wire
+    // protocol takes a Bearer header that's only meaningful when the
+    // operator has put basic-auth / a reverse proxy in front. We
+    // export the resolved credential under this name so the harnesses
+    // can reference it from runtime jq substitutions instead of
+    // baking the literal token into command strings or config files
+    // (which would otherwise persist into meta.json / scheduler logs
+    // / repo-side artifacts — H2).
+    container_env_name: 'OLLAMA_AUTH_TOKEN',
     auth_optional: true,
   },
 };
@@ -114,14 +122,29 @@ export function listProviderKinds(): ProviderKindSpec[] {
 /** Resolve the credential value the orchestrator should export into the
  *  agent container when launching against this provider. Returns null
  *  when no credential is needed (Ollama with no auth) OR when the
- *  configured credential isn't available (env var not set). The latter
- *  is a soft failure — caller decides what to do (typically fail the
- *  task with a clear error). */
+ *  configured credential isn't available (env var not set / set but
+ *  empty). The latter is a soft failure — caller decides what to do
+ *  (typically fail the task with a clear error).
+ *
+ *  Precedence: inline `auth_token` wins over `api_key_env_var`. The
+ *  Providers form rejects setting both at save time (H1), but we still
+ *  treat `auth_token` as the source of truth at runtime so a hand-
+ *  edited DB row produces predictable behaviour.
+ *
+ *  Whitespace handling: both inline and env-var values are trimmed
+ *  because a trailing newline on a pasted token would otherwise be sent
+ *  to the inference endpoint and rejected with a confusing
+ *  authentication error. */
 export function resolveProviderCredential(provider: Provider): string | null {
-  if (provider.auth_token) return provider.auth_token;
+  if (provider.auth_token) {
+    const trimmed = provider.auth_token.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
   if (provider.api_key_env_var) {
     const v = process.env[provider.api_key_env_var];
-    return v && v.length > 0 ? v : null;
+    if (v === undefined) return null;
+    const trimmed = v.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
   return null;
 }

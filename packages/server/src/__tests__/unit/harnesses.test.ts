@@ -91,8 +91,11 @@ describe('claude-code harness', () => {
     });
     expect(h.runtime).toBe('cli');
     expect(inv.agent_command).toContain('--max-turns 50');
-    expect(inv.agent_command).toContain('--model claude-sonnet-4-6');
-    expect(inv.agent_command).toContain('< /task/prompt.md');
+    // Model id and prompt path are shell-single-quoted as a
+    // defence-in-depth measure against metacharacters in operator-
+    // supplied DB rows. See packages/server/src/harnesses/shell.ts.
+    expect(inv.agent_command).toContain("--model 'claude-sonnet-4-6'");
+    expect(inv.agent_command).toContain("< '/task/prompt.md'");
     expect(inv.config_files).toEqual([]);
   });
 
@@ -120,6 +123,41 @@ describe('claude-code harness', () => {
     ).not.toThrow();
   });
 
+  // ---- C2 fix: --bare is per-provider-kind, not always-on. ----
+  // For anthropic (API key) we keep --bare for determinism + to skip
+  // doomed keychain/CLAUDE.md/MCP lookups. For claude-subscription
+  // (OAuth) we must drop --bare because it disables the OAuth code
+  // path the CLI uses to read CLAUDE_CODE_OAUTH_TOKEN.
+  describe('C2: --bare is conditional on provider kind', () => {
+    it('includes --bare for the anthropic API-key provider', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'claude-code' }),
+        model: mkModel(),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('--bare');
+    });
+
+    it('omits --bare for the claude-subscription OAuth provider', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'claude-code' }),
+        model: mkModel(),
+        provider: mkProvider({
+          kind: 'claude-subscription',
+          api_key_env_var: 'CLAUDE_CODE_OAUTH_TOKEN',
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).not.toContain('--bare');
+      // The rest of the headless-mode flags should still be present —
+      // we're only stripping --bare, not turning the CLI interactive.
+      expect(inv.agent_command).toContain('--print');
+      expect(inv.agent_command).toContain('--output-format stream-json');
+      expect(inv.agent_command).toContain('--dangerously-skip-permissions');
+    });
+  });
+
   it("validateConfig rejects non-positive-integer max_turns", () => {
     expect(() => h.validateConfig?.({ max_turns: 0 })).toThrow();
     expect(() => h.validateConfig?.({ max_turns: 1.5 })).toThrow();
@@ -141,7 +179,8 @@ describe('opencode harness', () => {
     });
     expect(inv.config_files).toEqual([]);
     expect(inv.resolved_model).toBe('anthropic/claude-sonnet-4-6');
-    expect(inv.agent_command).toContain('--model anthropic/claude-sonnet-4-6');
+    // Shell-single-quoted (see harnesses/shell.ts).
+    expect(inv.agent_command).toContain("--model 'anthropic/claude-sonnet-4-6'");
   });
 
   it('emits an opencode.json for ollama providers', () => {
@@ -174,6 +213,60 @@ describe('opencode harness', () => {
       })
     ).toThrow(/base_url/);
   });
+
+  // ---- H2 fix: Ollama auth_token never appears in the orchestrator-
+  // generated /repo/opencode.json or in agent_command. The token is
+  // exported as $OLLAMA_AUTH_TOKEN by the scheduler; agent_command
+  // substitutes it into the on-disk config via jq before launching
+  // opencode. ----
+  describe('H2: ollama credential never inlined', () => {
+    const SECRET = 'super-secret-bearer-zzz';
+
+    it('writes a sentinel apiKey into opencode.json, not the auth_token', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
+        provider: mkProvider({
+          kind: 'ollama',
+          base_url: 'http://192.168.1.10:11434',
+          auth_token: SECRET,
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      const cfg = JSON.parse(inv.config_files[0].content);
+      // Sentinel is present, secret is not.
+      expect(cfg.provider.ollama.options.apiKey).not.toBe(SECRET);
+      expect(inv.config_files[0].content).not.toContain(SECRET);
+    });
+
+    it('prepends a jq substitution step referencing $OLLAMA_AUTH_TOKEN', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
+        provider: mkProvider({
+          kind: 'ollama',
+          base_url: 'http://192.168.1.10:11434',
+          auth_token: SECRET,
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('jq');
+      expect(inv.agent_command).toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).not.toContain(SECRET);
+    });
+
+    it('skips the jq substitution for non-ollama (cloud) providers', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel(),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      // No config file to rewrite, so no jq step.
+      expect(inv.agent_command).not.toContain('jq');
+      expect(inv.agent_command).not.toContain('OLLAMA_AUTH_TOKEN');
+    });
+  });
 });
 
 describe('pi harness', () => {
@@ -193,7 +286,7 @@ describe('pi harness', () => {
     expect(inv.resolved_model).toBe('anthropic/claude-sonnet-4-6');
   });
 
-  it('builds an ollama-targeted models.json', () => {
+  it('builds an ollama-targeted models.json via jq', () => {
     const inv = h.buildInvocation({
       profile: mkProfile({ harness_id: 'pi' }),
       model: mkModel({ model_id: 'qwen2.5:7b' }),
@@ -204,10 +297,106 @@ describe('pi harness', () => {
       }),
       promptFilePath: '/task/prompt.md',
     });
-    // The JSON is single-quoted into a printf in agent_command; verify the
-    // url and model id end up there as expected.
-    expect(inv.agent_command).toContain('"baseUrl":"http://gpu:11434/v1"');
-    expect(inv.agent_command).toContain('"id":"qwen2.5:7b"');
+    // JSON is built at runtime by jq; the agent_command carries the
+    // URL and model id as `--arg` values, not the file contents
+    // directly.
+    expect(inv.agent_command).toContain('jq -n');
+    expect(inv.agent_command).toContain('http://gpu:11434/v1');
+    expect(inv.agent_command).toContain('qwen2.5:7b');
     expect(inv.resolved_model).toBe('ollama/qwen2.5:7b');
+  });
+
+  // ---- Cloud-kind support. Pi has built-in provider definitions for
+  // each of these and reads the standard env var the orchestrator
+  // exports (per ProviderKindSpec.container_env_name). The harness
+  // writes a minimal stanza naming the pi-side provider so pi
+  // recognises the --model argument. ----
+  describe('cloud kinds', () => {
+    // (orchestrator kind, expected pi-side provider name).
+    const cases: ReadonlyArray<[
+      'anthropic' | 'openai' | 'gemini' | 'mistral' | 'deepseek' | 'openrouter',
+      string,
+    ]> = [
+      ['anthropic', 'anthropic'],
+      ['openai', 'openai'],
+      // Pi calls Gemini "google" internally even though the env var is
+      // GEMINI_API_KEY. This is the one rename in PI_PROVIDER_NAMES.
+      ['gemini', 'google'],
+      ['mistral', 'mistral'],
+      ['deepseek', 'deepseek'],
+      ['openrouter', 'openrouter'],
+    ];
+
+    for (const [kind, piName] of cases) {
+      it(`maps kind '${kind}' to pi provider '${piName}' and emits a matching --model`, () => {
+        const inv = h.buildInvocation({
+          profile: mkProfile({ harness_id: 'pi' }),
+          model: mkModel({ model_id: 'some-model-id' }),
+          provider: mkProvider({ kind }),
+          promptFilePath: '/task/prompt.md',
+        });
+        expect(inv.resolved_model).toBe(`${piName}/some-model-id`);
+        // resolved_model is shell-quoted as the --model arg.
+        expect(inv.agent_command).toContain(`--model '${piName}/some-model-id'`);
+        // models.json declaration uses the same pi-side name as the
+        // provider key so the model id is reachable when pi resolves
+        // the --model argument.
+        expect(inv.agent_command).toContain(`--arg provider '${piName}'`);
+        // No Ollama-only fields leak into cloud-kind config.
+        expect(inv.agent_command).not.toContain('baseUrl');
+        expect(inv.agent_command).not.toContain('OLLAMA_AUTH_TOKEN');
+      });
+    }
+
+    it('throws for an unsupported kind like claude-subscription', () => {
+      expect(() =>
+        h.buildInvocation({
+          profile: mkProfile({ harness_id: 'pi' }),
+          model: mkModel(),
+          provider: mkProvider({ kind: 'claude-subscription' }),
+          promptFilePath: '/task/prompt.md',
+        })
+      ).toThrow(/does not support provider kind 'claude-subscription'/);
+    });
+  });
+
+  // ---- H2 fix: pi's ollama config is built by jq inside the agent
+  // container, reading the auth_token from $OLLAMA_AUTH_TOKEN. The
+  // operator's actual token never appears in agent_command or in any
+  // persisted artifact derived from it (meta.json, scheduler logs). ----
+  describe('H2: ollama credential never inlined', () => {
+    const SECRET = 'super-secret-bearer-zzz';
+
+    it('agent_command references $OLLAMA_AUTH_TOKEN, not the literal token', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b' }),
+        provider: mkProvider({
+          kind: 'ollama',
+          base_url: 'http://gpu:11434',
+          auth_token: SECRET,
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).not.toContain(SECRET);
+    });
+
+    it('falls back to the "ollama" placeholder when no token is set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b' }),
+        provider: mkProvider({
+          kind: 'ollama',
+          base_url: 'http://gpu:11434',
+          auth_token: null,
+          api_key_env_var: null,
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      // The shell parameter default `${OLLAMA_AUTH_TOKEN:-ollama}` is
+      // what produces "ollama" at runtime when the env var is unset.
+      expect(inv.agent_command).toContain(':-ollama');
+    });
   });
 });

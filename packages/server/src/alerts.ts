@@ -4,6 +4,7 @@ import {
   getRepo,
   getAgentProfile,
   getSetting,
+  getLatestAttempt,
 } from './db.js';
 import { getActiveResources } from './queue.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
@@ -43,29 +44,67 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
     }
   }
 
-  // 2. Task stuck (running > STUCK_TASK_TIMEOUT_MULTIPLIER × profile
-  // timeout). Resolution chain matches the scheduler:
-  // task.agent_profile_id → repo.agent_profile_id → settings.default.
-  // If none resolves we can't determine a threshold; skip the task.
+  // 2. Task stuck (running > STUCK_TASK_TIMEOUT_MULTIPLIER × timeout).
+  //
+  // Threshold sourcing — H5a: we prefer the snapshot recorded on the
+  // active attempt row (attempts.timeout_minutes_snapshot, captured at
+  // queued→in-progress transition) over a live profile read. This
+  // makes the alert reflect the threshold that was in effect when the
+  // attempt started, so an operator who shortens profile.timeout_minutes
+  // mid-flight doesn't retroactively flag every in-flight task as stuck.
+  //
+  // Fallback chain when the snapshot is absent (legacy pre-v22 rows or
+  // missing attempt row):
+  //   1. Live read of the profile via the standard resolution chain
+  //      (task → repo → settings.default).
+  //   2. Skip the task if even that can't resolve — we can't reason
+  //      about stuck without a threshold.
   const activeTasks = getTasks().filter(
     (t) => !TERMINAL_STATUSES.has(t.status) && t.status !== 'queued'
   );
   for (const task of activeTasks) {
     if (!task.started_at) continue;
-    const repo = getRepo(task.repo_id);
-    const profileId =
-      task.agent_profile_id ??
-      repo?.agent_profile_id ??
-      getSetting('default_agent_profile_id');
-    const profile = profileId ? getAgentProfile(profileId) : undefined;
-    if (!profile) continue; // profile gone; can't determine threshold
+
+    let thresholdMinutes: number | null = null;
+    let thresholdSource = 'snapshot';
+    let profileIdForMessage: string | null = null;
+
+    const latest = getLatestAttempt(task.id);
+    if (
+      latest &&
+      typeof latest.timeout_minutes_snapshot === 'number' &&
+      latest.timeout_minutes_snapshot > 0
+    ) {
+      thresholdMinutes = latest.timeout_minutes_snapshot;
+      profileIdForMessage = latest.harness_id ? `attempt #${latest.id}` : null;
+    } else {
+      // Legacy / pre-v22 fallback. Same resolution as scheduler.
+      const repo = getRepo(task.repo_id);
+      const profileId =
+        task.agent_profile_id ??
+        repo?.agent_profile_id ??
+        getSetting('default_agent_profile_id');
+      const profile = profileId ? getAgentProfile(profileId) : undefined;
+      if (!profile) continue; // profile gone; can't determine threshold
+      thresholdMinutes = profile.timeout_minutes;
+      thresholdSource = 'profile';
+      profileIdForMessage = `profile '${profile.id}'`;
+    }
+
     const stuckThresholdMs =
-      profile.timeout_minutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
+      thresholdMinutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
     const elapsed = Date.now() - new Date(task.started_at).getTime();
     if (elapsed > stuckThresholdMs) {
+      const sourceLabel =
+        thresholdSource === 'snapshot'
+          ? 'snapshot'
+          : `live ${profileIdForMessage}`;
       alerts.push({
         level: 'warning',
-        message: `Task #${task.issue_id} appears stuck (running ${Math.floor(elapsed / 60000)}m, profile '${profile.id}' timeout is ${profile.timeout_minutes}m)`,
+        message:
+          `Task #${task.issue_id} appears stuck ` +
+          `(running ${Math.floor(elapsed / 60000)}m, ` +
+          `timeout is ${thresholdMinutes}m from ${sourceLabel})`,
       });
     }
   }

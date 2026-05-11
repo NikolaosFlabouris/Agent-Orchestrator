@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import {
   getAgentProfile,
-  getAgentProfiles,
+  getAgentProfilesWithStats,
   insertAgentProfile,
   updateAgentProfile,
   deleteAgentProfile,
@@ -11,22 +11,21 @@ import {
   getProvider,
   getSetting,
 } from '../db.js';
-import { listHarnesses, getHarness } from '../harnesses/index.js';
+import type { AgentProfileWithJoinedStats } from '../db.js';
+import {
+  listHarnesses,
+  getHarness,
+  checkHarnessProviderCompatibility,
+} from '../harnesses/index.js';
 import type { AgentProfile, HarnessId } from '@orchestrator/shared';
 import { HARNESS_IDS } from '@orchestrator/shared';
+import { broadcastResourceChanged } from '../ws/dashboard.js';
 
-interface AgentProfileWithStats extends AgentProfile {
-  /** How many repos point at this profile as their default. */
-  repos_using: number;
-  /** How many tasks have this profile as a per-task override. */
-  tasks_using: number;
-  /** Convenience: surface the model + provider ids so the UI doesn't
-   *  need a second round trip per profile. */
-  provider_id: string | null;
-  model_id: string | null;
-}
+type AgentProfileWithStats = AgentProfileWithJoinedStats;
 
-function enrich(profile: AgentProfile): AgentProfileWithStats {
+/** Per-profile enrich for the singleton paths (POST/PATCH return value).
+ *  The list path uses `getAgentProfilesWithStats()` which avoids the N+1. */
+function enrichOne(profile: AgentProfile): AgentProfileWithStats {
   const model = getModel(profile.model_pk);
   return {
     ...profile,
@@ -72,7 +71,8 @@ function validateBody(
   }
   // Verify the model's provider still exists too — defensive against a
   // race where the provider was deleted between client load and submit.
-  if (!getProvider(model.provider_id)) {
+  const provider = getProvider(model.provider_id);
+  if (!provider) {
     return { error: `model's provider '${model.provider_id}' no longer exists` };
   }
   if (!Number.isInteger(timeout_minutes) || timeout_minutes < 1) {
@@ -85,8 +85,9 @@ function validateBody(
   // Per-harness config validation. The harness module owns its config
   // schema; we just call its validateConfig hook (if present) and let it
   // throw with a human-readable message.
+  let spec;
   try {
-    const spec = getHarness(harness_id as HarnessId);
+    spec = getHarness(harness_id as HarnessId);
     spec.validateConfig?.(config_json);
   } catch (err) {
     return {
@@ -94,11 +95,15 @@ function validateBody(
     };
   }
 
-  // Note: harness↔provider compatibility is intentionally NOT validated
-  // here (E3 design decision). If the operator pairs a harness with an
-  // unsupported provider kind, the failure surfaces at task launch with
-  // a clear "harness X doesn't support kind Y" message from
-  // harness.buildInvocation.
+  // Harness↔provider compatibility check (M2). The same allowlist
+  // `buildInvocation` enforces at launch is re-checked here so the
+  // operator sees a save-time error rather than a deferred launch
+  // failure. The runtime check stays in place as the authority — this
+  // is just a friendlier earlier surface for the same condition.
+  const compat = checkHarnessProviderCompatibility(spec, provider.kind);
+  if (!compat.ok) {
+    return { error: compat.error };
+  }
 
   void isCreate; // currently unused; signature kept for future divergence.
   return {
@@ -128,7 +133,7 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
 
   // GET /api/agent-profiles
   app.get('/api/agent-profiles', async () => {
-    return { profiles: getAgentProfiles().map(enrich) };
+    return { profiles: getAgentProfilesWithStats() };
   });
 
   // POST /api/agent-profiles
@@ -145,7 +150,8 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
     if ('error' in v) return reply.status(400).send({ error: v.error });
 
     insertAgentProfile({ id, ...v.value });
-    return reply.status(201).send(enrich(getAgentProfile(id)!));
+    broadcastResourceChanged('profiles');
+    return reply.status(201).send(enrichOne(getAgentProfile(id)!));
   });
 
   // PATCH /api/agent-profiles/:id
@@ -169,7 +175,8 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
       if ('error' in v) return reply.status(400).send({ error: v.error });
 
       updateAgentProfile(request.params.id, v.value);
-      return enrich(getAgentProfile(request.params.id)!);
+      broadcastResourceChanged('profiles');
+      return enrichOne(getAgentProfile(request.params.id)!);
     }
   );
 
@@ -198,6 +205,7 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       deleteAgentProfile(profile.id);
+      broadcastResourceChanged('profiles');
       return reply.status(204).send();
     }
   );

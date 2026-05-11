@@ -39,6 +39,28 @@ const meta: Meta = JSON.parse(readFileSync('/task/meta.json', 'utf-8'));
 // The orchestrator assembles the full prompt before the container starts.
 const prompt = readFileSync('/task/prompt.md', 'utf-8');
 
+// The orchestrator's harness layer is the source of truth for what
+// model this run should target — it resolves `meta.model` from the
+// agent profile and writes it into meta.json at launch. An empty/
+// missing value here means the orchestrator produced a malformed
+// launch context, not that we should silently fall back to a guess.
+// Fail loudly so the bug surfaces immediately rather than producing
+// usage rows attributed to the wrong model.
+if (!meta.model || typeof meta.model !== 'string') {
+  writeFileSync(
+    '/output/result.json',
+    JSON.stringify({
+      status: 'failure',
+      exit_code: 1,
+      error_message:
+        "meta.model missing or empty — orchestrator failed to resolve a model id at launch time. " +
+        "Check the agent profile's model_pk and the provider/model rows.",
+      usage: null,
+    })
+  );
+  process.exit(0);
+}
+
 // Run install steps sequentially under a single flock against the shared
 // /cache mount. The lock prevents two containers on the same repo racing on
 // the dependency cache. Each step runs in its declared cwd. The orchestrator
@@ -77,7 +99,7 @@ async function main() {
   const usage = {
     input_tokens: 0,
     output_tokens: 0,
-    model: meta.model || 'sonnet',
+    model: meta.model,
   };
   const timeoutMs = meta.max_runtime_minutes * 60 * 1000;
   const timer = setTimeout(() => {
@@ -105,7 +127,7 @@ async function main() {
       prompt,
       options: {
         permissionMode: 'bypassPermissions',
-        model: meta.model || 'sonnet',
+        model: meta.model,
       },
     })) {
       // Accumulate token usage from each message

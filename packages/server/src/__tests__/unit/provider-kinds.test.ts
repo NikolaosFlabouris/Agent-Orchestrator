@@ -55,8 +55,13 @@ describe('listProviderKinds / getProviderKindSpec', () => {
     );
   });
 
-  it('maps ollama to no container env name (config-file-driven)', () => {
-    expect(getProviderKindSpec('ollama').container_env_name).toBeNull();
+  it('routes ollama auth through OLLAMA_AUTH_TOKEN at runtime', () => {
+    // Previously null (config-file-driven) — moved into env so the
+    // harness scripts can reference it without baking the literal
+    // token into agent_command / opencode.json. See H2 fix.
+    expect(getProviderKindSpec('ollama').container_env_name).toBe(
+      'OLLAMA_AUTH_TOKEN'
+    );
   });
 });
 
@@ -121,8 +126,25 @@ describe('buildProviderEnv', () => {
     expect(env).toEqual({ ANTHROPIC_API_KEY: 'sk-team' });
   });
 
-  it('returns an empty object for ollama (no env-var auth)', () => {
+  it('returns an empty object for ollama when no credential is configured', () => {
+    // No auth_token, no api_key_env_var → no env var exported. The
+    // harnesses fall back to the literal "ollama" placeholder.
     expect(buildProviderEnv(mkProvider({ kind: 'ollama' }))).toEqual({});
+  });
+
+  it('exports OLLAMA_AUTH_TOKEN when ollama has an inline auth_token', () => {
+    expect(
+      buildProviderEnv(mkProvider({ kind: 'ollama', auth_token: 'bearer-xyz' }))
+    ).toEqual({ OLLAMA_AUTH_TOKEN: 'bearer-xyz' });
+  });
+
+  it('exports OLLAMA_AUTH_TOKEN from the operator-named env var when set', () => {
+    process.env.MY_OLLAMA_KEY = 'bearer-from-env';
+    expect(
+      buildProviderEnv(
+        mkProvider({ kind: 'ollama', api_key_env_var: 'MY_OLLAMA_KEY' })
+      )
+    ).toEqual({ OLLAMA_AUTH_TOKEN: 'bearer-from-env' });
   });
 
   it('returns an empty object when no credential resolves', () => {

@@ -1,0 +1,86 @@
+import { useEffect, useState } from 'react';
+import { api } from '../../api.js';
+import type { CredentialStatus } from '../../api.js';
+
+/** Credentials tab — read-only view of orchestrator and provider
+ *  credential env-var statuses. */
+export function CredentialSettings() {
+  const [credentials, setCredentials] = useState<CredentialStatus[]>([]);
+
+  useEffect(() => {
+    api.getCredentials().then((r) => setCredentials(r.credentials)).catch(() => {});
+  }, []);
+
+  const orchestrator = credentials.filter((c) => c.scope === 'orchestrator');
+  const provider = credentials.filter((c) => c.scope === 'provider');
+
+  function row(cred: CredentialStatus) {
+    return (
+      <div
+        // Composite key — `provider_id` is null for orchestrator-scope
+        // credentials, so just using it would collide for every
+        // orchestrator row. Including scope+name disambiguates.
+        key={`${cred.scope}-${cred.name}-${cred.provider_id ?? ''}`}
+        className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3"
+      >
+        <div>
+          <span className="font-mono text-sm">{cred.name}</span>
+          {cred.provider_id && (
+            <span className="text-gray-500 text-xs ml-2">
+              for provider <span className="font-mono">{cred.provider_id}</span>
+            </span>
+          )}
+        </div>
+        {cred.configured ? (
+          <span className="text-green-400 text-sm">configured</span>
+        ) : (
+          <span className="text-red-400 text-sm">not set</span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <p className="text-sm text-gray-400">
+        Credentials are loaded from environment variables on the orchestrator
+        host. To update, modify the orchestrator's <span className="font-mono">.env</span>{' '}
+        file and restart. Provider credentials can also be configured inline
+        on a per-provider basis under <em>Providers & Models</em> (stored in
+        the database rather than the env).
+      </p>
+
+      {credentials.length === 0 ? (
+        <p className="text-gray-500 text-sm">Loading...</p>
+      ) : (
+        <>
+          <div>
+            <h3 className="text-sm font-medium mb-2">
+              Orchestrator-only secrets
+              <span className="text-gray-500 font-normal text-xs ml-2">
+                used by the orchestrator process; never sent to agent containers
+              </span>
+            </h3>
+            <div className="space-y-2">{orchestrator.map(row)}</div>
+          </div>
+
+          <div>
+            <h3 className="text-sm font-medium mb-2">
+              Provider keys forwarded to agent containers
+              <span className="text-gray-500 font-normal text-xs ml-2">
+                derived from each provider's <span className="font-mono">api_key_env_var</span>
+              </span>
+            </h3>
+            {provider.length === 0 ? (
+              <p className="text-gray-500 text-sm">
+                No providers reference an env-var pointer.
+              </p>
+            ) : (
+              <div className="space-y-2">{provider.map(row)}</div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

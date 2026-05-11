@@ -214,8 +214,17 @@ export async function removeContainer(
   }
 }
 
+/** Minimal duck-typed container interface for `wait()`. The scheduler
+ *  hands us either a full Docker.Container or a lightweight stub from
+ *  the recovery path; both expose `id` and `wait()`. Accepting the
+ *  narrower shape lets callsites drop the `as any` cast. */
+export interface WaitableContainer {
+  id: string;
+  wait(): Promise<{ StatusCode: number }>;
+}
+
 export async function waitForContainer(
-  container: Docker.Container
+  container: WaitableContainer
 ): Promise<{ StatusCode: number }> {
   return container.wait();
 }

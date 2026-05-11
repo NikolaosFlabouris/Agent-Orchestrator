@@ -96,6 +96,7 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     feedback: null,
     model_id: null,
     harness_id: null,
+    timeout_minutes_snapshot: null,
     ...overrides,
   };
 }

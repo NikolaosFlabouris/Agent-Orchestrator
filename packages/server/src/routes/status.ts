@@ -3,21 +3,15 @@ import {
   getQueuedTasks,
   getDb,
   getSettingInt,
-  getSetting,
   getProviders,
-  getTasks,
-  getRepo,
-  getAgentProfile,
-  getModel,
+  getActivePerProviderCounts,
 } from "../db.js";
 import { getActiveResources } from "../queue.js";
 import type { Scheduler } from "../scheduler.js";
 import type { Poller } from "../polling.js";
 import { checkAlerts } from "../alerts.js";
 import { ensureDiskCache, getDiskCache } from "../disk-usage.js";
-import { resolveProviderKey } from "../scheduler-pools.js";
 import { detectHostCapacity } from "../host-capacity.js";
-import { listProviderKinds } from "../providers/kinds.js";
 import { ORCHESTRATOR_ENV_VARS } from "../credentials.js";
 
 const startTime = Date.now();
@@ -52,26 +46,11 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
       const cachesBytes = disk?.caches ?? 0;
 
       // Per-provider slot accounting — drives the Pools row on the dashboard.
-      // Resolution: task → profile → model → provider_id. Same chain the
-      // scheduler uses; missing-link tasks bucket under NO_PROVIDER_KEY
-      // and don't count against any provider's limit.
-      const activeTasks = [
-        ...getTasks({ status: 'preparing' }),
-        ...getTasks({ status: 'in-progress' }),
-        ...getTasks({ status: 'in-review' }),
-      ].filter((t) => t.container_id !== null);
-      const activePerProvider = new Map<string, number>();
-      for (const task of activeTasks) {
-        const repo = getRepo(task.repo_id);
-        const profileId =
-          task.agent_profile_id ??
-          repo?.agent_profile_id ??
-          getSetting('default_agent_profile_id');
-        const profile = profileId ? getAgentProfile(profileId) : undefined;
-        const model = profile ? getModel(profile.model_pk) : undefined;
-        const key = resolveProviderKey(task, model?.provider_id);
-        activePerProvider.set(key, (activePerProvider.get(key) ?? 0) + 1);
-      }
+      // Single SQL pass: walks the task→profile→model→provider chain in
+      // the DB rather than per-task in JS. Tasks whose chain dead-ends
+      // (no profile resolvable) bucket under '' (empty key) and are not
+      // counted against any provider's limit.
+      const activePerProvider = getActivePerProviderCounts();
       const providers = getProviders().map((p) => ({
         id: p.id,
         display_name: p.display_name,

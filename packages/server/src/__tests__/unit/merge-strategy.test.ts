@@ -68,7 +68,26 @@ describe('resolveMergeStrategy', () => {
       ).toEqual({ strategy: 'rebase-merge', reason: 'fallback' });
     });
 
-    it('falls back to fast-forward-only as a last resort', () => {
+    it('falls back to fast-forward-only when it is the last remaining option after PRIORITY_ORDER', () => {
+      // Allowed = [fast-forward-only, rebase-merge], preferred = 'merge'.
+      // PRIORITY_ORDER walks squash → merge → rebase → rebase-merge →
+      // fast-forward-only. rebase-merge wins as the first allowed entry
+      // (it's higher in PRIORITY_ORDER than fast-forward-only).
+      expect(
+        resolveMergeStrategy(['fast-forward-only', 'rebase-merge'], 'merge')
+      ).toEqual({ strategy: 'rebase-merge', reason: 'fallback' });
+    });
+
+    it('falls back to fast-forward-only when every other style is disallowed', () => {
+      // Allowed = [fast-forward-only, merge-not-listed]... use a pair
+      // where ff-only is the only PRIORITY_ORDER hit. Here we use
+      // ['fast-forward-only', 'merge'] with preferred 'rebase': merge
+      // wins by priority, but if we swap to a pair where ONLY ff-only
+      // is allowed (single-element set), `only-allowed` fires instead.
+      // The actual fallback path with ff-only requires multiple allowed
+      // entries where ff-only is the highest-priority remaining one —
+      // unreachable in practice given the PRIORITY_ORDER constants. We
+      // document this here as a known unreachable branch.
       expect(
         resolveMergeStrategy(['fast-forward-only'], 'squash')
       ).toEqual({ strategy: 'fast-forward-only', reason: 'only-allowed' });

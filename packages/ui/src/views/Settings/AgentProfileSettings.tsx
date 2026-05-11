@@ -1,0 +1,416 @@
+import { useEffect, useState } from 'react';
+import { api } from '../../api.js';
+import { useStore } from '../../store.js';
+import type {
+  ProviderResponse,
+  ModelResponse,
+  AgentProfileResponse,
+  HarnessSpec,
+  HarnessId,
+} from '../../api.js';
+
+/** Agent Profiles tab — pair a harness (Claude SDK / Claude Code /
+ *  OpenCode / Pi) with a provider+model and harness-specific config. */
+export function AgentProfileSettings() {
+  const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
+  const [harnesses, setHarnesses] = useState<HarnessSpec[]>([]);
+  const [providers, setProviders] = useState<ProviderResponse[]>([]);
+  // Lazy initializer: a `new Map()` literal would allocate on every
+  // render and useState would discard all but the first. The thunk
+  // form runs once on mount.
+  const [allModels, setAllModels] = useState<Map<string, ModelResponse[]>>(() => new Map());
+  const [editing, setEditing] = useState<Partial<AgentProfileResponse> | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+  const providersVersion = useStore((s) => s.resourceVersions.providers);
+  const modelsVersion = useStore((s) => s.resourceVersions.models);
+
+  // Harness registry is code-defined and never mutates at runtime, so
+  // we fetch it once.
+  useEffect(() => {
+    api.getHarnesses().then((r) => setHarnesses(r.harnesses)).catch(() => {});
+  }, []);
+
+  // Profile list — refresh on any profile mutation.
+  useEffect(() => {
+    api.getAgentProfiles().then((r) => setProfiles(r.profiles)).catch(() => {});
+  }, [profilesVersion]);
+
+  // Providers + their model lists — refresh when either set mutates.
+  // We re-fetch the model lookup map any time providers OR models
+  // change so the form's model dropdown never shows a stale option.
+  useEffect(() => {
+    api
+      .getProviders()
+      .then((r) => {
+        setProviders(r.providers);
+        // Pre-fetch each provider's models so the model picker is responsive.
+        // Use allSettled so a 404 on a single provider (e.g. just deleted)
+        // doesn't blank out the whole map — surviving entries still
+        // populate the dropdown.
+        Promise.allSettled(
+          r.providers.map((p) =>
+            api.getProviderModels(p.id).then((m) => [p.id, m.models] as const)
+          )
+        ).then((results) => {
+          const entries = results
+            .filter(
+              (r): r is PromiseFulfilledResult<readonly [string, ModelResponse[]]> =>
+                r.status === 'fulfilled'
+            )
+            .map((r) => r.value);
+          setAllModels(new Map(entries));
+        });
+      })
+      .catch(() => {});
+  }, [providersVersion, modelsVersion]);
+
+  function startCreate(): void {
+    setEditing({
+      id: '',
+      display_name: '',
+      harness_id: 'claude-sdk',
+      model_pk: 0,
+      config_json: {},
+      // Matches DB default (`agent_profiles.timeout_minutes DEFAULT
+      // 2880`) and the Help-text documented default. 2880 min = 2 days
+      // — comfortably long for autonomous runs without masking a stuck
+      // agent indefinitely.
+      timeout_minutes: 2880,
+    });
+    setIsNew(true);
+    setError(null);
+  }
+
+  function startEdit(p: AgentProfileResponse): void {
+    setEditing({ ...p });
+    setIsNew(false);
+    setError(null);
+  }
+
+  async function handleSave(): Promise<void> {
+    if (!editing) return;
+    setError(null);
+    try {
+      if (isNew) {
+        await api.createAgentProfile(editing);
+      } else {
+        await api.updateAgentProfile(editing.id!, {
+          display_name: editing.display_name,
+          harness_id: editing.harness_id,
+          model_pk: editing.model_pk,
+          config_json: editing.config_json,
+          timeout_minutes: editing.timeout_minutes,
+        });
+      }
+      setEditing(null);
+      setIsNew(false);
+      // Profile list refreshes automatically via the resource_changed
+      // websocket event the server broadcasts on successful save.
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    }
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    if (!window.confirm(`Delete profile ${id}?`)) return;
+    setError(null);
+    try {
+      await api.deleteAgentProfile(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed');
+    }
+  }
+
+  const editingHarness = editing?.harness_id
+    ? harnesses.find((h) => h.id === editing.harness_id)
+    : undefined;
+
+  // Build the model dropdown filtered by the chosen harness's supported
+  // provider kinds. The server-side compatibility check (M2) catches
+  // any mismatch at save time; this filter is the UX hint.
+  const modelOptions = providers
+    .filter((p) =>
+      editingHarness ? editingHarness.supported_provider_kinds.includes(p.kind) : true
+    )
+    .flatMap((p) => {
+      const models = allModels.get(p.id) ?? [];
+      return models.map((m) => ({ provider: p, model: m }));
+    });
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-gray-400">
+        An agent profile pairs a harness (Claude SDK, Claude Code, OpenCode, Pi)
+        with a specific model from one of your providers, plus any harness-
+        specific configuration. Tasks reference profiles either directly
+        (per-task override), or inherit from their repo's default, or fall
+        back to the global default under <em>Global Settings</em>.
+      </div>
+
+      {error && (
+        <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm rounded px-3 py-2">
+          {error}
+        </div>
+      )}
+
+      {profiles.length === 0 && !editing ? (
+        <p className="text-gray-500 text-sm">
+          No agent profiles configured. Add one below.
+        </p>
+      ) : (
+        profiles.map((p) => {
+          const harness = harnesses.find((h) => h.id === p.harness_id);
+          return (
+            <div
+              key={p.id}
+              className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
+            >
+              <div>
+                <span className="font-medium">{p.display_name}</span>
+                <span className="text-gray-500 text-sm ml-2">({p.id})</span>
+                <div className="text-gray-500 text-xs mt-1">
+                  {harness?.display_name ?? p.harness_id} ·{' '}
+                  <span className="font-mono">
+                    {p.provider_id}/{p.model_id}
+                  </span>{' '}
+                  · timeout {p.timeout_minutes}m · {p.repos_using} repo
+                  {p.repos_using === 1 ? '' : 's'}, {p.tasks_using} task
+                  {p.tasks_using === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
+                <button
+                  onClick={() => startEdit(p)}
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDelete(p.id)}
+                  className="text-red-400 hover:text-red-300"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          );
+        })
+      )}
+
+      <button
+        onClick={startCreate}
+        className="text-sm text-blue-400 hover:text-blue-300"
+      >
+        + Add agent profile
+      </button>
+
+      {editing && editingHarness && (
+        <div className="bg-gray-900 border border-gray-700 rounded p-4 space-y-4 mt-4">
+          <h3 className="font-medium">
+            {isNew ? 'Add Agent Profile' : `Edit ${editing.display_name}`}
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm mb-1">ID</label>
+              <input
+                value={editing.id ?? ''}
+                onChange={(e) => setEditing({ ...editing, id: e.target.value })}
+                disabled={!isNew}
+                placeholder="e.g. claude-sdk-sonnet"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Display name</label>
+              <input
+                value={editing.display_name ?? ''}
+                onChange={(e) =>
+                  setEditing({ ...editing, display_name: e.target.value })
+                }
+                placeholder="e.g. Claude SDK + Sonnet"
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-1">Harness</label>
+              <select
+                value={editing.harness_id ?? 'claude-sdk'}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    harness_id: e.target.value as HarnessId,
+                    config_json: {}, // reset knobs when harness changes
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                {harnesses.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.display_name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Supports kinds: {editingHarness.supported_provider_kinds.join(', ')}
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm mb-1">
+                Timeout (minutes) <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={editing.timeout_minutes ?? 2880}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    timeout_minutes: parseInt(e.target.value, 10) || 1,
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">
+                Model
+                <span className="text-gray-500 font-normal">
+                  {' '}— filtered to providers compatible with this harness
+                </span>
+              </label>
+              {modelOptions.length === 0 ? (
+                <p className="text-xs text-yellow-400">
+                  No models available for harness '{editingHarness.id}'. Add
+                  models to a {editingHarness.supported_provider_kinds.join(' / ')}{' '}
+                  provider under <em>Providers & Models</em>.
+                </p>
+              ) : (
+                <>
+                  <select
+                    value={editing.model_pk ?? 0}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        model_pk: parseInt(e.target.value, 10),
+                      })
+                    }
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                  >
+                    <option value={0}>Select model…</option>
+                    {/* If the profile points at a model that's no longer in
+                        the visible options (deleted in another tab, or
+                        the harness's compatible-kinds list changed),
+                        render a synthetic option so the operator can SEE
+                        the dangling pointer instead of the select
+                        silently snapping to the placeholder. */}
+                    {editing.model_pk &&
+                      !modelOptions.some(
+                        ({ model }) => model.id === editing.model_pk
+                      ) && (
+                        <option value={editing.model_pk}>
+                          (missing model — pk {editing.model_pk}, pick a
+                          replacement)
+                        </option>
+                      )}
+                    {modelOptions.map(({ provider, model }) => (
+                      <option key={model.id} value={model.id}>
+                        {provider.display_name} — {model.display_name} (
+                        <span>{model.model_id}</span>)
+                      </option>
+                    ))}
+                  </select>
+                  {editing.model_pk !== undefined &&
+                    editing.model_pk !== 0 &&
+                    !modelOptions.some(
+                      ({ model }) => model.id === editing.model_pk
+                    ) && (
+                      <p className="mt-1 text-xs text-yellow-400">
+                        The previously selected model is no longer available
+                        for this harness. Pick a replacement before saving.
+                      </p>
+                    )}
+                </>
+              )}
+            </div>
+          </div>
+
+          <HarnessConfigForm
+            harnessId={editingHarness.id}
+            config={editing.config_json ?? {}}
+            onChange={(cfg) => setEditing({ ...editing, config_json: cfg })}
+          />
+
+          <div className="flex gap-3">
+            <button
+              onClick={handleSave}
+              disabled={!editing.model_pk}
+              className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-4 py-2 rounded text-sm"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => {
+                setEditing(null);
+                setIsNew(false);
+                setError(null);
+              }}
+              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Per-harness config form. Each harness has its own component matched
+ *  by id. Empty for v1 harnesses with no operator-tunable knobs.
+ *
+ *  Note: `harnessId` is typed as `HarnessId` (a string literal union)
+ *  for the known set, but practically this component should render
+ *  "no config" for any unknown id rather than crashing. The default
+ *  branch handles that. */
+function HarnessConfigForm({
+  harnessId,
+  config,
+  onChange,
+}: {
+  harnessId: HarnessId;
+  config: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
+}) {
+  if (harnessId === 'claude-code') {
+    const maxTurns = typeof config.max_turns === 'number' ? config.max_turns : 100;
+    return (
+      <div>
+        <label className="block text-sm mb-1">
+          max_turns
+          <span className="text-gray-500 font-normal">
+            {' '}— passed to <span className="font-mono">claude --max-turns N</span>
+          </span>
+        </label>
+        <input
+          type="number"
+          min={1}
+          value={maxTurns}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            onChange({ ...config, max_turns: Number.isFinite(n) && n > 0 ? n : 100 });
+          }}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+        />
+      </div>
+    );
+  }
+  // claude-sdk, opencode, pi, and any future harness id we haven't
+  // built a form for yet: no operator-tunable knobs surfaced.
+  return (
+    <p className="text-xs text-gray-500">
+      No harness-specific configuration for {harnessId}.
+    </p>
+  );
+}

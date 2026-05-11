@@ -40,6 +40,16 @@ export function broadcastDashboardEvent(event: DashboardEvent): void {
   }
 }
 
+/** Convenience: notify dashboard clients that a config resource changed.
+ *  Settings tabs and the Dashboard's profile cache subscribe to this
+ *  and refetch the affected resource. Cheap (no payload) so it's safe
+ *  to call from every CRUD route after a successful mutation. */
+export function broadcastResourceChanged(
+  resource: 'providers' | 'models' | 'profiles'
+): void {
+  broadcastDashboardEvent({ type: 'resource_changed', resource });
+}
+
 /** Snapshot of the host resource pool — used by snapshot + status_changed
  *  events. Pulled from the same source the scheduler gates against, so
  *  the dashboard never disagrees with the scheduler's view. */

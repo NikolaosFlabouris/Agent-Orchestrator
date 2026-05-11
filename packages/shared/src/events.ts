@@ -43,12 +43,23 @@ export interface StatusChangedEvent {
   queueDepth: number;
 }
 
+/** Server-side configuration changed — clients holding cached copies of
+ *  providers, models, or agent profiles (the Settings tabs, the
+ *  Dashboard's ToolChip lookup table) should refetch the relevant
+ *  resource. Broadcast from the matching CRUD routes after a successful
+ *  mutation. */
+export interface ResourceChangedEvent {
+  type: 'resource_changed';
+  resource: 'providers' | 'models' | 'profiles';
+}
+
 export type DashboardEvent =
   | DashboardSnapshot
   | TaskUpdatedEvent
   | TaskCreatedEvent
   | TaskRemovedEvent
-  | StatusChangedEvent;
+  | StatusChangedEvent
+  | ResourceChangedEvent;
 
 /** WebSocket event types for agent output streaming. */
 

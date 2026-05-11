@@ -23,7 +23,11 @@ export type DashboardWsEvent =
   | { type: 'task_updated'; task: TaskResponse }
   | { type: 'task_created'; task: TaskResponse }
   | { type: 'task_removed'; taskId: number }
-  | { type: 'status_changed'; paused: boolean; hostPool: HostPool; queueDepth: number };
+  | { type: 'status_changed'; paused: boolean; hostPool: HostPool; queueDepth: number }
+  | {
+      type: 'resource_changed';
+      resource: 'providers' | 'models' | 'profiles';
+    };
 
 export type OutputWsEvent =
   | { type: 'output'; taskId: number; data: string; timestamp: string }

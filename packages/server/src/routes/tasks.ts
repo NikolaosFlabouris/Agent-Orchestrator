@@ -51,6 +51,38 @@ const REQUEUEABLE_STATUSES = new Set([
 
 const EXTENDABLE_STATUSES = new Set(['failed']);
 
+/** Coerce a body value to a positive integer (>= 1). Returns null when
+ *  the value is missing, the wrong type, non-finite, fractional, or
+ *  zero/negative. JSON allows strings that look like numbers, so we
+ *  accept those too. */
+function asPositiveInt(v: unknown): number | null {
+  if (typeof v === 'number') {
+    return Number.isInteger(v) && v >= 1 ? v : null;
+  }
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 1 ? n : null;
+  }
+  return null;
+}
+
+/** Validate the `agent_profile_id` field from a task create-body. The
+ *  field is optional; when present it must be either null (no override)
+ *  or a string that references an existing profile. Returns the
+ *  validated value (null when absent or explicit null), or an error
+ *  message for the client. */
+function validateTaskAgentProfile(
+  raw: unknown
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== 'string') {
+    return { ok: false, error: 'agent_profile_id must be a string or null' };
+  }
+  const v = validateAgentProfile(raw, getAgentProfile);
+  if (!v.valid) return { ok: false, error: v.error };
+  return { ok: true, value: raw };
+}
+
 export function createTaskRoutes(
   forgejo: ForgejoClient,
   scheduler: Scheduler
@@ -188,16 +220,42 @@ export function createTaskRoutes(
           .send({ error: 'Required: repo_id, title, description' });
       }
 
-      const repoId = body.repo_id as number;
+      const repoId = asPositiveInt(body.repo_id);
+      if (repoId === null) {
+        return reply.status(400).send({ error: 'repo_id must be a positive integer' });
+      }
       const repo = getRepo(repoId);
       if (!repo) return reply.status(404).send({ error: 'Repo not found' });
+
+      if (typeof body.title !== 'string' || typeof body.description !== 'string') {
+        return reply
+          .status(400)
+          .send({ error: 'title and description must be strings' });
+      }
+
+      const profileCheck = validateTaskAgentProfile(body.agent_profile_id);
+      if (!profileCheck.ok) {
+        return reply.status(400).send({ error: profileCheck.error });
+      }
+
+      const maxAttemptsRaw = body.max_attempts;
+      let maxAttempts: number | undefined;
+      if (maxAttemptsRaw !== undefined && maxAttemptsRaw !== null) {
+        const v = asPositiveInt(maxAttemptsRaw);
+        if (v === null) {
+          return reply
+            .status(400)
+            .send({ error: 'max_attempts must be a positive integer' });
+        }
+        maxAttempts = v;
+      }
 
       // Create the Forgejo issue
       let issue;
       try {
         issue = await forgejo.createIssue(repo, {
-          title: body.title as string,
-          body: body.description as string,
+          title: body.title,
+          body: body.description,
         });
       } catch (err) {
         return reply.status(500).send({
@@ -221,8 +279,8 @@ export function createTaskRoutes(
         issue_title: issue.title,
         repo_id: repoId,
         status: 'queued',
-        max_attempts: (body.max_attempts as number) ?? undefined,
-        agent_profile_id: (body.agent_profile_id as string) ?? null,
+        max_attempts: maxAttempts,
+        agent_profile_id: profileCheck.value,
       });
 
       notifyTaskCreated(task);
@@ -239,11 +297,36 @@ export function createTaskRoutes(
           .send({ error: 'Required: issue_id, repo_id' });
       }
 
-      const repoId = body.repo_id as number;
+      const repoId = asPositiveInt(body.repo_id);
+      if (repoId === null) {
+        return reply.status(400).send({ error: 'repo_id must be a positive integer' });
+      }
       const repo = getRepo(repoId);
       if (!repo) return reply.status(404).send({ error: 'Repo not found' });
 
-      const issueId = body.issue_id as number;
+      const issueId = asPositiveInt(body.issue_id);
+      if (issueId === null) {
+        return reply
+          .status(400)
+          .send({ error: 'issue_id must be a positive integer' });
+      }
+
+      const profileCheck = validateTaskAgentProfile(body.agent_profile_id);
+      if (!profileCheck.ok) {
+        return reply.status(400).send({ error: profileCheck.error });
+      }
+
+      const maxAttemptsRaw = body.max_attempts;
+      let maxAttempts: number | undefined;
+      if (maxAttemptsRaw !== undefined && maxAttemptsRaw !== null) {
+        const v = asPositiveInt(maxAttemptsRaw);
+        if (v === null) {
+          return reply
+            .status(400)
+            .send({ error: 'max_attempts must be a positive integer' });
+        }
+        maxAttempts = v;
+      }
 
       // Fetch the issue title from Forgejo
       let issueTitle: string | null = null;
@@ -269,8 +352,8 @@ export function createTaskRoutes(
         issue_title: issueTitle,
         repo_id: repoId,
         status: 'queued',
-        max_attempts: (body.max_attempts as number) ?? undefined,
-        agent_profile_id: (body.agent_profile_id as string) ?? null,
+        max_attempts: maxAttempts,
+        agent_profile_id: profileCheck.value,
       });
 
       notifyTaskCreated(task);

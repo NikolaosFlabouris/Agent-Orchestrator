@@ -37,9 +37,13 @@ const FORGEJO_ORCHESTRATOR_TOKEN = process.env.FORGEJO_ORCHESTRATOR_TOKEN ?? "";
 // Container layout invariants: the persistence volume is mounted at /data,
 // SQLite lives at the root of it, and Fastify binds 0.0.0.0:8080 because the
 // docker-compose port mapping forwards 8081→8080. Changing any of these
-// requires a matching change to docker-compose.yml + Dockerfile, so they
-// stay as constants instead of env-tunable knobs.
-const DB_PATH = "/data/orchestrator.db";
+// requires a matching change to docker-compose.yml + Dockerfile.
+//
+// DB_PATH is env-overridable so `npm run dev` outside the container can
+// point at a local file (e.g. `DB_PATH=./dev.db npm run dev`) without
+// needing a /data mount. PORT/HOST stay fixed because they're paired
+// with the docker-compose port mapping.
+const DB_PATH = process.env.DB_PATH ?? "/data/orchestrator.db";
 const PORT = 8080;
 const HOST = "0.0.0.0";
 const COOKIE_SECRET =
