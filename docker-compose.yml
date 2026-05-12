@@ -28,7 +28,7 @@ services:
     # and also set ORCHESTRATOR_BIND_HOST=0.0.0.0 in .env. Both layers
     # must opt in; either one alone keeps you on loopback.
     ports:
-      - "127.0.0.1:8081:8080"
+      - "0.0.0.0:8081:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data

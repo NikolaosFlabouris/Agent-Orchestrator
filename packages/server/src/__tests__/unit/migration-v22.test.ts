@@ -51,7 +51,8 @@ describe('v22 ALTER migration', () => {
     db.close();
 
     // Phase 3: reboot. runMigrations should detect version=21 and
-    // execute the v22 ALTER, then bump schema_version to 22.
+    // execute every forward-migration block from v22 onward (v22 ALTER,
+    // v23 seed, etc.), then bump schema_version to CURRENT_SCHEMA_VERSION.
     db = initDatabase(dbFile);
 
     const postMigrationCols = db
@@ -64,10 +65,14 @@ describe('v22 ALTER migration', () => {
     // Matches the createTables shape: nullable INTEGER, no default.
     expect(snapshotCol!.type).toBe('INTEGER');
 
+    // Schema version reflects the current binary's level — the
+    // migration sweep runs every block from `version` to current.
+    // Hardcoded here rather than imported because CURRENT_SCHEMA_VERSION
+    // isn't exported; the literal moves in lockstep when we bump.
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('22');
+    expect(versionRow.value).toBe('23');
 
     db.close();
   });

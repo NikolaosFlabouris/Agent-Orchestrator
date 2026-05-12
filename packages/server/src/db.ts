@@ -15,7 +15,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 22;
+const CURRENT_SCHEMA_VERSION = 23;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -324,6 +324,18 @@ function runMigrations(db: Database.Database): void {
           "ALTER TABLE attempts ADD COLUMN timeout_minutes_snapshot INTEGER"
         );
       }
+      if (version < 23) {
+        // v23: pre-seed the Claude Subscription provider (kind
+        // `claude-subscription`), three Claude models under it, and a
+        // ready-to-use `default-claude-code-subscription` profile that
+        // pairs the claude-code harness with Sonnet. Operators with an
+        // Anthropic Pro/Max subscription set CLAUDE_CODE_OAUTH_TOKEN
+        // and switch the global default to this profile (or pick it
+        // per-task / per-repo) — no manual provider authoring needed.
+        // Idempotent: same INSERT OR IGNORE statements seedBootstrap
+        // uses, so re-applying on a hand-edited DB is harmless.
+        seedClaudeSubscription(db);
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -426,6 +438,82 @@ function seedBootstrapProfile(db: Database.Database): void {
     `INSERT OR REPLACE INTO settings (key, value)
      VALUES ('default_agent_profile_id', 'default-claude-sdk')`
   ).run();
+
+  // Second turn-key profile: Claude Code CLI against the operator's
+  // Anthropic Pro/Max subscription. Doesn't become the global default
+  // (claude-sdk is still the most-tested path), but it's present in
+  // the UI dropdown so operators who only have a Claude.ai
+  // subscription — no API key — can switch to it without authoring
+  // anything by hand.
+  seedClaudeSubscription(db);
+}
+
+/** Idempotent seed for the Claude Subscription provider, its model
+ *  rows, and a default `claude-code` profile pointing at Sonnet.
+ *  Called from `seedBootstrapProfile` for fresh installs and from the
+ *  v23 migration block for existing installs. All inserts use INSERT
+ *  OR IGNORE so the helper can run safely against any combination of
+ *  pre-existing operator rows. */
+function seedClaudeSubscription(db: Database.Database): void {
+  // Provider row. CLAUDE_CODE_OAUTH_TOKEN is the orchestrator
+  // convention for surfacing the subscription token to the in-
+  // container Claude Code CLI (see providers/kinds.ts —
+  // `container_env_name: 'CLAUDE_CODE_OAUTH_TOKEN'`).
+  db.prepare(
+    `INSERT OR IGNORE INTO providers
+       (id, display_name, kind, concurrency_limit, base_url, auth_token, api_key_env_var, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'claude-subscription',
+    'Claude Subscription (Pro/Max)',
+    'claude-subscription',
+    5,
+    null,
+    null,
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    null
+  );
+
+  // Models. Same canonical names as the Anthropic-API provider — the
+  // Claude Code CLI accepts them under subscription auth too. They
+  // live as separate model rows because the (provider_id, model_id)
+  // pair is the unique key; subscription and API access are two
+  // different routing destinations.
+  const insertModel = db.prepare(
+    `INSERT OR IGNORE INTO models (provider_id, model_id, display_name) VALUES (?, ?, ?)`
+  );
+  const models: Array<[string, string]> = [
+    ['claude-opus-4-7', 'Claude Opus 4.7'],
+    ['claude-sonnet-4-6', 'Claude Sonnet 4.6'],
+    ['claude-haiku-4-5', 'Claude Haiku 4.5'],
+  ];
+  for (const [model_id, display_name] of models) {
+    insertModel.run('claude-subscription', model_id, display_name);
+  }
+
+  // Profile. Best-effort — only insert when the seeded Sonnet model
+  // row is present (it will be unless an operator hand-deleted it
+  // between this helper's two halves; in that case the migration
+  // still completes and the operator can author the profile manually).
+  const subSonnet = db
+    .prepare(
+      "SELECT id FROM models WHERE provider_id = 'claude-subscription' AND model_id = 'claude-sonnet-4-6'"
+    )
+    .get() as { id: number } | undefined;
+  if (subSonnet) {
+    db.prepare(
+      `INSERT OR IGNORE INTO agent_profiles
+         (id, display_name, harness_id, model_pk, config_json, timeout_minutes)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      'default-claude-code-subscription',
+      'Claude Code + Sonnet (subscription)',
+      'claude-code',
+      subSonnet.id,
+      '{}',
+      2880
+    );
+  }
 }
 
 function seedDefaultSettings(db: Database.Database): void {
