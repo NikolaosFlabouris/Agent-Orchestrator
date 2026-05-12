@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type { TaskDetailResponse, AttemptResponse, TaskAction, ToolResponse } from '../api.js';
-import { connectOutputWs } from '../ws.js';
-import type { OutputWsEvent } from '../ws.js';
+import { connectDashboardWs, connectOutputWs } from '../ws.js';
+import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { Timeline } from '../components/Timeline.js';
 import { filterLogLine } from '../logFilter.js';
 import { useStore } from '../store.js';
@@ -38,6 +38,26 @@ export function TaskDetail() {
       .then(setTask)
       .catch((err) => setError(err.message));
   }, [id]);
+
+  // Live-refresh: subscribe to /ws/dashboard and refetch the full task whenever
+  // a task_updated event for this task arrives. The WS broadcast carries only
+  // the bare task row, so we re-fetch via api.getTask to also pick up the
+  // refreshed attempts + events lists. Other event types (task_created,
+  // task_removed, status_changed, snapshot) are ignored — TaskDetail only
+  // cares about its own task.
+  useEffect(() => {
+    if (!task) return;
+    const taskId = task.id;
+    const handler = (event: DashboardWsEvent) => {
+      if (event.type === 'task_updated' && event.task.id === taskId) {
+        api.getTask(taskId).then(setTask).catch(() => {});
+      }
+    };
+    return connectDashboardWs(handler);
+    // Only re-subscribe when the underlying task id changes (e.g. navigating
+    // between tasks), not on every refetch that replaces the task object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.id]);
 
   // Load tools into store if not already cached
   useEffect(() => {
