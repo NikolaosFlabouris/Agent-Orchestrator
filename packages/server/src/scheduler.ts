@@ -125,6 +125,38 @@ interface InstallCommand {
   cwd: string;
 }
 
+/** Pattern-match a prep-failure error message into a known category +
+ *  actionable operator message. Returns null when the message doesn't
+ *  match any known structural failure — in that case the caller falls
+ *  back to the generic prep-failure log/event flow.
+ *
+ *  Exported for unit-test coverage. */
+export function categorizePrepFailure(
+  errorMsg: string
+): { eventType: string; message: string } | null {
+  // Docker reports "no such image: orchestrator-agent:latest" (case-
+  // insensitive, may have surrounding whitespace) when the image hasn't
+  // been built in the local image store. By far the most common
+  // bring-up failure — operator forgot the build script, or pruned
+  // local images, or ran `docker compose up` before the agent-image
+  // service finished building.
+  if (/no such image:?\s*orchestrator-agent/i.test(errorMsg)) {
+    return {
+      eventType: 'agent_image_missing',
+      message:
+        "The agent container image 'orchestrator-agent:latest' is missing " +
+        "from this Docker host. Build it by running " +
+        "`docker compose up -d --build` (the build runs as part of the " +
+        "`agent-image` service in docker-compose.yml), or " +
+        "`./scripts/build-agent-images.sh` to rebuild without restarting " +
+        "the orchestrator. Once the image is present, reset this task and " +
+        "re-apply `status/queued` in Forgejo to retry — or open a new " +
+        "issue from scratch.",
+    };
+  }
+  return null;
+}
+
 /** Resolve a repo's typed install_steps into the literal command strings the
  *  harness will exec. Script steps were already gated by allow_script_steps
  *  at validation time; here we just translate { kind: 'script', path } into
@@ -1277,6 +1309,17 @@ export class Scheduler {
     const errorMsg = err instanceof Error ? err.message : String(err);
     const freshTask = getTask(task.id)!;
     const newCount = freshTask.prep_failure_count + 1;
+
+    // Categorize known structural failures BEFORE the generic prep-failure
+    // bookkeeping. Categorized failures get a dedicated task_event row
+    // with an actionable message — the UI's Task Detail page renders a
+    // banner for these so operators don't have to grep docker logs to
+    // figure out what to fix. The generic prep-failure log line still
+    // fires below regardless.
+    const category = categorizePrepFailure(errorMsg);
+    if (category) {
+      recordTaskEvent(task.id, category.eventType, category.message);
+    }
 
     if (newCount >= 3) {
       // Permanent failure

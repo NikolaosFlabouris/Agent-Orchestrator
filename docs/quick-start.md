@@ -36,7 +36,7 @@ Fill in at minimum:
 - `ANTHROPIC_API_KEY` — required for the bootstrap profile (Claude SDK + Sonnet) the orchestrator seeds on first run. If you'll only use a different provider (e.g. Ollama), you can leave this blank and switch the default profile after first boot.
 - `COOKIE_SECRET` — random 32+ byte hex string for production
 
-**One-shot install:** Alternatively, after creating your `.env` file, you can run the following command to build the agent image and start the system in one go:
+**One-shot install:** Alternatively, after creating your `.env` file, you can run the following command to validate the environment, build the images, and start the system in one go:
 
 ```bash
 ./scripts/install.sh --up
@@ -44,15 +44,23 @@ Fill in at minimum:
 
 For transparency, the detailed step-by-step sequence follows:
 
-## 3. Build the agent container image
-
-This image is NOT built by docker-compose — the orchestrator pulls it on demand for every task. A single `orchestrator-agent:latest` image ships the Node, Python, and Go toolchains plus the harnesses and agent CLIs. The build script also creates the `agent-network` bridge that `docker compose up` attaches to (declared `external: true` in the compose file). Build it once:
+## 3. Start the orchestrator
 
 ```bash
-./scripts/build-agent-images.sh
+docker compose up -d --build
 ```
 
-Verify:
+This single command:
+
+1. Builds the orchestrator image.
+2. Builds the agent container image and tags it as `orchestrator-agent:latest` (the image the orchestrator spawns task containers from). This happens via the `agent-image` build-only service in `docker-compose.yml`.
+3. Creates the `agent-network` bridge.
+4. Waits for the agent image build to complete (`depends_on: condition: service_completed_successfully`).
+5. Starts the orchestrator.
+
+The agent image isn't a running service — it's just built and tagged. A short-lived `agent-image` container appears in `docker ps -a` after `up`, exited 0; `docker compose down` cleans it up.
+
+Verify after start:
 
 ```bash
 docker images --filter "reference=orchestrator-agent"
@@ -62,12 +70,12 @@ docker network inspect agent-network --format '{{.Name}}: {{.Driver}}'
 # agent-network: bridge
 ```
 
-Rebuild whenever you change anything under `harness/` or `images/`.
-
-## 4. Start the orchestrator
+To rebuild just the agent image after editing `harness/` or `images/agent/Dockerfile` without restarting the orchestrator:
 
 ```bash
-docker compose up -d --build
+docker compose build agent-image
+# or the equivalent convenience wrapper:
+./scripts/build-agent-images.sh
 ```
 
 Follow the logs until you see `server_started`:
@@ -85,7 +93,7 @@ Expected log events:
 
 Open the UI at `http://<orchestrator-host>:8081`.
 
-## 5. Verify the bootstrap profile
+## 4. Verify the bootstrap profile
 
 The schema v21 migration auto-seeds the standard cloud providers (Anthropic, OpenAI, Gemini, Mistral, DeepSeek, OpenRouter) with a representative model each, plus a default `Claude SDK + Sonnet` agent profile pointed at Anthropic. `settings.default_agent_profile_id` is set to this profile, so a fresh install with `ANTHROPIC_API_KEY` in `.env` boots into a usable state — no seed script.
 
@@ -96,7 +104,7 @@ Open the UI and confirm:
 
 To add Ollama or another local LLM server, create a new provider with `kind: ollama` and the server's `base_url`, add the loaded models to it, then create a new agent profile pairing the OpenCode or pi harness with one of those models. See [Agents.md](./Agents.md) for the full configuration reference.
 
-## 6. Register a repository
+## 5. Register a repository
 
 In the UI:
 
@@ -111,7 +119,7 @@ Then register a webhook in Forgejo for this repo:
 - Secret: `<FORGEJO_WEBHOOK_SECRET>` from `.env`
 - Events: `Issues`, `Issue Comment`, `Pull Request`
 
-## 7. Run your first task
+## 6. Run your first task
 
 Easiest path: open an issue in your Forgejo repo whose body says something trivial like "Add a line `Hello from Agent!` to the end of README.md", then label it `status/queued`. The orchestrator picks it up within one poll cycle (60s) or immediately via webhook.
 

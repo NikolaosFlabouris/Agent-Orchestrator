@@ -27,6 +27,10 @@ const EVENT_COLORS: Record<string, string> = {
   recovery: 'bg-orange-500',
   container_started: 'bg-blue-500',
   container_exited: 'bg-blue-400',
+  // Structural / operator-actionable prep failures. Same red as a
+  // status_failed so they pop in the timeline; the TaskDetail page
+  // also surfaces them as a dedicated banner above the timeline.
+  agent_image_missing: 'bg-red-600',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {

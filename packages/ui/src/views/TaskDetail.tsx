@@ -529,6 +529,18 @@ export function TaskDetail() {
       )}
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
+        {/* Structural failure banner — surfaces categorized prep
+            failures (e.g. agent image missing) with an actionable
+            fix message ABOVE the timeline so the operator doesn't
+            have to read raw docker logs to figure out what to fix.
+            Only renders while the task is still affected by the
+            structural problem: failed permanently, or queued with
+            non-zero prep_failure_count. A successful retry clears
+            the banner (the status moves out of those states and the
+            check returns null) — the old event row remains in the
+            timeline history as a record of what happened. */}
+        <StructuralFailureBanner task={task} />
+
         {/* Timeline */}
         {task.events && task.events.length > 0 && (
           <section>
@@ -585,6 +597,53 @@ export function TaskDetail() {
         )}
       </main>
     </div>
+  );
+}
+
+/** Set of event_types that represent structural / operator-actionable
+ *  prep failures. Each one corresponds to a `categorizePrepFailure`
+ *  branch in scheduler.ts that records a task_event with a clear,
+ *  actionable message when the scheduler hits a known recurring
+ *  bring-up problem (image missing, etc.). The banner reads the most
+ *  recent matching event and surfaces its message verbatim — the
+ *  server is the source of truth for the wording. */
+const STRUCTURAL_FAILURE_EVENT_TYPES = new Set([
+  'agent_image_missing',
+]);
+
+function StructuralFailureBanner({ task }: { task: TaskDetailResponse }) {
+  // Only show the banner when the underlying problem is still likely
+  // live. `failed` is the permanent-prep-failure case (3 retries
+  // exhausted). `queued` covers the in-flight retry window (the task
+  // bounces back to queued between transient prep failures) AND the
+  // post-reset state where the operator may not have fixed the
+  // underlying issue yet. Once the task moves past these (in-progress,
+  // in-review, merged, etc.) the structural problem is no longer
+  // blocking — the historical event row stays in the timeline as a
+  // record of what happened, but we stop nagging via the banner.
+  if (task.status !== 'failed' && task.status !== 'queued') return null;
+
+  // Pick the most recent structural-failure event the server recorded
+  // for this task. The server's message text is the canonical operator
+  // instruction; the UI just promotes it to a visible banner.
+  const matching = (task.events ?? []).filter((e) =>
+    STRUCTURAL_FAILURE_EVENT_TYPES.has(e.event_type)
+  );
+  if (matching.length === 0) return null;
+  const latest = matching[matching.length - 1];
+
+  return (
+    <section
+      className="rounded border border-red-700 bg-red-950/40 px-4 py-3"
+      role="alert"
+    >
+      <h2 className="text-red-300 font-medium mb-1">
+        Task blocked — operator action needed
+      </h2>
+      <p className="text-sm text-gray-200 whitespace-pre-wrap">
+        {latest.message}
+      </p>
+    </section>
   );
 }
 

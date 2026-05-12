@@ -1,12 +1,35 @@
 # Before first boot:
 #   1. cp .env.example .env  and fill in tokens / API keys
-#   2. ./scripts/build-agent-images.sh   (builds orchestrator-agent:latest)
-#   3. docker compose up -d              (boots orchestrator; first boot creates
-#                                         the DB schema and seeds providers,
-#                                         models, and a default agent profile)
+#   2. docker compose up -d --build      (builds the orchestrator image,
+#                                         builds the agent image
+#                                         `orchestrator-agent:latest`, creates
+#                                         the agent-network bridge, and
+#                                         starts the orchestrator — first boot
+#                                         seeds providers/models/default profile)
 # See docs/quick-start.md for the full bring-up procedure.
 
 services:
+  # Build-only service. Produces the `orchestrator-agent:latest` image that
+  # the orchestrator spawns task containers from at run-time. The container
+  # itself executes `true` and exits 0 immediately — we only care about the
+  # image being tagged in Docker's local image store. The orchestrator
+  # service `depends_on` this with `service_completed_successfully`, so
+  # `docker compose up -d --build` blocks on the build before starting the
+  # orchestrator. Prevents the "no such image: orchestrator-agent:latest"
+  # 404 that used to bite operators who hadn't run the separate build
+  # script before `compose up`.
+  #
+  # Use `docker compose build agent-image` to force-rebuild without
+  # touching the running orchestrator (e.g. after editing
+  # images/agent/Dockerfile or harness/*).
+  agent-image:
+    image: orchestrator-agent:latest
+    build:
+      context: .
+      dockerfile: images/agent/Dockerfile
+    command: ["true"]
+    restart: "no"
+
   orchestrator:
     build: .
     container_name: orchestrator
@@ -29,6 +52,14 @@ services:
     # must opt in; either one alone keeps you on loopback.
     ports:
       - "0.0.0.0:8081:8080"
+    # Wait for the agent-image build to complete before the orchestrator
+    # boots. If we didn't, the orchestrator could come up and accept task
+    # creations before the agent image was tagged, and the first task to
+    # try to launch would 404. service_completed_successfully treats the
+    # one-shot `true` exit as the unblock signal.
+    depends_on:
+      agent-image:
+        condition: service_completed_successfully
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data
@@ -50,15 +81,20 @@ services:
       - agent-network
 
 networks:
-  # Shared bridge network for orchestrator <-> agent containers.
-  # Marked external because the orchestrator creates this network itself at
-  # boot via ensureAgentNetwork() (see packages/server/src/docker.ts). Compose
-  # only attaches to it. If the network does not yet exist on a fresh host,
-  # `scripts/build-agent-images.sh` creates it idempotently, or create it
-  # manually with `docker network create agent-network`.
+  # Shared bridge network for orchestrator <-> agent containers. Compose-
+  # managed (not `external: true`) so a fresh clone of the repo can run
+  # `docker compose up -d --build` without a separate `docker network
+  # create agent-network` step. The literal `name:` keeps it as the bare
+  # string `agent-network` rather than the compose-project-prefixed name
+  # (compose's default), since the orchestrator's docker.ts hardcodes
+  # this network name when spawning agent containers.
+  #
+  # `ensureAgentNetwork()` in packages/server/src/docker.ts is still the
+  # safety net: it (re)creates the network at orchestrator startup if it
+  # was somehow removed while the orchestrator was down.
   agent-network:
-    external: true
     name: agent-network
+    driver: bridge
 
 volumes:
   orchestrator-data:

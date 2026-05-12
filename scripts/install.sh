@@ -70,13 +70,14 @@ validate_env() {
 }
 
 # --- Build Orchestration ---
-
+#
+# `docker compose build` walks every service in docker-compose.yml,
+# so this single command builds both the orchestrator image AND the
+# `agent-image` build-only service that produces orchestrator-agent:latest.
+# No need for a separate `build-agent-images.sh` invocation here.
 build_system() {
-  echo "==> Building orchestrator image..."
+  echo "==> Building orchestrator + agent images..."
   docker compose build --no-cache
-
-  echo "==> Building agent images and network..."
-  ./scripts/build-agent-images.sh
 }
 
 # --- Main ---
@@ -94,6 +95,8 @@ build_system
 
 if [[ "$UP" == true ]]; then
   echo "==> Starting orchestrator..."
+  # Compose runs the agent-image one-shot first (depends_on:
+  # service_completed_successfully), then starts the orchestrator.
   docker compose up -d
 fi
 
