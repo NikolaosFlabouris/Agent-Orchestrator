@@ -164,6 +164,9 @@ export interface TaskEventResponse {
   task_id: number;
   event_type: string;
   message: string;
+  /** ISO 8601 UTC string (e.g. `"2026-05-12T12:31:59.123Z"`). Legacy rows
+   *  written before the fix for issue #72 may still hold the naive
+   *  `"YYYY-MM-DD HH:MM:SS"` format; the UI normalizes those on read. */
   created_at: string;
 }
 
