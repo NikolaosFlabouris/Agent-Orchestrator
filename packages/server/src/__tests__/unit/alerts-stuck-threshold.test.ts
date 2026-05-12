@@ -58,6 +58,13 @@ function insertInProgressTask(opts: {
     .run(opts.taskId, 100 + opts.taskId, opts.agentProfileId ?? null, startedAt);
 }
 
+/** Build the ISO timestamp the alerts pass elapsed-from. Matches the
+ *  pattern in `insertInProgressTask` so attempt.started_at and
+ *  task.started_at line up — the prod scheduler sets both at launch. */
+function nMinutesAgo(n: number): string {
+  return new Date(Date.now() - n * 60_000).toISOString();
+}
+
 describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
   it('uses attempts.timeout_minutes_snapshot when present, ignoring a shortened live profile', async () => {
     // Task ran past where the *live* profile timeout (60m × 2 = 120m
@@ -79,12 +86,15 @@ describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
 
   it('fires when elapsed exceeds the snapshot threshold × multiplier', async () => {
     // Snapshot = 30m, threshold = 60m, ran 90m → stuck.
+    // Mirrors prod: scheduler sets task.started_at AND attempt.started_at
+    // at launch, so both reflect the same wall-clock moment.
     insertInProgressTask({ taskId: 2, startedMinutesAgo: 90 });
-    insertAttempt({
+    const inserted = insertAttempt({
       task_id: 2,
       attempt_number: 1,
       role: 'develop',
       status: 'running',
+      started_at: nMinutesAgo(90),
       timeout_minutes_snapshot: 30,
     });
     const alerts = await checkAlerts(noopLog);
@@ -92,6 +102,10 @@ describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
     expect(stuck).toHaveLength(1);
     expect(stuck[0].message).toContain('from snapshot');
     expect(stuck[0].message).toContain('30m');
+    // H6: snapshot branch surfaces the attempt id so the operator can
+    // jump straight to the offending row instead of walking the
+    // task → profile chain to find it.
+    expect(stuck[0].message).toContain(`attempt #${inserted.id}`);
   });
 
   it('falls back to a live profile read when the snapshot is null', async () => {
@@ -108,6 +122,7 @@ describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
       attempt_number: 1,
       role: 'develop',
       status: 'running',
+      started_at: nMinutesAgo(150),
       // No timeout_minutes_snapshot → legacy/pre-v22 path.
     });
     const alerts = await checkAlerts(noopLog);
@@ -139,6 +154,41 @@ describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
     getDb()
       .prepare(`DELETE FROM settings WHERE key = 'default_agent_profile_id'`)
       .run();
+    const alerts = await checkAlerts(noopLog);
+    const stuck = alerts.filter((a) => a.message.includes('stuck'));
+    expect(stuck).toHaveLength(0);
+  });
+
+  it('uses the running attempt started_at, not task started_at, for elapsed (review-phase fix)', async () => {
+    // Real-world scenario: a long dev run (200m) completed cleanly,
+    // then a review run kicked off 5 min ago. task.started_at was set
+    // at dev launch and never reset (intentional — used for total
+    // task wall-clock metrics). The review attempt's snapshot says
+    // 60m timeout (= 120m stuck threshold).
+    //
+    // BEFORE: elapsed measured from task.started_at = 200m → stuck
+    //         alert fires for a review that just started.
+    // AFTER:  elapsed measured from running attempt.started_at = 5m
+    //         → no alert.
+    insertInProgressTask({ taskId: 7, startedMinutesAgo: 200 });
+    // Completed dev attempt — should be ignored by getActiveAttempt.
+    insertAttempt({
+      task_id: 7,
+      attempt_number: 1,
+      role: 'develop',
+      status: 'completed',
+      started_at: nMinutesAgo(200),
+      timeout_minutes_snapshot: 60,
+    });
+    // Running review attempt — fresh.
+    insertAttempt({
+      task_id: 7,
+      attempt_number: 1,
+      role: 'review',
+      status: 'running',
+      started_at: nMinutesAgo(5),
+      timeout_minutes_snapshot: 60,
+    });
     const alerts = await checkAlerts(noopLog);
     const stuck = alerts.filter((a) => a.message.includes('stuck'));
     expect(stuck).toHaveLength(0);

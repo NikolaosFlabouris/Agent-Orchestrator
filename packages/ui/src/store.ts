@@ -114,11 +114,36 @@ export const useStore = create<DashboardState>((set) => ({
 
   setAgentProfiles: (profiles) => set({ agentProfiles: profiles }),
 
-  bumpResourceVersion: (resource) =>
-    set((state) => ({
-      resourceVersions: {
-        ...state.resourceVersions,
-        [resource]: state.resourceVersions[resource] + 1,
-      },
-    })),
+  bumpResourceVersion: (resource) => {
+    // Debounce per-resource (L): coalesce a burst of rapid mutations
+    // into one bump so an operator seeding multiple models, or two
+    // tabs racing on the same resource, doesn't trigger N parallel
+    // refetches across K open Settings tabs. 50ms is short enough to
+    // feel instant for a single mutation and long enough to absorb a
+    // typical burst.
+    const existing = pendingBumps.get(resource);
+    if (existing) clearTimeout(existing);
+    pendingBumps.set(
+      resource,
+      setTimeout(() => {
+        pendingBumps.delete(resource);
+        useStore.setState((state) => ({
+          resourceVersions: {
+            ...state.resourceVersions,
+            [resource]: state.resourceVersions[resource] + 1,
+          },
+        }));
+      }, BUMP_DEBOUNCE_MS)
+    );
+  },
 }));
+
+const BUMP_DEBOUNCE_MS = 50;
+// Per-resource pending-bump timers. Module-scope (not store-scope)
+// because the values are Node/browser timer handles, not part of the
+// observable React state. Keying by resource means a bump for
+// `providers` doesn't reset a debounce on `profiles`.
+const pendingBumps = new Map<
+  keyof ResourceVersions,
+  ReturnType<typeof setTimeout>
+>();

@@ -31,6 +31,13 @@ export function Dashboard() {
 
   const setStatus = useStore((s) => s.setStatus);
   const setHostPool = useStore((s) => s.setHostPool);
+  // Subscribe to the profiles version. The WS handler bumps this
+  // whenever `resource_changed:profiles` arrives; the dedicated
+  // useEffect below re-fetches in response. Previously the WS handler
+  // ALSO inline-fetched, which was a redundant second request from
+  // the same browser (and skipped the debounce). (L)
+  const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+  const setAgentProfiles = useStore((s) => s.setAgentProfiles);
 
   const [pools, setPools] = useState<StatusResponse['providers']>([]);
   const [repos, setRepos] = useState<RepoResponse[]>([]);
@@ -47,11 +54,8 @@ export function Dashboard() {
       setSnapshot,
       updateTask,
       addTask,
-      removeTask,
       setStatus: setStatusFn,
       bumpResourceVersion,
-      setAgentProfiles,
-      agentProfiles: initialAgentProfiles,
     } = useStore.getState();
 
     // Pull status immediately and every 5 s. Daily completions come from the
@@ -99,38 +103,21 @@ export function Dashboard() {
         case 'task_created':
           addTask(event.task);
           break;
-        case 'task_removed':
-          removeTask(event.taskId);
-          break;
         case 'status_changed':
           setStatusFn(event);
           break;
         case 'resource_changed':
-          // Bump the version counter so Settings tabs / other consumers
-          // refetch. For profiles specifically the Dashboard itself
-          // holds a cached display-name lookup, so refetch it inline.
+          // Bump the version counter — every Settings tab + the
+          // Dashboard's profilesVersion useEffect subscribes to this
+          // and refetches when it ticks. No inline fetch here: the
+          // bump is debounced (store.ts), and an inline fetch would
+          // both bypass that debounce and duplicate the request.
           bumpResourceVersion(event.resource);
-          if (event.resource === 'profiles') {
-            api
-              .getAgentProfiles()
-              .then((res) => setAgentProfiles(res.profiles))
-              .catch(() => {});
-          }
           break;
       }
     };
 
     const disconnect = connectDashboardWs(handler);
-
-    // Fetch agent profiles once for display in task rows (cached in
-    // store). Subsequent updates arrive via the resource_changed event
-    // handler above.
-    if (initialAgentProfiles.length === 0) {
-      api
-        .getAgentProfiles()
-        .then((res) => setAgentProfiles(res.profiles))
-        .catch(() => {});
-    }
 
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
@@ -141,6 +128,17 @@ export function Dashboard() {
       window.clearInterval(tasksTimer);
     };
   }, []);
+
+  // Agent profile list is held in the store for display in task rows.
+  // Subscribe to the version counter and refetch when it ticks; runs
+  // once on mount (profilesVersion starts at 0) and on every WS
+  // `resource_changed:profiles` bump after debouncing.
+  useEffect(() => {
+    api
+      .getAgentProfiles()
+      .then((res) => setAgentProfiles(res.profiles))
+      .catch(() => {});
+  }, [profilesVersion, setAgentProfiles]);
 
   const activeTasks = tasks.filter((t) => ACTIVE_STATUSES.has(t.status));
   const queuedTasks = tasks

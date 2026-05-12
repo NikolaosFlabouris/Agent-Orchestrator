@@ -111,24 +111,76 @@ export function GlobalSettings() {
         <label className="block text-sm font-medium mb-1">
           Default agent profile
         </label>
-        <select
-          value={String(settings.default_agent_profile_id ?? '')}
-          onChange={(e) => update('default_agent_profile_id', e.target.value)}
-          className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
-        >
-          {profiles.length === 0 && (
-            <option value="">No agent profiles configured</option>
-          )}
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.display_name} ({p.id})
-            </option>
-          ))}
-        </select>
-        <p className="text-xs text-gray-500 mt-1">
-          Used when neither the task nor its repo specifies an agent profile.
-          Manage profiles under <em>Agent Profiles</em>.
-        </p>
+        {(() => {
+          // Pull out the current stored value once so we can detect
+          // both "unset" and "dangling" (stored value not in the
+          // current profile list — happens if a profile was deleted
+          // via a direct DB edit, since the route blocks deletion of
+          // the global default). Surface both states explicitly so
+          // the operator doesn't silently save the first profile
+          // option just because the browser fell through to it. (M2)
+          const stored = String(settings.default_agent_profile_id ?? '');
+          const knownIds = new Set(profiles.map((p) => p.id));
+          const isUnset = stored === '';
+          const isDangling = !isUnset && !knownIds.has(stored);
+          return (
+            <>
+              <select
+                value={stored}
+                onChange={(e) =>
+                  update(
+                    'default_agent_profile_id',
+                    e.target.value === '' ? null : e.target.value
+                  )
+                }
+                className={`w-full bg-gray-900 border rounded px-3 py-2 text-sm ${
+                  isUnset || isDangling ? 'border-yellow-600' : 'border-gray-700'
+                }`}
+              >
+                {/* Synthetic "(unset)" entry. Always rendered so the
+                    operator can clear the default. When stored is
+                    already unset this is the selected option. */}
+                <option value="">
+                  (unset — tasks without a per-task or repo override will
+                  fail to launch)
+                </option>
+                {/* Synthetic dangling entry, only rendered when the
+                    stored id doesn't match any known profile. Keeps the
+                    select aligned with the stored state so the next
+                    Save doesn't silently overwrite with whichever
+                    profile happens to be first. */}
+                {isDangling && (
+                  <option value={stored}>
+                    (dangling — '{stored}' is not in the current profile list;
+                    pick a replacement)
+                  </option>
+                )}
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name} ({p.id})
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Used when neither the task nor its repo specifies an agent
+                profile. Manage profiles under <em>Agent Profiles</em>.
+              </p>
+              {isUnset && profiles.length > 0 && (
+                <p className="text-xs text-yellow-500 mt-1">
+                  ⚠ No global default set. Tasks with no per-task or repo
+                  agent profile will refuse to launch.
+                </p>
+              )}
+              {isDangling && (
+                <p className="text-xs text-yellow-500 mt-1">
+                  ⚠ The stored default points at a profile that no longer
+                  exists. Save with a replacement profile selected to
+                  recover.
+                </p>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       {error && (

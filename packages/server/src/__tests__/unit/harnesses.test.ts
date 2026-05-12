@@ -183,7 +183,7 @@ describe('opencode harness', () => {
     expect(inv.agent_command).toContain("--model 'anthropic/claude-sonnet-4-6'");
   });
 
-  it('emits an opencode.json for ollama providers', () => {
+  it('builds opencode.json at runtime in /tmp for ollama providers (H3)', () => {
     const inv = h.buildInvocation({
       profile: mkProfile({ harness_id: 'opencode' }),
       model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
@@ -194,12 +194,19 @@ describe('opencode harness', () => {
       }),
       promptFilePath: '/task/prompt.md',
     });
-    expect(inv.config_files).toHaveLength(1);
-    expect(inv.config_files[0].path).toBe('/repo/opencode.json');
-    const cfg = JSON.parse(inv.config_files[0].content);
-    expect(cfg.provider.ollama.options.baseURL).toBe(
-      'http://192.168.1.10:11434/v1'
-    );
+    // H3: orchestrator never writes a config file (would land under
+    // /repo via the bind mount and persist into worktree archives).
+    expect(inv.config_files).toEqual([]);
+    // The agent_command builds the JSON at runtime in /tmp via jq -n.
+    expect(inv.agent_command).toContain('jq -n');
+    expect(inv.agent_command).toContain('/tmp/opencode.json');
+    expect(inv.agent_command).not.toContain('/repo/opencode.json');
+    // OpenCode is pointed at the /tmp file via --config.
+    expect(inv.agent_command).toContain('--config /tmp/opencode.json');
+    // The base_url and model id reach the config via jq --arg, not
+    // direct shell interpolation.
+    expect(inv.agent_command).toContain('http://192.168.1.10:11434/v1');
+    expect(inv.agent_command).toContain('qwen2.5-coder:14b');
     expect(inv.resolved_model).toBe('ollama/qwen2.5-coder:14b');
   });
 
@@ -214,15 +221,16 @@ describe('opencode harness', () => {
     ).toThrow(/base_url/);
   });
 
-  // ---- H2 fix: Ollama auth_token never appears in the orchestrator-
-  // generated /repo/opencode.json or in agent_command. The token is
-  // exported as $OLLAMA_AUTH_TOKEN by the scheduler; agent_command
-  // substitutes it into the on-disk config via jq before launching
-  // opencode. ----
-  describe('H2: ollama credential never inlined', () => {
+  // ---- H3 fix: Ollama auth_token never lands on disk in /repo
+  // (previously the runtime jq+mv rewrote /repo/opencode.json with the
+  // real token; now agent_command builds /tmp/opencode.json from
+  // scratch using $OLLAMA_AUTH_TOKEN at runtime). The orchestrator
+  // emits no config file at all, so nothing the agent could later
+  // archive contains the literal token. ----
+  describe('H3: ollama credential never written under /repo', () => {
     const SECRET = 'super-secret-bearer-zzz';
 
-    it('writes a sentinel apiKey into opencode.json, not the auth_token', () => {
+    it('emits no orchestrator-written config file', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
@@ -233,13 +241,10 @@ describe('opencode harness', () => {
         }),
         promptFilePath: '/task/prompt.md',
       });
-      const cfg = JSON.parse(inv.config_files[0].content);
-      // Sentinel is present, secret is not.
-      expect(cfg.provider.ollama.options.apiKey).not.toBe(SECRET);
-      expect(inv.config_files[0].content).not.toContain(SECRET);
+      expect(inv.config_files).toEqual([]);
     });
 
-    it('prepends a jq substitution step referencing $OLLAMA_AUTH_TOKEN', () => {
+    it('agent_command references $OLLAMA_AUTH_TOKEN, not the literal token, and writes to /tmp', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
@@ -250,21 +255,37 @@ describe('opencode harness', () => {
         }),
         promptFilePath: '/task/prompt.md',
       });
-      expect(inv.agent_command).toContain('jq');
       expect(inv.agent_command).toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).toContain('/tmp/opencode.json');
+      expect(inv.agent_command).not.toContain('/repo/opencode.json');
       expect(inv.agent_command).not.toContain(SECRET);
     });
 
-    it('skips the jq substitution for non-ollama (cloud) providers', () => {
+    it('falls back to the "ollama" placeholder when no token is set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
+        provider: mkProvider({
+          kind: 'ollama',
+          base_url: 'http://192.168.1.10:11434',
+          auth_token: null,
+          api_key_env_var: null,
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain(':-ollama');
+    });
+
+    it('skips the jq step for non-ollama (cloud) providers', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel(),
         provider: mkProvider({ kind: 'anthropic' }),
         promptFilePath: '/task/prompt.md',
       });
-      // No config file to rewrite, so no jq step.
       expect(inv.agent_command).not.toContain('jq');
       expect(inv.agent_command).not.toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).not.toContain('/tmp/opencode.json');
     });
   });
 });

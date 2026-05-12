@@ -1,15 +1,23 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api.js';
+import { useStore } from '../../store.js';
 import type { CredentialStatus } from '../../api.js';
 
 /** Credentials tab — read-only view of orchestrator and provider
  *  credential env-var statuses. */
 export function CredentialSettings() {
   const [credentials, setCredentials] = useState<CredentialStatus[]>([]);
+  // The provider-scoped credential rows are derived from each provider's
+  // `api_key_env_var`. Subscribe to providersVersion (M8) so that adding
+  // / editing / deleting a provider in another tab refreshes this list
+  // without a page reload. Orchestrator-scoped rows are static at
+  // process start, so a mount-time fetch is sufficient for those — the
+  // provider-version subscription just keeps the provider half live.
+  const providersVersion = useStore((s) => s.resourceVersions.providers);
 
   useEffect(() => {
     api.getCredentials().then((r) => setCredentials(r.credentials)).catch(() => {});
-  }, []);
+  }, [providersVersion]);
 
   const orchestrator = credentials.filter((c) => c.scope === 'orchestrator');
   const provider = credentials.filter((c) => c.scope === 'provider');

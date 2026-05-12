@@ -175,11 +175,18 @@ A `HarnessSpec` declares:
 - `validateConfig?(config_json)` — optional save-time well-formedness
   check on the operator-authored `agent_profiles.config_json`.
 
-Harness↔provider compatibility is **not** enforced at config-save time
-(operator agreement E3 — no save-time validation). At launch, if a
-profile points at a provider kind not in `supported_provider_kinds`,
-`buildInvocation` throws with a clear "harness X doesn't support kind
-Y" message.
+Harness↔provider compatibility is enforced at **both** save time and
+launch time. The save-time check in the `/api/agent-profiles`
+POST/PATCH validator rejects an incompatible pair before the profile
+is persisted — the operator sees the error immediately in the
+Settings UI. The launch-time check in `buildInvocation` stays as the
+authoritative gate: if a profile somehow points at a provider kind
+not in `supported_provider_kinds` at launch (e.g. an operator
+re-pointed a model row's provider via direct DB edit), it throws with
+a clear "harness X doesn't support kind Y" message and the task
+fails loudly rather than silently routing to an unsupported endpoint.
+Save-time runs the compatibility check **before** `validateConfig`
+since the harness/provider mismatch is the categorical error.
 
 ### Shipped harnesses
 

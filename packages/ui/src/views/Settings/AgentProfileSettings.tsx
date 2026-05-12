@@ -106,8 +106,15 @@ export function AgentProfileSettings() {
       }
       setEditing(null);
       setIsNew(false);
-      // Profile list refreshes automatically via the resource_changed
-      // websocket event the server broadcasts on successful save.
+      // Profile list normally refreshes via the resource_changed
+      // websocket event the server broadcasts. M7: belt-and-braces
+      // inline refetch covers the case where the WS connection dropped
+      // mid-save — without it the just-saved profile wouldn't appear
+      // in the list until the page reloads.
+      api
+        .getAgentProfiles()
+        .then((r) => setProfiles(r.profiles))
+        .catch(() => {});
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed');
     }
@@ -118,6 +125,19 @@ export function AgentProfileSettings() {
     setError(null);
     try {
       await api.deleteAgentProfile(id);
+      // M7: clear the editor state if it was open on the row we just
+      // deleted. Without this, the editor stays open with the deleted
+      // profile's draft and clicking Save would re-POST the row, silently
+      // re-creating it. Also belt-and-braces refetch in case the WS
+      // dropped (same reasoning as handleSave).
+      if (editing?.id === id) {
+        setEditing(null);
+        setIsNew(false);
+      }
+      api
+        .getAgentProfiles()
+        .then((r) => setProfiles(r.profiles))
+        .catch(() => {});
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Delete failed');
     }
@@ -342,25 +362,45 @@ export function AgentProfileSettings() {
             onChange={(cfg) => setEditing({ ...editing, config_json: cfg })}
           />
 
-          <div className="flex gap-3">
-            <button
-              onClick={handleSave}
-              disabled={!editing.model_pk}
-              className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-4 py-2 rounded text-sm"
-            >
-              Save
-            </button>
-            <button
-              onClick={() => {
-                setEditing(null);
-                setIsNew(false);
-                setError(null);
-              }}
-              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
-            >
-              Cancel
-            </button>
-          </div>
+          {/* Compute save-eligibility once so the button and the
+              tooltip stay in sync. (L) The previous version disabled
+              only on falsy model_pk, leaving the button live when the
+              selected model_pk pointed at a row no longer in
+              modelOptions (deleted in another tab, or the harness's
+              compatible-kinds list changed). Server rejects the save
+              with a clear error, but disabling here avoids the round
+              trip. */}
+          {(() => {
+            const modelMissing =
+              !editing.model_pk ||
+              !modelOptions.some(({ model }) => model.id === editing.model_pk);
+            const saveDisabled = modelMissing;
+            const saveTitle = modelMissing
+              ? 'Select a model compatible with this harness before saving.'
+              : undefined;
+            return (
+              <div className="flex gap-3">
+                <button
+                  onClick={handleSave}
+                  disabled={saveDisabled}
+                  title={saveTitle}
+                  className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded text-sm"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={() => {
+                    setEditing(null);
+                    setIsNew(false);
+                    setError(null);
+                  }}
+                  className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

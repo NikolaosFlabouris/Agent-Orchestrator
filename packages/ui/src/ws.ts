@@ -22,7 +22,6 @@ export type DashboardWsEvent =
   | DashboardSnapshot
   | { type: 'task_updated'; task: TaskResponse }
   | { type: 'task_created'; task: TaskResponse }
-  | { type: 'task_removed'; taskId: number }
   | { type: 'status_changed'; paused: boolean; hostPool: HostPool; queueDepth: number }
   | {
       type: 'resource_changed';

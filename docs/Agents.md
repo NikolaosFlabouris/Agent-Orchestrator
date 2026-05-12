@@ -55,10 +55,18 @@ that into the container's `meta.json` along with snapshots of
 | `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
 | `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
 
-Harness↔provider compatibility is checked at task-launch time, not at
-profile-save time (operator agreement E3). Pairing a harness with an
-unsupported provider kind passes the save and fails loudly when the
-task tries to launch.
+Harness↔provider compatibility is checked at **both** profile-save
+time and task-launch time. The save-time check (in the
+`/api/agent-profiles` POST/PATCH validator) is the friendly early
+surface: pairing a harness with an unsupported provider kind in the
+Settings UI rejects with a clear "harness X doesn't support kind Y"
+message before the profile is persisted. The launch-time check (in
+`buildInvocation`) stays as the authoritative gate, defending against
+configurations that snuck past the save-time check (e.g. an operator
+swapping a model row's provider out from under a live profile via a
+direct DB edit). Save-time also runs the compatibility check **before**
+per-harness `validateConfig`, since a categorical mismatch is the
+higher-signal error.
 
 Adding a new harness is a code change — see
 [04 - Agent Harness, Profiles, Providers & Models](./04-agent-harness.md#adding-a-new-harness).
