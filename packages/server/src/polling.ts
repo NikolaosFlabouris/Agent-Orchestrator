@@ -23,6 +23,7 @@ import {
 import { checkAlerts } from './alerts.js';
 import { cleanupOldWorkspaces } from './cleanup.js';
 import { POLL_INTERVAL_SECONDS } from './constants.js';
+import { notifyTaskCreated } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -180,13 +181,17 @@ export class Poller {
         continue;
       }
 
-      // New task from Forgejo
-      insertTask({
+      // New task from Forgejo. Broadcast `task_created` so connected
+      // dashboards add the row to their local state — without this the
+      // task only appears after a manual page reload (the periodic
+      // refreshTasks call in Dashboard.tsx only UPDATES existing rows).
+      const task = insertTask({
         issue_id: issue.number,
         issue_title: issue.title,
         repo_id: repo.id,
         status: 'queued',
       });
+      notifyTaskCreated(task);
 
       this.log.info(
         { event: 'poll_task_queued', issue_id: issue.number, repo: `${repo.owner}/${repo.name}` },

@@ -25,6 +25,7 @@ import {
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { invalidateSnapshot } from '../forgejo-snapshot.js';
+import { notifyTaskCreated } from '../state-sync.js';
 
 const WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET ?? '';
 
@@ -204,12 +205,20 @@ async function handleIssueEvent(
         }
       }
 
-      insertTask({
+      const task = insertTask({
         issue_id: issue.number,
         issue_title: issueTitle,
         repo_id: repo.id,
         status: 'queued',
       });
+
+      // Broadcast so connected dashboards see the new task immediately
+      // — without this the operator has to manually refresh the page
+      // because the periodic REST poll only updates existing rows, it
+      // doesn't add new ones (Dashboard.tsx refreshTasks calls
+      // updateTask, not addTask). The UI's own POST /api/tasks routes
+      // already broadcast; this matches them for the webhook path.
+      notifyTaskCreated(task);
 
       log.info(
         { event: 'webhook_task_queued', issue_id: issue.number },
