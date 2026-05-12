@@ -25,9 +25,9 @@ import { providerRoutes } from "./routes/providers.js";
 import { agentProfileRoutes } from "./routes/agent-profiles.js";
 import { createStatusRoutes } from "./routes/status.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
-import { dashboardWs } from "./ws/dashboard.js";
+import { createDashboardWs, broadcastStatusChanged } from "./ws/dashboard.js";
 import { outputWs } from "./ws/output.js";
-import { registerAuth } from "./auth.js";
+import { registerAuth, authDisabled } from "./auth.js";
 import { initStateSync } from "./state-sync.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,19 +35,81 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FORGEJO_URL = process.env.FORGEJO_URL ?? "http://forgejo:3000";
 const FORGEJO_ORCHESTRATOR_TOKEN = process.env.FORGEJO_ORCHESTRATOR_TOKEN ?? "";
 // Container layout invariants: the persistence volume is mounted at /data,
-// SQLite lives at the root of it, and Fastify binds 0.0.0.0:8080 because the
-// docker-compose port mapping forwards 8081→8080. Changing any of these
-// requires a matching change to docker-compose.yml + Dockerfile.
+// SQLite lives at the root of it, and Fastify binds 0.0.0.0:8080 inside
+// the container; the docker-compose port mapping forwards 8081→8080.
+//
+// HOST is computed at boot rather than hardcoded so the un-authed dev
+// mode can force a 127.0.0.1 bind — see resolveBindHost() below. The
+// container-internal port stays fixed because it's paired with the
+// docker-compose port mapping; loopback exposure happens at the compose
+// level via `127.0.0.1:8081:8080` (see docker-compose.yml).
 //
 // DB_PATH is env-overridable so `npm run dev` outside the container can
 // point at a local file (e.g. `DB_PATH=./dev.db npm run dev`) without
-// needing a /data mount. PORT/HOST stay fixed because they're paired
-// with the docker-compose port mapping.
+// needing a /data mount.
 const DB_PATH = process.env.DB_PATH ?? "/data/orchestrator.db";
 const PORT = 8080;
-const HOST = "0.0.0.0";
-const COOKIE_SECRET =
-  process.env.COOKIE_SECRET ?? "orchestrator-dev-secret-change-in-production";
+
+/** Cookie-secret resolution (C2). The signed-cookie value is the entire
+ *  auth surface, so a missing / too-short secret is a hard fail in
+ *  production and requires an explicit dev-flag opt-in elsewhere.
+ *
+ *  - production: refuse to start without a strong secret (≥32 chars).
+ *  - non-production with a strong secret: use it.
+ *  - non-production without one: refuse unless
+ *    ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET=1, in which case use the
+ *    dev placeholder AND force the loopback bind (see resolveBindHost).
+ *
+ *  Length floor is 32 chars because `openssl rand -hex 32` is the
+ *  documented recipe and any shorter value is almost certainly a typo
+ *  or a placeholder the operator forgot to replace. */
+const DEV_COOKIE_SECRET = "orchestrator-dev-secret-change-in-production";
+function resolveCookieSecret(): { secret: string; isDevFallback: boolean } {
+  const raw = process.env.COOKIE_SECRET;
+  const strong = typeof raw === "string" && raw.length >= 32;
+  if (strong) return { secret: raw!, isDevFallback: false };
+
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "COOKIE_SECRET is required in production and must be at least 32 " +
+        "characters. Generate one with: openssl rand -hex 32"
+    );
+    process.exit(1);
+  }
+  if (process.env.ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET !== "1") {
+    console.error(
+      "COOKIE_SECRET is missing or too short (<32 chars). Set it to a " +
+        "strong random value (openssl rand -hex 32), or set " +
+        "ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET=1 for local dev — the " +
+        "orchestrator will then bind to 127.0.0.1 only."
+    );
+    process.exit(1);
+  }
+  return { secret: DEV_COOKIE_SECRET, isDevFallback: true };
+}
+
+const { secret: COOKIE_SECRET, isDevFallback: COOKIE_SECRET_IS_DEV } =
+  resolveCookieSecret();
+
+/** Bind host (C2). 0.0.0.0 is the production default — the container's
+ *  internal port is mapped to a host port by docker-compose, which is
+ *  where LAN visibility is actually controlled. We override to
+ *  127.0.0.1 whenever the orchestrator is running in a degraded
+ *  security mode (auth disabled OR dev-fallback cookie secret) so that
+ *  even a misconfigured `docker-compose.yml` with `0.0.0.0:8081:8080`
+ *  can't reach the LAN by accident — the bind inside the container
+ *  refuses non-loopback connections at the kernel level.
+ *
+ *  Operators who genuinely want an un-authed instance reachable from
+ *  the LAN (e.g. for a private network demo) must consciously set
+ *  ORCHESTRATOR_BIND_HOST=0.0.0.0 in addition to the other flags. */
+function resolveBindHost(): string {
+  const explicit = process.env.ORCHESTRATOR_BIND_HOST;
+  if (explicit) return explicit;
+  if (authDisabled() || COOKIE_SECRET_IS_DEV) return "127.0.0.1";
+  return "0.0.0.0";
+}
+const HOST = resolveBindHost();
 
 async function main() {
   // -- Fastify with Pino logger --
@@ -166,20 +228,29 @@ async function main() {
   await app.register(createStatusRoutes(scheduler, poller));
 
   // -- WebSocket endpoints --
-  await app.register(dashboardWs);
+  // dashboardWs is wired with a live scheduler.isPaused() getter so the
+  // initial snapshot reflects the real paused state (F1). Previously
+  // hardcoded to false, which left newly-connecting dashboards showing
+  // "Running" against a paused scheduler until their first REST poll.
+  await app.register(createDashboardWs({ isPaused: () => scheduler.isPaused() }));
   await app.register(outputWs);
 
   // -- Health route --
   app.get("/health", async () => ({ status: "ok" }));
 
   // -- Pause / Resume routes --
+  // Both routes broadcast `status_changed` to all connected dashboards
+  // (F2) so the paused indicator propagates immediately instead of
+  // waiting for each client's 5-second /api/status poll cycle.
   app.post("/api/status/pause", async () => {
     scheduler.pause();
+    broadcastStatusChanged(true);
     return { paused: true };
   });
 
   app.post("/api/status/resume", async () => {
     scheduler.resume();
+    broadcastStatusChanged(false);
     return { paused: false };
   });
 
@@ -206,8 +277,16 @@ async function main() {
   // -- Start server --
   await app.listen({ port: PORT, host: HOST });
   log.info(
-    { event: "server_started", port: PORT },
-    "Orchestrator server started",
+    {
+      event: "server_started",
+      port: PORT,
+      host: HOST,
+      auth_disabled: authDisabled(),
+      cookie_secret_dev_fallback: COOKIE_SECRET_IS_DEV,
+    },
+    authDisabled() || COOKIE_SECRET_IS_DEV
+      ? "Orchestrator started in DEGRADED mode — loopback bind only"
+      : "Orchestrator server started",
   );
 
   // -- Start scheduler --

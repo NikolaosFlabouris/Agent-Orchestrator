@@ -19,8 +19,19 @@ import type { Provider, ProviderKind, Model } from '@orchestrator/shared';
 import { PROVIDER_KINDS } from '@orchestrator/shared';
 import { getProviderKindSpec, listProviderKinds } from '../providers/kinds.js';
 import { broadcastResourceChanged } from '../ws/dashboard.js';
+import { isUniqueViolation } from '../db-errors.js';
 
-interface ProviderWithStats extends Provider {
+/** Wire shape for `Provider` responses. Deliberately omits `auth_token`
+ *  — the inline credential value is database-internal and must never
+ *  ship to clients (see C1). Operators replace via the UI's tri-state
+ *  control, which sends `auth_token` only when explicitly edited. The
+ *  PATCH merge in this module reads `existing.auth_token` directly from
+ *  the DB row, so omitting it from the wire format doesn't break the
+ *  preservation-on-PATCH semantics. */
+interface ProviderWithStats extends Omit<Provider, 'auth_token'> {
+  /** True when the provider row has a non-empty inline auth_token set.
+   *  The literal value is never shipped to clients. */
+  has_auth_token: boolean;
   /** How many models point at this provider. */
   models_count: number;
   /** How many tasks are currently holding a slot against this provider. */
@@ -29,23 +40,17 @@ interface ProviderWithStats extends Provider {
 
 /** Strict allow-list of characters real-world model identifiers use.
  *  Defence-in-depth against shell-metacharacter smuggling via DB rows
- *  that later flow into harness `agent_command` strings. */
-const MODEL_ID_RE = /^[A-Za-z0-9._:/+@-]+$/;
+ *  that later flow into harness `agent_command` strings.
+ *
+ *  The leading char must be a letter or digit so values like ':foo' or
+ *  '@/bar' don't slip through — those would pass the launch-time shell
+ *  quoting fine but the inference endpoint would reject them with a
+ *  confusing 'unknown model' error. Letters and digits are the only
+ *  starting chars real-world model ids ever use. */
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
 
 /** Same allow-list applied to provider ids (operator-supplied). */
 const PROVIDER_ID_RE = /^[A-Za-z0-9._-]+$/;
-
-/** True when an exception is a better-sqlite3 UNIQUE constraint
- *  violation. Lets us turn TOCTOU races on (provider_id, model_id)
- *  inserts into a friendly 409 instead of a 500. */
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    'code' in err &&
-    typeof (err as { code: unknown }).code === 'string' &&
-    (err as { code: string }).code.startsWith('SQLITE_CONSTRAINT_UNIQUE')
-  );
-}
 
 /** Pre-computed map of provider_id → active slot count, shared across
  *  one batch of `enrich(provider)` calls so we don't walk the task list
@@ -55,8 +60,14 @@ function enrich(
   provider: Provider,
   activeCounts: Map<string, number>
 ): ProviderWithStats {
+  // Destructure `auth_token` off so it never lands in the response.
+  // `has_auth_token` reports presence-only; the value stays in the DB
+  // row, reachable from the scheduler via getProvider() which returns
+  // the full Provider type, but never via /api/providers.
+  const { auth_token, ...safeFields } = provider;
   return {
-    ...provider,
+    ...safeFields,
+    has_auth_token: !!(auth_token && auth_token.trim().length > 0),
     models_count: countModelsUsingProvider(provider.id),
     active_slots: activeCounts.get(provider.id) ?? 0,
   };
@@ -82,6 +93,18 @@ function validateProviderShape(
     body.base_url === undefined || body.base_url === null || body.base_url === ''
       ? null
       : String(body.base_url).trim();
+  // auth_token must be a string, explicit null, or absent. Reject other
+  // types so a client that round-trips the new `has_auth_token: boolean`
+  // response field back as `auth_token` doesn't accidentally store the
+  // literal string "true" / "false" as a credential.
+  if (
+    'auth_token' in body &&
+    body.auth_token !== null &&
+    body.auth_token !== undefined &&
+    typeof body.auth_token !== 'string'
+  ) {
+    return { error: 'auth_token must be a string or null' };
+  }
   const authToken =
     body.auth_token === undefined || body.auth_token === null || body.auth_token === ''
       ? null
@@ -104,11 +127,50 @@ function validateProviderShape(
       error: `base_url is required for ${spec.display_name} providers`,
     };
   }
+  // M6: when present, base_url must parse as a well-formed http(s) URL.
+  // Without this check, malformed values (`javascript:...`, `file:///...`,
+  // raw hostnames missing a scheme) would save and fail later at task
+  // launch with a confusing inference-side error. Restricting to
+  // http/https matches every supported self-hosted endpoint (Ollama
+  // exposes /v1 over http(s)) and rules out scheme-based misuse.
+  if (baseUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(baseUrl);
+    } catch {
+      return {
+        error: `base_url must be a valid URL (got '${baseUrl}')`,
+      };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        error:
+          `base_url must use http:// or https:// scheme ` +
+          `(got '${parsed.protocol}//…')`,
+      };
+    }
+  }
   if (!spec.auth_optional && !authToken && !apiKeyEnvVar) {
     return {
       error:
         `${spec.display_name} providers require a credential. ` +
         `Set either auth_token (inline) or api_key_env_var (orchestrator-side env var).`,
+    };
+  }
+  // M5: enforce mutual exclusion between auth_token and api_key_env_var.
+  // Previously the runtime picked auth_token over api_key_env_var when
+  // both were set (see providers/kinds.ts resolveProviderCredential),
+  // but accepting both at save time was misleading — the operator
+  // expects whichever value they entered most recently to win and is
+  // likely to be surprised when the "other" field silently overrides.
+  // For multi-instancing a kind, the right answer is two provider rows
+  // each with exactly one credential type.
+  if (authToken && apiKeyEnvVar) {
+    return {
+      error:
+        'Set either auth_token (inline) or api_key_env_var (env-var pointer), ' +
+        'not both. To multi-instance a kind with different credentials, ' +
+        'create separate provider rows.',
     };
   }
   // api_key_env_var must be a syntactically valid env-var name. Anything
@@ -354,6 +416,19 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
             .send({ error: 'display_name must be non-empty' });
         }
         updates.display_name = v;
+      }
+      // M1: an empty `updates` map would still trigger a broadcast and
+      // make every connected client refetch for no reason. The only way
+      // to reach this point with no editable fields is an explicit
+      // PATCH that includes neither display_name nor an editable field
+      // — almost certainly an operator mistake. Reject with a clear
+      // message before doing any DB / broadcast work.
+      if (Object.keys(updates).length === 0) {
+        return reply.status(400).send({
+          error:
+            'No editable fields supplied. Only display_name is editable on an ' +
+            'existing model row.',
+        });
       }
       updateModel(pk, updates);
       broadcastResourceChanged('models');

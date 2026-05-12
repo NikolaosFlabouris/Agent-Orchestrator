@@ -14,8 +14,21 @@ services:
     # stop_grace_period must be >= agent_timeout_minutes + a few minutes of drain slack.
     # If you raise agent_timeout_minutes in the UI, raise this too and `docker compose up -d`.
     stop_grace_period: 35m
+    # Default to a loopback publish so an unconfigured instance can't be
+    # reached from the LAN. The orchestrator itself also forces a
+    # 127.0.0.1 bind inside the container when auth is disabled OR the
+    # cookie secret is the dev fallback (see packages/server/src/index.ts
+    # resolveBindHost) — this compose-level loopback publish is the
+    # belt-and-braces layer for the case where someone misconfigures one
+    # of those checks.
+    #
+    # To expose to the LAN (multi-user install with OAuth configured),
+    # change to:
+    #   - "0.0.0.0:8081:8080"
+    # and also set ORCHESTRATOR_BIND_HOST=0.0.0.0 in .env. Both layers
+    # must opt in; either one alone keeps you on loopback.
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data

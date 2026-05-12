@@ -75,9 +75,9 @@ export const api = {
     request<{ kinds: ProviderKindSpec[] }>('GET', '/api/provider-kinds'),
   getProviders: () =>
     request<{ providers: ProviderResponse[] }>('GET', '/api/providers'),
-  createProvider: (data: Partial<ProviderResponse>) =>
+  createProvider: (data: ProviderWriteRequest) =>
     request<ProviderResponse>('POST', '/api/providers', data),
-  updateProvider: (id: string, data: Partial<ProviderResponse>) =>
+  updateProvider: (id: string, data: ProviderWriteRequest) =>
     request<ProviderResponse>('PATCH', `/api/providers/${id}`, data),
   deleteProvider: (id: string) =>
     request<void>('DELETE', `/api/providers/${id}`),
@@ -325,13 +325,35 @@ export interface ProviderResponse {
   kind: ProviderKind;
   concurrency_limit: number;
   base_url: string | null;
-  auth_token: string | null;
+  /** Presence-only flag for the inline auth token. The literal value is
+   *  database-internal and never returned by the API (C1). The UI shows
+   *  "**** (stored)" with explicit Replace / Clear affordances and only
+   *  PATCHes `auth_token` when the operator actually edits it. */
+  has_auth_token: boolean;
   api_key_env_var: string | null;
   notes: string | null;
   /** How many models reference this provider. */
   models_count: number;
   /** Number of tasks currently holding a slot against this provider. */
   active_slots: number;
+}
+
+/** Write-only payload for POST /api/providers and PATCH /api/providers/:id.
+ *  Mirrors `ProviderResponse` minus the read-only stat fields, and
+ *  includes the write-only `auth_token` (string to set, null to clear,
+ *  absent to leave the stored value untouched). */
+export interface ProviderWriteRequest {
+  id?: string;
+  display_name?: string;
+  kind?: ProviderKind;
+  concurrency_limit?: number;
+  base_url?: string | null;
+  /** Write-only. Absent → preserve stored value. null/'' → clear. string →
+   *  replace. The GET response never contains this field; the form must
+   *  never echo it back unless the operator explicitly edited it. */
+  auth_token?: string | null;
+  api_key_env_var?: string | null;
+  notes?: string | null;
 }
 
 export interface ModelResponse {

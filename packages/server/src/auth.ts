@@ -7,6 +7,14 @@ const OAUTH_CLIENT_SECRET = process.env.FORGEJO_OAUTH_CLIENT_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
 const COOKIE_NAME = 'orchestrator_session';
 
+/** True when the orchestrator should run without OAuth — i.e. OAuth env
+ *  vars are missing AND the operator opted in via the dev flag. The
+ *  index.ts boot path uses this to force a loopback bind so an
+ *  unauthenticated instance is unreachable from the LAN. */
+export function authDisabled(): boolean {
+  return !OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET;
+}
+
 interface SessionData {
   access_token: string;
   refresh_token: string;
@@ -15,13 +23,48 @@ interface SessionData {
 
 /**
  * Register OAuth2 plugin and auth routes.
- * If OAuth credentials are not configured, auth is disabled (dev mode).
+ *
+ * Fail-closed semantics (C2):
+ *   - Production (`NODE_ENV=production`): refuse to start. The
+ *     /api/* routes are the entire surface — running them unauthed in
+ *     production is never the right answer.
+ *   - Non-production: refuse to start unless the operator has set
+ *     `ORCHESTRATOR_ALLOW_UNAUTHENTICATED=1` explicitly. When the flag
+ *     is set, log a loud warning and skip middleware registration. The
+ *     boot path in index.ts pairs this with a loopback bind so the
+ *     unauthenticated instance is unreachable from the LAN.
+ *
+ * The previous behaviour was a silent warn-and-continue, which exposed
+ * /api/* (including provider credentials) to anything that could reach
+ * the listening socket.
  */
 export async function registerAuth(app: FastifyInstance): Promise<void> {
   if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'FORGEJO_OAUTH_CLIENT_ID and FORGEJO_OAUTH_CLIENT_SECRET are required ' +
+          'in production. Refusing to start with /api/* unauthenticated. ' +
+          'Configure the OAuth app in Forgejo (Site Administration → ' +
+          'Applications), then set both env vars and restart.'
+      );
+    }
+    if (process.env.ORCHESTRATOR_ALLOW_UNAUTHENTICATED !== '1') {
+      throw new Error(
+        'FORGEJO_OAUTH_CLIENT_ID / FORGEJO_OAUTH_CLIENT_SECRET are not set, ' +
+          'and ORCHESTRATOR_ALLOW_UNAUTHENTICATED is not "1". Refusing to ' +
+          'start with /api/* unauthenticated. To run a local dev instance ' +
+          'without OAuth, set ORCHESTRATOR_ALLOW_UNAUTHENTICATED=1 — the ' +
+          'orchestrator will bind to 127.0.0.1 only.'
+      );
+    }
     app.log.warn(
-      { event: 'auth_disabled' },
-      'FORGEJO_OAUTH_CLIENT_ID/SECRET not set — authentication disabled'
+      { event: 'auth_disabled', binding: '127.0.0.1' },
+      '*** AUTHENTICATION DISABLED — ORCHESTRATOR_ALLOW_UNAUTHENTICATED=1 *** ' +
+        'All /api/* and /ws/* routes are open. The boot path forces a ' +
+        'loopback bind, but anyone with shell access to this host (or ' +
+        'who can tunnel to it) can read providers/auth_tokens and ' +
+        'launch tasks. Do not use this mode for anything beyond local ' +
+        'single-user development.'
     );
     return;
   }

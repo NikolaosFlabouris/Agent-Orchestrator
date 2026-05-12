@@ -3,10 +3,22 @@ import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
   ProviderResponse,
+  ProviderWriteRequest,
   ProviderKind,
   ProviderKindSpec,
   ModelResponse,
 } from '../../api.js';
+
+/** Tri-state for the inline auth_token form control (C1):
+ *    - 'keep'    → form omits auth_token from the PATCH body; server
+ *                  preserves the stored value untouched.
+ *    - 'set'     → operator is typing a replacement; PATCH sends the
+ *                  string verbatim.
+ *    - 'clear'   → PATCH sends null to remove the stored token.
+ *  The literal stored value is never shipped to the client, so the
+ *  form can't preselect "edit existing"; replacement is always a fresh
+ *  entry into the input. */
+type AuthTokenMode = 'keep' | 'set' | 'clear';
 
 /** Providers & Models tab — per-provider connection identity (kind,
  *  URL, credential) + nested models list. */
@@ -15,6 +27,11 @@ export function ProviderSettings() {
   const [kinds, setKinds] = useState<ProviderKindSpec[]>([]);
   const [editing, setEditing] = useState<Partial<ProviderResponse> | null>(null);
   const [isNew, setIsNew] = useState(false);
+  // Auth-token editor state lives outside `editing` because the value
+  // itself is write-only and we don't want it accidentally folded back
+  // into a future GET response payload via setEditing({...p}).
+  const [authTokenMode, setAuthTokenMode] = useState<AuthTokenMode>('keep');
+  const [authTokenDraft, setAuthTokenDraft] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const providersVersion = useStore((s) => s.resourceVersions.providers);
@@ -42,16 +59,23 @@ export function ProviderSettings() {
       kind: 'anthropic',
       concurrency_limit: 5,
       base_url: null,
-      auth_token: null,
+      has_auth_token: false,
       api_key_env_var: 'ANTHROPIC_API_KEY',
       notes: null,
     });
+    // New providers default to "set" so the operator can type a token
+    // immediately; for edits we default to "keep" so the stored value
+    // stays untouched unless the operator explicitly chooses Replace.
+    setAuthTokenMode('set');
+    setAuthTokenDraft('');
     setIsNew(true);
     setError(null);
   }
 
   function startEdit(p: ProviderResponse): void {
     setEditing({ ...p });
+    setAuthTokenMode('keep');
+    setAuthTokenDraft('');
     setIsNew(false);
     setError(null);
   }
@@ -73,34 +97,63 @@ export function ProviderSettings() {
         return;
       }
     }
+    // Mid-save snapshot of the auth-token state so we can both validate
+    // and build the request body without re-reading the tri-state.
+    const trimmedDraft = authTokenDraft.trim();
+    if (authTokenMode === 'set' && trimmedDraft.length === 0) {
+      setError(
+        'Auth token cannot be empty — use Clear if you want to remove the stored value.'
+      );
+      return;
+    }
     if (spec && !spec.auth_optional) {
-      const hasToken = (editing.auth_token ?? '').trim().length > 0;
-      const hasEnv = (editing.api_key_env_var ?? '').trim().length > 0;
-      if (!hasToken && !hasEnv) {
+      // "Will this provider have a credential after this save lands?"
+      //   keep  → it has one iff it already had one (has_auth_token=true)
+      //   set   → yes (a non-empty draft, checked above)
+      //   clear → no
+      const willHaveToken =
+        authTokenMode === 'set' ||
+        (authTokenMode === 'keep' && !!editing.has_auth_token);
+      const willHaveEnv = (editing.api_key_env_var ?? '').trim().length > 0;
+      if (!willHaveToken && !willHaveEnv) {
         setError(
           `${spec.display_name} providers require a credential. ` +
-            `Set either auth_token (inline) or api_key_env_var.`
+            `Set either an inline auth token or an api_key_env_var.`
         );
         return;
       }
     }
 
+    // Build the request payload. `auth_token` is write-only on the wire
+    // (C1): only include it when the operator actively edited the
+    // tri-state, so "keep" PATCHes don't accidentally clear the stored
+    // value just because the form didn't display it.
+    const payload: ProviderWriteRequest = {
+      display_name: editing.display_name,
+      kind: editing.kind,
+      concurrency_limit: editing.concurrency_limit,
+      base_url: editing.base_url,
+      api_key_env_var: editing.api_key_env_var,
+      notes: editing.notes,
+    };
+    if (authTokenMode === 'set') {
+      payload.auth_token = trimmedDraft;
+    } else if (authTokenMode === 'clear') {
+      payload.auth_token = null;
+    }
+    // 'keep' → field omitted → server preserves existing value via the
+    // PATCH merge in routes/providers.ts.
+
     try {
       if (isNew) {
-        await api.createProvider(editing);
+        await api.createProvider({ id: editing.id, ...payload });
       } else {
-        await api.updateProvider(editing.id!, {
-          display_name: editing.display_name,
-          kind: editing.kind,
-          concurrency_limit: editing.concurrency_limit,
-          base_url: editing.base_url,
-          auth_token: editing.auth_token,
-          api_key_env_var: editing.api_key_env_var,
-          notes: editing.notes,
-        });
+        await api.updateProvider(editing.id!, payload);
       }
       setEditing(null);
       setIsNew(false);
+      setAuthTokenMode('keep');
+      setAuthTokenDraft('');
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed');
@@ -203,8 +256,19 @@ export function ProviderSettings() {
                     // anthropic provider with an ollama URL.
                     base_url: spec?.requires_base_url ? editing.base_url ?? '' : null,
                     api_key_env_var: spec?.container_env_name ?? null,
-                    auth_token: null,
                   });
+                  // Force the auth-token tri-state to 'clear' so a kind
+                  // switch with a stored token doesn't carry credentials
+                  // intended for a different endpoint across the change.
+                  // Operator can flip back to 'keep' via Undo if the
+                  // existing token is genuinely portable.
+                  if (editing.has_auth_token) {
+                    setAuthTokenMode('clear');
+                    setAuthTokenDraft('');
+                  } else {
+                    setAuthTokenMode('set');
+                    setAuthTokenDraft('');
+                  }
                 }}
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               >
@@ -280,21 +344,90 @@ export function ProviderSettings() {
                 <span className="text-gray-500 font-normal">
                   {' '}— optional. For self-hosted servers with bearer auth, OR
                   for cloud kinds when you want to multi-instance without using
-                  the env-var pointer above. Stored in the database as plaintext.
+                  the env-var pointer above. Stored in the database as
+                  plaintext; the server never reveals the stored value back
+                  through the API. Use Replace to rotate.
                 </span>
               </label>
-              <input
-                type="password"
-                value={editing.auth_token ?? ''}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    auth_token: e.target.value || null,
-                  })
-                }
-                placeholder={editingKindSpec.auth_optional ? '(optional)' : ''}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
-              />
+              {authTokenMode === 'keep' && editing.has_auth_token ? (
+                // Edit-existing path: don't even render an input field.
+                // The stored value isn't available to the client, so any
+                // input here would be pre-filled with the wrong thing.
+                <div className="flex items-center gap-3 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                  <span className="text-gray-300 font-mono">**** (stored)</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTokenMode('set');
+                      setAuthTokenDraft('');
+                    }}
+                    className="text-blue-400 hover:text-blue-300"
+                  >
+                    Replace
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTokenMode('clear');
+                      setAuthTokenDraft('');
+                    }}
+                    className="text-red-400 hover:text-red-300"
+                  >
+                    Clear
+                  </button>
+                </div>
+              ) : authTokenMode === 'clear' ? (
+                <div className="flex items-center gap-3 bg-gray-800 border border-yellow-700 rounded px-3 py-2 text-sm">
+                  <span className="text-yellow-400">
+                    Will clear the stored token on save.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAuthTokenMode('keep')}
+                    className="text-blue-400 hover:text-blue-300"
+                  >
+                    Undo
+                  </button>
+                </div>
+              ) : (
+                // 'set' mode, or 'keep' with no stored token yet (new
+                // providers, or edits to providers that have only an
+                // env-var pointer). Render a fresh input.
+                <div className="flex items-center gap-3">
+                  <input
+                    type="password"
+                    value={authTokenDraft}
+                    onChange={(e) => {
+                      setAuthTokenDraft(e.target.value);
+                      // If the operator starts typing while the form was
+                      // in 'keep' mode (no stored token), promote to 'set'
+                      // so the value lands in the PATCH body.
+                      if (authTokenMode === 'keep') setAuthTokenMode('set');
+                    }}
+                    placeholder={
+                      editingKindSpec.auth_optional ? '(optional)' : 'paste token'
+                    }
+                    autoComplete="new-password"
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+                  />
+                  {/* Cancel-set button only relevant when editing a row
+                      that already has a stored token — gives the
+                      operator an explicit way back to "keep" without
+                      blanking the draft accidentally. */}
+                  {!isNew && editing.has_auth_token && authTokenMode === 'set' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthTokenMode('keep');
+                        setAuthTokenDraft('');
+                      }}
+                      className="text-gray-400 hover:text-gray-200 text-sm"
+                    >
+                      Keep existing
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div>
@@ -318,6 +451,8 @@ export function ProviderSettings() {
               onClick={() => {
                 setEditing(null);
                 setIsNew(false);
+                setAuthTokenMode('keep');
+                setAuthTokenDraft('');
                 setError(null);
               }}
               className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
