@@ -149,8 +149,8 @@ function createTables(db: Database.Database): void {
       log_path TEXT,
       feedback TEXT,
       -- Snapshot of the model_id resolved at attempt-launch time. Stored
-      -- on the attempt so audit/usage records survive subsequent edits to
-      -- the agent profile or model row.
+      -- on the attempt so audit records survive subsequent edits to the
+      -- agent profile or model row.
       model_id TEXT,
       -- Snapshot of the harness id resolved at attempt-launch time.
       harness_id TEXT,

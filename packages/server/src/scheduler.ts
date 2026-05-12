@@ -514,7 +514,6 @@ export class Scheduler {
             `Agent exceeded timeout of ${timeoutMinutes} minutes ` +
             `(orchestrator-side kill after ${TIMEOUT_KILL_GRACE_MINUTES}min grace; ` +
             `the in-container wrapper failed to enforce the timeout itself).`,
-          usage: null,
         })
       );
     } catch (err) {

@@ -91,46 +91,10 @@ if [ "$ROLE" = "review" ] && [ "$STATUS" = "success" ]; then
   fi
 fi
 
-# Extract token usage from agent output (Claude Code stream-json format).
-# The last JSON line carrying a `.usage` object has cumulative totals.
-# Tools that don't report usage (e.g. OpenCode against local LLMs) leave
-# all three values as the JSON literal "null".
-#
-# Previously this used `grep -o '{"usage":.*}'`, which is greedy: if any
-# single line happened to contain multiple JSON objects with "usage"
-# fields, the .* would span from the first "usage" to the last `}` on
-# the line and the pieced-together value would fail jq parsing. Switching
-# to `jq -c 'select(.usage != null)'` reads one full JSON value per
-# input line and emits the whole object only when its top level has a
-# .usage field — robust against nested usage objects, multi-object lines,
-# and malformed/truncated trailing lines (the `--exit-status 1` style
-# is not needed because we tolerate empty output).
-INPUT_TOKENS="null"
-OUTPUT_TOKENS="null"
-MODEL="null"
-USAGE_LINE=$(jq -c 'select(.usage != null)' "$AGENT_LOG" 2>/dev/null | tail -1 || true)
-if [ -n "$USAGE_LINE" ]; then
-  INPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.input_tokens // null')
-  OUTPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.output_tokens // null')
-  # MODEL is sourced from meta.json (the orchestrator's launch-time
-  # snapshot of the resolved model id), NOT from the usage line — usage
-  # entries on the stream don't carry the model field consistently
-  # across stream-json versions. Gated on USAGE_LINE being non-empty so
-  # we don't report a model id for a run that produced zero usage
-  # events (those are almost always pre-API-call failures where the
-  # model id is misleading).
-  MODEL=$(jq -r '.model // null' "$META")
-fi
-
 cat > "$RESULT" <<EOF
 {
   "status": "$STATUS",
   "exit_code": $AGENT_EXIT,
-  "error_message": $ERROR_MSG,
-  "usage": {
-    "input_tokens": $INPUT_TOKENS,
-    "output_tokens": $OUTPUT_TOKENS,
-    "model": "$MODEL"
-  }
+  "error_message": $ERROR_MSG
 }
 EOF

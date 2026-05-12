@@ -128,8 +128,6 @@ describe.skipIf(SKIP)('Harness contract integration', { timeout: 120_000 }, () =
 
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
     expect(result.status).toBe('success');
-    expect(result.usage).toBeDefined();
-    expect(result.usage.input_tokens).toBeGreaterThan(0);
   });
 
   it('produces result.json on failure', async () => {
@@ -195,8 +193,8 @@ describe.skipIf(SKIP)('Harness contract integration', { timeout: 120_000 }, () =
     expect(review.feedback).toBeTruthy();
   });
 
-  it('writes usage data in result.json', async () => {
-    const dirs = setupDirs('usage-test');
+  it('writes result.json without a usage field', async () => {
+    const dirs = setupDirs('no-usage-field');
     // Use review role to avoid git operations
     await runMockContainer(dirs, {
       role: 'review',
@@ -210,9 +208,9 @@ describe.skipIf(SKIP)('Harness contract integration', { timeout: 120_000 }, () =
     const result = JSON.parse(
       fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
     );
-    expect(result.usage).toBeDefined();
-    expect(result.usage.input_tokens).toBe(3000); // review uses 3000 input tokens
-    expect(result.usage.output_tokens).toBe(1000);
-    expect(result.usage.model).toBe('mock-model');
+    expect(result.status).toBe('success');
+    // Cost / token tracking was removed — result.json must not regrow a
+    // usage field. See docs/08-technology-stack.md for the design note.
+    expect(result.usage).toBeUndefined();
   });
 });
