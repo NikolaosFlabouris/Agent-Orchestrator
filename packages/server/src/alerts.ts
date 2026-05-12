@@ -4,7 +4,7 @@ import {
   getRepo,
   getAgentProfile,
   getSetting,
-  getLatestAttempt,
+  getActiveAttempt,
 } from './db.js';
 import { getActiveResources } from './queue.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
@@ -65,18 +65,30 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   for (const task of activeTasks) {
     if (!task.started_at) continue;
 
+    // Threshold source resolution. Three outcomes:
+    //   - 'snapshot' → snapshot column on the active attempt (H5a path)
+    //   - 'profile'  → live profile read fallback for legacy/pre-v22
+    //                  attempt rows whose snapshot is missing
+    //   - undecidable → no profile resolvable; skip the task
     let thresholdMinutes: number | null = null;
-    let thresholdSource = 'snapshot';
-    let profileIdForMessage: string | null = null;
+    type ThresholdSource =
+      | { kind: 'snapshot'; attemptId: number }
+      | { kind: 'profile'; profileId: string };
+    let source: ThresholdSource | null = null;
 
-    const latest = getLatestAttempt(task.id);
+    // Filter to the *running* attempt (M3). `getLatestAttempt`
+    // would include a completed dev attempt during the brief gap
+    // before the review attempt row is inserted — the snapshot
+    // value is the same in practice, but semantically we want
+    // "the currently running attempt".
+    const active = getActiveAttempt(task.id);
     if (
-      latest &&
-      typeof latest.timeout_minutes_snapshot === 'number' &&
-      latest.timeout_minutes_snapshot > 0
+      active &&
+      typeof active.timeout_minutes_snapshot === 'number' &&
+      active.timeout_minutes_snapshot > 0
     ) {
-      thresholdMinutes = latest.timeout_minutes_snapshot;
-      profileIdForMessage = latest.harness_id ? `attempt #${latest.id}` : null;
+      thresholdMinutes = active.timeout_minutes_snapshot;
+      source = { kind: 'snapshot', attemptId: active.id };
     } else {
       // Legacy / pre-v22 fallback. Same resolution as scheduler.
       const repo = getRepo(task.repo_id);
@@ -87,18 +99,31 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
       const profile = profileId ? getAgentProfile(profileId) : undefined;
       if (!profile) continue; // profile gone; can't determine threshold
       thresholdMinutes = profile.timeout_minutes;
-      thresholdSource = 'profile';
-      profileIdForMessage = `profile '${profile.id}'`;
+      source = { kind: 'profile', profileId: profile.id };
     }
 
+    // Use the current attempt's start time (not the task's) so a stuck
+    // review run is measured from the review attempt's launch, not
+    // from the dev attempt's. task.started_at is set on the first
+    // launch and never reset, so for review-phase tasks it would
+    // include the full successful dev run and prematurely flag the
+    // review as stuck. Falls back to task.started_at when the active
+    // attempt has no started_at (shouldn't happen in normal flow but
+    // defends against partial inserts).
+    const startedAtSource =
+      (active && active.started_at) || task.started_at;
     const stuckThresholdMs =
       thresholdMinutes * STUCK_TASK_TIMEOUT_MULTIPLIER * 60 * 1000;
-    const elapsed = Date.now() - new Date(task.started_at).getTime();
+    const elapsed = Date.now() - new Date(startedAtSource).getTime();
     if (elapsed > stuckThresholdMs) {
+      // Surface the attempt id (snapshot path) or the live profile id
+      // (fallback path) so an on-call operator can jump straight to
+      // the offending row without re-walking the task→profile chain
+      // (H6).
       const sourceLabel =
-        thresholdSource === 'snapshot'
-          ? 'snapshot'
-          : `live ${profileIdForMessage}`;
+        source.kind === 'snapshot'
+          ? `snapshot of attempt #${source.attemptId}`
+          : `live profile '${source.profileId}'`;
       alerts.push({
         level: 'warning',
         message:

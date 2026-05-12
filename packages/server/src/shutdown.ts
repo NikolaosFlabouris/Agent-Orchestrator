@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
-import { getTasks, updateSetting } from './db.js';
+import { getTasks } from './db.js';
 import {
   getContainer,
   inspectContainer,
@@ -56,7 +56,6 @@ export async function gracefulShutdown(
 
   if (running.size === 0) {
     log.info({ event: 'shutdown_no_active' }, 'No active tasks. Shutting down immediately.');
-    updateSetting('last_shutdown', 'graceful');
     await onCleanExit();
     return;
   }
@@ -161,7 +160,6 @@ export async function gracefulShutdown(
   }
 
   // 6. Clean exit
-  updateSetting('last_shutdown', 'graceful');
   log.info({ event: 'shutdown_complete' }, 'Shutdown complete');
   await onCleanExit();
 }

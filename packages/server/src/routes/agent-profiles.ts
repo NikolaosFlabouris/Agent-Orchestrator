@@ -2,16 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import {
   getAgentProfile,
   getAgentProfilesWithStats,
+  getAgentProfileWithStats,
   insertAgentProfile,
   updateAgentProfile,
-  deleteAgentProfile,
-  countReposUsingProfile,
-  countTasksUsingProfile,
+  deleteAgentProfileIfUnreferenced,
   getModel,
   getProvider,
-  getSetting,
 } from '../db.js';
-import type { AgentProfileWithJoinedStats } from '../db.js';
 import {
   listHarnesses,
   getHarness,
@@ -20,21 +17,7 @@ import {
 import type { AgentProfile, HarnessId } from '@orchestrator/shared';
 import { HARNESS_IDS } from '@orchestrator/shared';
 import { broadcastResourceChanged } from '../ws/dashboard.js';
-
-type AgentProfileWithStats = AgentProfileWithJoinedStats;
-
-/** Per-profile enrich for the singleton paths (POST/PATCH return value).
- *  The list path uses `getAgentProfilesWithStats()` which avoids the N+1. */
-function enrichOne(profile: AgentProfile): AgentProfileWithStats {
-  const model = getModel(profile.model_pk);
-  return {
-    ...profile,
-    repos_using: countReposUsingProfile(profile.id),
-    tasks_using: countTasksUsingProfile(profile.id),
-    provider_id: model?.provider_id ?? null,
-    model_id: model?.model_id ?? null,
-  };
-}
+import { isUniqueViolation } from '../db-errors.js';
 
 interface ProfileBody {
   display_name?: string;
@@ -45,8 +28,7 @@ interface ProfileBody {
 }
 
 function validateBody(
-  body: ProfileBody,
-  isCreate: boolean
+  body: ProfileBody
 ):
   | { error: string }
   | { value: Omit<AgentProfile, 'id'> } {
@@ -82,12 +64,35 @@ function validateBody(
     return { error: 'config_json must be an object' };
   }
 
-  // Per-harness config validation. The harness module owns its config
-  // schema; we just call its validateConfig hook (if present) and let it
-  // throw with a human-readable message.
+  // Resolve the harness module. Unknown harness ids surface as a
+  // dedicated error (typo / stale client / forgotten registry entry)
+  // ahead of the more expensive checks below.
   let spec;
   try {
     spec = getHarness(harness_id as HarnessId);
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // Harness↔provider compatibility is the categorical check: this
+  // (harness, provider.kind) pair is fundamentally incompatible. Run
+  // it BEFORE validateConfig because that's the higher-signal error —
+  // fixing config_json doesn't help if the harness can't talk to this
+  // provider kind at all. The launch-time check in `buildInvocation`
+  // stays as the authoritative gate; this save-time check is the
+  // friendlier earlier surface (the docs cover this as the documented
+  // save-time validation contract). (H7)
+  const compat = checkHarnessProviderCompatibility(spec, provider.kind);
+  if (!compat.ok) {
+    return { error: compat.error };
+  }
+
+  // Per-harness config validation. The harness module owns its config
+  // schema; we just call its validateConfig hook (if present) and let
+  // it throw with a human-readable message.
+  try {
     spec.validateConfig?.(config_json);
   } catch (err) {
     return {
@@ -95,17 +100,6 @@ function validateBody(
     };
   }
 
-  // Harness↔provider compatibility check (M2). The same allowlist
-  // `buildInvocation` enforces at launch is re-checked here so the
-  // operator sees a save-time error rather than a deferred launch
-  // failure. The runtime check stays in place as the authority — this
-  // is just a friendlier earlier surface for the same condition.
-  const compat = checkHarnessProviderCompatibility(spec, provider.kind);
-  if (!compat.ok) {
-    return { error: compat.error };
-  }
-
-  void isCreate; // currently unused; signature kept for future divergence.
   return {
     value: {
       display_name,
@@ -146,12 +140,26 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         .status(409)
         .send({ error: `Agent profile '${id}' already exists` });
     }
-    const v = validateBody(body as ProfileBody, true);
+    const v = validateBody(body as ProfileBody);
     if ('error' in v) return reply.status(400).send({ error: v.error });
 
-    insertAgentProfile({ id, ...v.value });
+    try {
+      insertAgentProfile({ id, ...v.value });
+    } catch (err) {
+      // Race: a concurrent POST inserted the same id between our
+      // existence check and this INSERT. `agent_profiles.id` is a
+      // TEXT PRIMARY KEY, so SQLite raises SQLITE_CONSTRAINT_PRIMARYKEY
+      // (not _UNIQUE). The shared helper widens to any constraint
+      // prefix to catch both. Report as 409, not 500.
+      if (isUniqueViolation(err)) {
+        return reply
+          .status(409)
+          .send({ error: `Agent profile '${id}' already exists` });
+      }
+      throw err;
+    }
     broadcastResourceChanged('profiles');
-    return reply.status(201).send(enrichOne(getAgentProfile(id)!));
+    return reply.status(201).send(getAgentProfileWithStats(id)!);
   });
 
   // PATCH /api/agent-profiles/:id
@@ -171,12 +179,12 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         timeout_minutes: existing.timeout_minutes,
         ...(body as ProfileBody),
       };
-      const v = validateBody(merged, false);
+      const v = validateBody(merged);
       if ('error' in v) return reply.status(400).send({ error: v.error });
 
       updateAgentProfile(request.params.id, v.value);
       broadcastResourceChanged('profiles');
-      return enrichOne(getAgentProfile(request.params.id)!);
+      return getAgentProfileWithStats(request.params.id)!;
     }
   );
 
@@ -189,22 +197,14 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(404).send({ error: 'Agent profile not found' });
       }
       // Application-layer RESTRICT: can't delete a profile while it's the
-      // global default, or while any repo/task references it. Keeps the
-      // FK ON DELETE RESTRICT from being the operator's first surprise.
-      const defaultId = getSetting('default_agent_profile_id');
-      if (defaultId === profile.id) {
-        return reply.status(409).send({
-          error: `'${profile.id}' is the global default profile. Set a different default before deleting.`,
-        });
+      // global default, or while any repo/task references it. Done
+      // atomically inside one DB transaction (M4) so a concurrent
+      // PATCH /api/settings can't repoint default_agent_profile_id at
+      // this profile between the safety check and the delete.
+      const refusal = deleteAgentProfileIfUnreferenced(profile.id);
+      if (refusal) {
+        return reply.status(409).send({ error: refusal });
       }
-      const reposUsing = countReposUsingProfile(profile.id);
-      const tasksUsing = countTasksUsingProfile(profile.id);
-      if (reposUsing > 0 || tasksUsing > 0) {
-        return reply.status(409).send({
-          error: `Profile is referenced by ${reposUsing} repo(s) and ${tasksUsing} task(s). Reassign those before deleting.`,
-        });
-      }
-      deleteAgentProfile(profile.id);
       broadcastResourceChanged('profiles');
       return reply.status(204).send();
     }

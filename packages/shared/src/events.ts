@@ -31,10 +31,12 @@ export interface TaskCreatedEvent {
   task: Task;
 }
 
-export interface TaskRemovedEvent {
-  type: 'task_removed';
-  taskId: number;
-}
+// NOTE: A `TaskRemovedEvent` type lived here previously but nothing ever
+// emitted it — the orchestrator has no DELETE /api/tasks route (tasks
+// transition to terminal states like `failed`/`cancelled`/`merged`
+// rather than being deleted). It was removed to keep the union honest;
+// if a delete path is added later, restore both the type and the
+// matching client handler at the same commit. (F3)
 
 export interface StatusChangedEvent {
   type: 'status_changed';
@@ -57,7 +59,6 @@ export type DashboardEvent =
   | DashboardSnapshot
   | TaskUpdatedEvent
   | TaskCreatedEvent
-  | TaskRemovedEvent
   | StatusChangedEvent
   | ResourceChangedEvent;
 

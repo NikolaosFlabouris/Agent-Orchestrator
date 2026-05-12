@@ -47,6 +47,19 @@ export const DRAIN_TIMEOUT_MINUTES = 30;
  *  120 min, a task is flagged when it's been running for 240 min. */
 export const STUCK_TASK_TIMEOUT_MULTIPLIER = 2;
 
+/** Grace period (minutes) the orchestrator adds to `profile.timeout_minutes`
+ *  before SIGKILLing the agent container itself. The agent's in-container
+ *  wrapper (harness-cli.sh `timeout` / harness-sdk.ts `setTimeout`)
+ *  enforces the configured timeout from inside; this scheduler-side kill
+ *  is the safety net for the case where the wrapper crashed before its
+ *  timer armed, or where the agent process disowned itself. Five minutes
+ *  is enough for a normal wrapper to finalise its result.json after the
+ *  in-container timer fires, while still capping runaway containers
+ *  inside one alert window (`STUCK_TASK_TIMEOUT_MULTIPLIER × timeout`).
+ *
+ *  See `Scheduler.enforceTimeouts()` for the call site. */
+export const TIMEOUT_KILL_GRACE_MINUTES = 5;
+
 /** Default Docker memory limit (MB) for an agent container when a repo
  *  doesn't override it. The agent process itself is light (~100–500 MB);
  *  these defaults exist for the tool commands the agent runs (npm ci,

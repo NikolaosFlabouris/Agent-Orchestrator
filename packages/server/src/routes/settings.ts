@@ -43,6 +43,17 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: `Unknown setting: ${key}` });
       }
 
+      // Special handling for default_agent_profile_id — `null` clears
+      // the stored value, which puts the orchestrator into an
+      // "unset default" state. Tasks without a per-task or repo
+      // override will then refuse to launch with a clear error. The UI
+      // (M2) surfaces this state explicitly, so operators who land in
+      // it via the picker have asked for it.
+      if (key === 'default_agent_profile_id' && value === null) {
+        updateSetting(key as SettingsKey, null);
+        continue;
+      }
+
       const strValue =
         typeof value === 'object' ? JSON.stringify(value) : String(value);
 
@@ -59,15 +70,16 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      // Validate default_agent_profile_id points at an existing profile.
-      // Empty string is rejected — the orchestrator can't launch tasks
-      // without a fallback profile, so refusing the unset state is safer
-      // than allowing it to be cleared.
+      // Validate default_agent_profile_id points at an existing
+      // profile when it's set to a non-null value. Empty string is
+      // rejected — the unset state is reachable only via explicit
+      // null above, not via accidentally-blanked string input.
       if (key === 'default_agent_profile_id') {
         if (!strValue) {
-          return reply
-            .status(400)
-            .send({ error: 'default_agent_profile_id cannot be empty' });
+          return reply.status(400).send({
+            error:
+              'default_agent_profile_id cannot be empty string. Pass null to clear.',
+          });
         }
         if (!getAgentProfile(strValue)) {
           return reply

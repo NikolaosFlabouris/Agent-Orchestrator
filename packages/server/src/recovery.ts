@@ -568,7 +568,11 @@ async function readRole(task: Task): Promise<'develop' | 'review'> {
   const taskDir = getTaskDir(task);
   try {
     const raw = await fsp.readFile(path.join(taskDir, 'meta.json'), 'utf-8');
-    const meta = JSON.parse(raw);
+    // Narrow shape: this helper only needs `role`. Typing it explicitly
+    // means a future renamed field (`role` → `attempt_role`) caught at
+    // the type level instead of silently falling through to the 'develop'
+    // default.
+    const meta = JSON.parse(raw) as { role?: 'develop' | 'review' };
     return meta.role ?? 'develop';
   } catch {
     return 'develop';

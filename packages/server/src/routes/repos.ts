@@ -1,8 +1,100 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb, getRepo, getRepos, getTaskByIssue } from '../db.js';
+import {
+  getDb,
+  getRepo,
+  getRepos,
+  getTaskByIssue,
+  getAgentProfile,
+} from '../db.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { registerWebhook } from '../webhooks.js';
 import { validateInstallSteps } from '../install-steps.js';
+import type { MergeStrategy } from '@orchestrator/shared';
+import { MERGE_STRATEGIES } from '@orchestrator/shared';
+
+/** Normalise + validate a body's `agent_profile_id` field. Returns
+ *  - ok=true, value=null when the field is absent/null/empty string
+ *    (all three mean "inherit from settings.default_agent_profile_id"
+ *    at task-launch time)
+ *  - ok=true, value=string when the id references an existing profile
+ *  - ok=false, error when the field is the wrong type or points at a
+ *    non-existent profile
+ *
+ *  Matches the semantics of `validateTaskAgentProfile` in routes/tasks.ts
+ *  so repos and tasks reject the same invalid inputs at save time
+ *  rather than leaving the task to fail at launch. (F5)
+ *
+ *  Exported so the unit tests can exercise the validator directly
+ *  without spinning a Fastify app + ForgejoClient stub (R3). */
+export function validateRepoAgentProfile(
+  raw: unknown,
+  lookupProfile: (id: string) => unknown = getAgentProfile
+):
+  | { ok: true; value: string | null }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== 'string') {
+    return { ok: false, error: 'agent_profile_id must be a string or null' };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '') return { ok: true, value: null };
+  if (!lookupProfile(trimmed)) {
+    return {
+      ok: false,
+      error: `agent_profile_id '${trimmed}' does not reference an existing agent profile`,
+    };
+  }
+  return { ok: true, value: trimmed };
+}
+
+/** Validate `merge_strategy` against the operator-selectable allowlist
+ *  (R1). When absent / null / empty we coerce to the schema default of
+ *  'squash' rather than rejecting — POSTs that omit the field are
+ *  treated as "use default" the same way the column DEFAULT does.
+ *  Anything present must be one of the three known values. */
+export function validateRepoMergeStrategy(
+  raw: unknown
+):
+  | { ok: true; value: MergeStrategy }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null || raw === '') {
+    return { ok: true, value: 'squash' };
+  }
+  if (typeof raw !== 'string' || !MERGE_STRATEGIES.includes(raw as MergeStrategy)) {
+    return {
+      ok: false,
+      error: `merge_strategy must be one of: ${MERGE_STRATEGIES.join(', ')}`,
+    };
+  }
+  return { ok: true, value: raw as MergeStrategy };
+}
+
+/** Validate a per-repo container resource override (memory or CPU).
+ *  These columns are nullable: null/absent/empty means "use the global
+ *  DEFAULT_CONTAINER_* constant from constants.ts". When present, the
+ *  value must be a positive integer — zero or negative would either
+ *  pause the repo entirely or be rejected by Docker with a confusing
+ *  error at container-create time. The label is interpolated into the
+ *  error message so a 400 surfaces the offending field. (R2) */
+export function validateRepoContainerResource(
+  raw: unknown,
+  label: string
+):
+  | { ok: true; value: number | null }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null || raw === '') {
+    return { ok: true, value: null };
+  }
+  // Accept stringy numbers (JSON sometimes serialises form values that way).
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    return {
+      ok: false,
+      error: `${label} must be a positive integer (got ${JSON.stringify(raw)})`,
+    };
+  }
+  return { ok: true, value: n };
+}
 
 export function createRepoRoutes(forgejo: ForgejoClient) {
   return async function repoRoutes(app: FastifyInstance): Promise<void> {
@@ -54,12 +146,39 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
           .send({ error: err instanceof Error ? err.message : String(err) });
       }
 
-      // agent_profile_id is nullable: null → inherit from
-      // settings.default_agent_profile_id at task-launch time.
-      const agentProfileId =
-        typeof body.agent_profile_id === 'string' && body.agent_profile_id
-          ? body.agent_profile_id
-          : null;
+      // agent_profile_id is nullable: null/absent/empty → inherit from
+      // settings.default_agent_profile_id at task-launch time. When set
+      // to a non-empty string we require it to reference an existing
+      // profile (F5) — matches the symmetric check in routes/tasks.ts.
+      const profileCheck = validateRepoAgentProfile(body.agent_profile_id);
+      if (!profileCheck.ok) {
+        return reply.status(400).send({ error: profileCheck.error });
+      }
+      const agentProfileId = profileCheck.value;
+
+      // Strategy + per-repo container resource overrides (R1, R2). All
+      // three accept null/absent for "use the default", but a present
+      // value must parse as the right shape — otherwise we'd persist
+      // something the runtime resolver can't honour or that Docker
+      // refuses with a confusing error at container-create time.
+      const strategyCheck = validateRepoMergeStrategy(body.merge_strategy);
+      if (!strategyCheck.ok) {
+        return reply.status(400).send({ error: strategyCheck.error });
+      }
+      const memoryCheck = validateRepoContainerResource(
+        body.container_memory_mb,
+        'container_memory_mb'
+      );
+      if (!memoryCheck.ok) {
+        return reply.status(400).send({ error: memoryCheck.error });
+      }
+      const cpuCheck = validateRepoContainerResource(
+        body.container_cpu_cores,
+        'container_cpu_cores'
+      );
+      if (!cpuCheck.ok) {
+        return reply.status(400).send({ error: cpuCheck.error });
+      }
 
       const result = getDb()
         .prepare(
@@ -73,9 +192,9 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
           agentProfileId,
           JSON.stringify(installSteps),
           allowScriptSteps ? 1 : 0,
-          body.container_memory_mb ?? null,
-          body.container_cpu_cores ?? null,
-          body.merge_strategy ?? 'squash'
+          memoryCheck.value,
+          cpuCheck.value,
+          strategyCheck.value
         );
 
       const repo = getRepo(result.lastInsertRowid as number);
@@ -101,22 +220,85 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
         }
 
         const body = request.body as Record<string, unknown>;
-        const updatable = [
-          'base_branch', 'agent_profile_id',
-          'container_memory_mb', 'container_cpu_cores',
-          'merge_strategy',
-        ];
+
+        // Validate the structured fields up-front so a single dangling /
+        // malformed value short-circuits the whole UPDATE with a clear
+        // 400 — rather than half-applying the change before tripping
+        // somewhere downstream.
+        let agentProfileUpdate: string | null | undefined = undefined;
+        if ('agent_profile_id' in body) {
+          const profileCheck = validateRepoAgentProfile(body.agent_profile_id);
+          if (!profileCheck.ok) {
+            return reply.status(400).send({ error: profileCheck.error });
+          }
+          agentProfileUpdate = profileCheck.value;
+        }
+        let strategyUpdate: string | undefined = undefined;
+        if ('merge_strategy' in body) {
+          // PATCH null/empty for merge_strategy is rejected: the column
+          // is NOT NULL with a 'squash' default. Operator who wants the
+          // default behaviour shouldn't touch the field at all.
+          if (body.merge_strategy === null || body.merge_strategy === '') {
+            return reply.status(400).send({
+              error: `merge_strategy cannot be null. Omit the field to leave it unchanged.`,
+            });
+          }
+          const strategyCheck = validateRepoMergeStrategy(body.merge_strategy);
+          if (!strategyCheck.ok) {
+            return reply.status(400).send({ error: strategyCheck.error });
+          }
+          strategyUpdate = strategyCheck.value;
+        }
+        let memoryUpdate: number | null | undefined = undefined;
+        if ('container_memory_mb' in body) {
+          const memoryCheck = validateRepoContainerResource(
+            body.container_memory_mb,
+            'container_memory_mb'
+          );
+          if (!memoryCheck.ok) {
+            return reply.status(400).send({ error: memoryCheck.error });
+          }
+          memoryUpdate = memoryCheck.value;
+        }
+        let cpuUpdate: number | null | undefined = undefined;
+        if ('container_cpu_cores' in body) {
+          const cpuCheck = validateRepoContainerResource(
+            body.container_cpu_cores,
+            'container_cpu_cores'
+          );
+          if (!cpuCheck.ok) {
+            return reply.status(400).send({ error: cpuCheck.error });
+          }
+          cpuUpdate = cpuCheck.value;
+        }
+
         const sets: string[] = [];
         const params: unknown[] = [];
 
-        for (const key of updatable) {
-          if (key in body) {
-            sets.push(`${key} = ?`);
-            // agent_profile_id: empty string → null (inherit). Numbers
-            // and booleans pass through as-is.
-            const v = body[key];
-            params.push(v === '' || v === undefined ? null : v ?? null);
-          }
+        if (agentProfileUpdate !== undefined) {
+          sets.push('agent_profile_id = ?');
+          params.push(agentProfileUpdate);
+        }
+        if (strategyUpdate !== undefined) {
+          sets.push('merge_strategy = ?');
+          params.push(strategyUpdate);
+        }
+        if (memoryUpdate !== undefined) {
+          sets.push('container_memory_mb = ?');
+          params.push(memoryUpdate);
+        }
+        if (cpuUpdate !== undefined) {
+          sets.push('container_cpu_cores = ?');
+          params.push(cpuUpdate);
+        }
+        // Remaining unstructured field. base_branch keeps the generic
+        // empty-string-to-null coercion: the column is nullable and a
+        // blank value means "no preference, use Forgejo's default
+        // branch".
+        if ('base_branch' in body) {
+          sets.push('base_branch = ?');
+          const v = body.base_branch;
+          params.push(v === '' || v === undefined ? null : v ?? null);
         }
 
         // install_steps + allow_script_steps validate together because the

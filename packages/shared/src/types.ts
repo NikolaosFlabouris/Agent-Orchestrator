@@ -93,8 +93,22 @@ export interface Repo {
   /** Operator's preferred PR merge strategy. Honoured at merge time only
    *  if the repo's Forgejo-side allowed strategies include it; otherwise
    *  the orchestrator falls back to the first allowed style. */
-  merge_strategy: 'squash' | 'merge' | 'rebase';
+  merge_strategy: MergeStrategy;
  }
+
+/** Operator-selectable merge strategies. The runtime in
+ *  `packages/server/src/merge-strategy.ts` resolves this against the
+ *  repo's Forgejo-side allowed set and may fall back to other Forgejo
+ *  strategies (rebase-merge, fast-forward-only) when none of these
+ *  three is allowed — but operators only choose from this list in the
+ *  UI and on the wire. */
+export type MergeStrategy = 'squash' | 'merge' | 'rebase';
+
+export const MERGE_STRATEGIES: readonly MergeStrategy[] = [
+  'squash',
+  'merge',
+  'rebase',
+] as const;
 
 /** Typed install steps. Most map to a fixed package-manager command; the
  *  `script` variant is the deliberately-gated escape hatch. */
@@ -254,7 +268,6 @@ export interface Settings {
   /** Fallback agent profile when neither task nor repo specifies one.
    *  Set on first-run seed; operator can change via Global Settings. */
   default_agent_profile_id: string;
-  last_shutdown: string;
 }
 
 export type SettingsKey = keyof Settings;

@@ -106,6 +106,16 @@ const SPECS: Record<ProviderKind, ProviderKindSpec> = {
     // baking the literal token into command strings or config files
     // (which would otherwise persist into meta.json / scheduler logs
     // / repo-side artifacts — H2).
+    //
+    // CAVEAT: the in-container default `${OLLAMA_AUTH_TOKEN:-ollama}`
+    // (see harnesses/opencode.ts and harnesses/pi.ts) means an
+    // operator who sets `auth_token = "ollama"` produces the same
+    // runtime value as an operator who sets no token at all. Vanilla
+    // Ollama servers expect the literal string "ollama" as their
+    // no-auth placeholder, so the collision is benign — but operators
+    // running a real bearer auth scheme should pick any token value
+    // other than "ollama" to keep "is this auth'd or not?" legible
+    // from a glance at the provider row.
     container_env_name: 'OLLAMA_AUTH_TOKEN',
     auth_optional: true,
   },
@@ -126,10 +136,12 @@ export function listProviderKinds(): ProviderKindSpec[] {
  *  empty). The latter is a soft failure — caller decides what to do
  *  (typically fail the task with a clear error).
  *
- *  Precedence: inline `auth_token` wins over `api_key_env_var`. The
- *  Providers form rejects setting both at save time (H1), but we still
- *  treat `auth_token` as the source of truth at runtime so a hand-
- *  edited DB row produces predictable behaviour.
+ *  Precedence: inline `auth_token` wins over `api_key_env_var` if both
+ *  somehow end up set on the same row. The save-time validator (M5)
+ *  rejects setting both, so a non-test code path should never hit this
+ *  resolution choice — but we still pick `auth_token` first as a
+ *  predictable, hand-edit-friendly default for the case where a row
+ *  was inserted via a direct DB edit.
  *
  *  Whitespace handling: both inline and env-var values are trimmed
  *  because a trailing newline on a pasted token would otherwise be sent

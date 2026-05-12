@@ -21,6 +21,7 @@ import {
   updateAttempt,
   getRunningAttempt,
   getLatestAttempt,
+  getActiveAttempt,
   getTasks,
 } from './db.js';
 import {
@@ -65,7 +66,11 @@ import {
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import { runOrphanSweep } from './orphan-recovery.js';
-import { DEFAULT_MAX_ATTEMPTS, POLL_INTERVAL_SECONDS } from './constants.js';
+import {
+  DEFAULT_MAX_ATTEMPTS,
+  POLL_INTERVAL_SECONDS,
+  TIMEOUT_KILL_GRACE_MINUTES,
+} from './constants.js';
 import { INSTALL_STEP_COMMANDS } from './install-steps.js';
 import { getHarness, type HarnessSpec, type HarnessInvocation } from './harnesses/index.js';
 import { buildProviderEnv } from './providers/kinds.js';
@@ -170,6 +175,11 @@ export class Scheduler {
   // still run in parallel with each other because they target disjoint task
   // states from fillSlots).
   private fillSlotsInFlight = false;
+  // Timeout-kill sweep must not re-enter — back-to-back ticks during a
+  // slow `docker stop` (10s SIGTERM grace) would otherwise double-kill
+  // and double-write the same result.json. Same flag-serialisation
+  // pattern as `orphanSweepInFlight`.
+  private timeoutSweepInFlight = false;
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -270,6 +280,17 @@ export class Scheduler {
     // from the previous tick gets caught on the same pass.
     await this.reconcileOrphans();
 
+    // Step 0.5: Hard-kill containers that have exceeded
+    // profile.timeout_minutes (+ grace). The in-container harness
+    // wrapper enforces the timeout from the inside, so this should
+    // almost never fire — it's the orchestrator-side safety net for
+    // the case where the wrapper crashed before its timer armed, or
+    // disowned the agent process. Runs BEFORE checkCompletedContainers
+    // on the same tick so a just-killed container goes through the
+    // normal completion path on this pass instead of waiting another
+    // poll interval (~60s).
+    await this.enforceTimeouts();
+
     // Step 1: Check for completed containers
     await this.checkCompletedContainers();
 
@@ -290,6 +311,166 @@ export class Scheduler {
     } finally {
       this.orphanSweepInFlight = false;
     }
+  }
+
+  /** Hard-kill active containers whose elapsed runtime has exceeded the
+   *  resolved `profile.timeout_minutes + TIMEOUT_KILL_GRACE_MINUTES` (H4).
+   *
+   *  The agent's in-container wrapper (harness-cli.sh `timeout` /
+   *  harness-sdk.ts `setTimeout`) is the primary enforcement point —
+   *  it terminates the process, writes a timeout result.json, and
+   *  exits the container normally. The wrapper is robust under normal
+   *  conditions, but if it crashes before the timer arms (e.g. an
+   *  early jq parse failure) or the agent disowns its own process tree,
+   *  the wall-clock timeout has no effect from inside the container.
+   *  Before this safety net, such a container could run indefinitely
+   *  with the dashboard reporting "running" forever.
+   *
+   *  Threshold sourcing mirrors `alerts.checkAlerts` (H5a): use the
+   *  `attempts.timeout_minutes_snapshot` first, fall back to a live
+   *  profile read for legacy/pre-v22 attempt rows.
+   *
+   *  Mechanism: pre-write result.json with `status: 'timeout'` so the
+   *  next tick's `checkCompletedContainers` dispatches through the
+   *  normal completion path (which reads result.json) rather than
+   *  bottoming out at the "no result.json produced" generic-failure
+   *  branch. Then `stopContainer` issues SIGTERM with a 10s grace
+   *  before SIGKILL.
+   *
+   *  The sweep is serialised by `timeoutSweepInFlight` so a 10s `docker
+   *  stop` blocking the tick doesn't let a webhook-triggered re-tick
+   *  double-kill or race the pre-written result.json.
+   */
+  private async enforceTimeouts(): Promise<void> {
+    if (this.timeoutSweepInFlight) return;
+    this.timeoutSweepInFlight = true;
+    try {
+      const activeTasks = [
+        ...getTasks({ status: 'in-progress' }),
+        ...getTasks({ status: 'in-review' }),
+      ].filter((t) => t.container_id);
+
+      for (const task of activeTasks) {
+        try {
+          await this.enforceTimeoutForTask(task);
+        } catch (err) {
+          this.log.error(
+            { event: 'timeout_enforce_task_error', task_id: task.id, err },
+            'Timeout enforcement failed for task'
+          );
+        }
+      }
+    } catch (err) {
+      this.log.error(
+        { event: 'timeout_sweep_error', err },
+        'Timeout sweep failed'
+      );
+    } finally {
+      this.timeoutSweepInFlight = false;
+    }
+  }
+
+  private async enforceTimeoutForTask(task: Task): Promise<void> {
+    // `getActiveAttempt` filters to status='running' at the SQL level
+    // (M3), eliminating the gap window where a completed dev attempt
+    // would otherwise be returned by getLatestAttempt between dev
+    // completion and review-attempt insertion.
+    const latest = getActiveAttempt(task.id);
+    if (!latest || !latest.started_at) {
+      // No running attempt for this task. Either the attempt row hasn't
+      // been inserted yet (race during launch — the next tick will
+      // retry) or it's between roles (the dev attempt has completed
+      // but review hasn't been inserted yet; the next tick will pick
+      // up the review attempt once it's launched).
+      return;
+    }
+
+    // Resolve the timeout threshold. Same chain as alerts.checkAlerts:
+    // snapshot first (H5a), then a live profile read for legacy rows.
+    let timeoutMinutes: number | null = null;
+    if (
+      typeof latest.timeout_minutes_snapshot === 'number' &&
+      latest.timeout_minutes_snapshot > 0
+    ) {
+      timeoutMinutes = latest.timeout_minutes_snapshot;
+    } else {
+      const repo = getRepo(task.repo_id);
+      const profileId =
+        task.agent_profile_id ??
+        repo?.agent_profile_id ??
+        getSetting('default_agent_profile_id');
+      const profile = profileId ? getAgentProfile(profileId) : undefined;
+      if (profile) timeoutMinutes = profile.timeout_minutes;
+    }
+    if (!timeoutMinutes || timeoutMinutes <= 0) return;
+
+    const startedAtMs = new Date(latest.started_at).getTime();
+    if (!Number.isFinite(startedAtMs)) return;
+    const elapsedMs = Date.now() - startedAtMs;
+    const killAtMs =
+      (timeoutMinutes + TIMEOUT_KILL_GRACE_MINUTES) * 60 * 1000;
+    if (elapsedMs <= killAtMs) return;
+
+    this.log.warn(
+      {
+        event: 'timeout_kill',
+        task_id: task.id,
+        attempt_id: latest.id,
+        elapsed_minutes: Math.floor(elapsedMs / 60000),
+        timeout_minutes: timeoutMinutes,
+        grace_minutes: TIMEOUT_KILL_GRACE_MINUTES,
+      },
+      'Agent container exceeded timeout + grace; orchestrator-side kill'
+    );
+    recordTaskEvent(
+      task.id,
+      'container_timeout_kill',
+      `Killed container after ${Math.floor(elapsedMs / 60000)}m ` +
+        `(timeout ${timeoutMinutes}m + ${TIMEOUT_KILL_GRACE_MINUTES}m grace)`
+    );
+
+    // Pre-write result.json so processCompletedContainer dispatches as
+    // a clean timeout instead of "result.json missing" generic failure.
+    // Best-effort: if the directory is gone or the write fails, the
+    // kill still proceeds and the normal "no result.json" fallback
+    // produces a (less specific) failure record.
+    const outputDir = getOutputDir(task);
+    try {
+      await fsp.mkdir(outputDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(outputDir, 'result.json'),
+        JSON.stringify({
+          status: 'timeout',
+          exit_code: 124,
+          error_message:
+            `Agent exceeded timeout of ${timeoutMinutes} minutes ` +
+            `(orchestrator-side kill after ${TIMEOUT_KILL_GRACE_MINUTES}min grace; ` +
+            `the in-container wrapper failed to enforce the timeout itself).`,
+          usage: null,
+        })
+      );
+    } catch (err) {
+      this.log.error(
+        { event: 'timeout_result_write_failed', task_id: task.id, err },
+        'Failed to pre-write timeout result.json — kill will fall back to generic failure'
+      );
+    }
+
+    try {
+      const container = getContainer(task.container_id!);
+      await stopContainer(container);
+    } catch (err) {
+      this.log.warn(
+        { event: 'timeout_kill_failed', task_id: task.id, err },
+        'Container stop failed during timeout enforcement; will retry on next sweep'
+      );
+      // Don't remove/finalise here — let the next tick try again, or
+      // checkCompletedContainers pick it up if the container did exit.
+    }
+    // Intentionally do NOT remove the container or run completion logic
+    // here. The next `checkCompletedContainers` step (this same tick)
+    // sees the exited container, reads the pre-written result.json,
+    // and dispatches through the normal develop/review completion path.
   }
 
   // ---- Step 1: Check completed containers ----
@@ -404,6 +585,12 @@ export class Scheduler {
   // ---- Step 2: Fill slots ----
 
   private async fillSlots(): Promise<void> {
+    // `paused` is checked only here, at fillSlots entry — not mid-loop.
+    // Intentional: a pause() call during an in-flight fillSlots will
+    // let the current candidate selection complete (so we don't strand
+    // a partially-launched task), and the NEXT tick's fillSlots will
+    // bail at this guard. Reconciliation and completed-container
+    // handling continue regardless of pause state (see tick() docstring).
     if (this.paused) return;
     // Re-entry guard: a webhook-triggered tick that arrives mid-launch would
     // otherwise read the same DB snapshot and pick the same candidate before
@@ -1007,7 +1194,11 @@ export class Scheduler {
       let timeoutSnapshot: number | null = null;
       try {
         const raw = await fsp.readFile(metaPath, 'utf-8');
-        const meta = JSON.parse(raw);
+        // Cast to TaskMeta so a typo like `meta.harnes_id` would
+        // surface as a TS error instead of silently producing null.
+        // The `Partial<>` reflects that on-disk meta.json can be from
+        // a different orchestrator version with a different field set.
+        const meta = JSON.parse(raw) as Partial<TaskMeta>;
         role = meta.role ?? 'develop';
         modelSnapshot =
           typeof meta.model === 'string' && meta.model.length > 0

@@ -649,11 +649,39 @@ export function getAttempts(taskId: number): Attempt[] {
  *  container-exit handler to recover the run's role (develop vs
  *  review) from the authoritative DB row rather than the meta.json
  *  file dropped into the workspace, which can be missing or stale
- *  after orchestrator restarts. */
+ *  after orchestrator restarts.
+ *
+ *  NOTE: this returns the most recent attempt REGARDLESS of status. In
+ *  the gap window between `completeAttempt` flipping dev → completed
+ *  and `launchReviewContainer` inserting the review row, this returns
+ *  the completed dev attempt. Callers that semantically want "the
+ *  currently running attempt" should use `getActiveAttempt` instead
+ *  (M3). */
 export function getLatestAttempt(taskId: number): Attempt | undefined {
   return getDb()
     .prepare(
       'SELECT * FROM attempts WHERE task_id = ? ORDER BY id DESC LIMIT 1'
+    )
+    .get(taskId) as Attempt | undefined;
+}
+
+/** Most recently inserted attempt for a task FILTERED to status='running'.
+ *  Used by `alerts.checkAlerts` and `Scheduler.enforceTimeouts` — both
+ *  ask "is this task's current attempt past its timeout?", which only
+ *  makes sense for an attempt that's still running. Returns undefined
+ *  in the gap window between completing the dev attempt and inserting
+ *  the review attempt; callers skip the task in that case.
+ *
+ *  Returning at most one row by `id DESC LIMIT 1` matches the
+ *  invariant that a task has at most one running attempt at a time
+ *  (state-machine enforced by the scheduler — there is no path that
+ *  inserts a new running row without first completing the previous
+ *  one). The LIMIT 1 + ORDER BY is defence-in-depth for the case
+ *  where a hypothetical bug inserted two; we'd get the most recent. */
+export function getActiveAttempt(taskId: number): Attempt | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM attempts WHERE task_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1"
     )
     .get(taskId) as Attempt | undefined;
 }
@@ -891,30 +919,52 @@ export interface AgentProfileWithJoinedStats extends AgentProfile {
   model_id: string | null;
 }
 
+/** Shared query body. Returning the same column set keeps the bulk and
+ *  singleton paths in lock-step — adding a field to
+ *  `AgentProfileWithJoinedStats` here updates both response shapes at
+ *  once (consolidates the previous singleton-enrich-by-hand path that
+ *  could drift if anyone added a field). */
+const AGENT_PROFILE_WITH_STATS_SELECT = `
+  SELECT
+    ap.*,
+    m.provider_id AS joined_provider_id,
+    m.model_id    AS joined_model_id,
+    (SELECT COUNT(*) FROM repos r WHERE r.agent_profile_id = ap.id) AS repos_using,
+    (SELECT COUNT(*) FROM tasks t WHERE t.agent_profile_id = ap.id) AS tasks_using
+  FROM agent_profiles ap
+  LEFT JOIN models m ON m.id = ap.model_pk`;
+
+function hydrateProfileWithStats(
+  row: Record<string, unknown>
+): AgentProfileWithJoinedStats {
+  const base = hydrateAgentProfile(row)!;
+  return {
+    ...base,
+    repos_using: Number(row.repos_using ?? 0),
+    tasks_using: Number(row.tasks_using ?? 0),
+    provider_id: (row.joined_provider_id as string | null) ?? null,
+    model_id: (row.joined_model_id as string | null) ?? null,
+  };
+}
+
 export function getAgentProfilesWithStats(): AgentProfileWithJoinedStats[] {
   const rows = getDb()
-    .prepare(
-      `SELECT
-         ap.*,
-         m.provider_id AS joined_provider_id,
-         m.model_id    AS joined_model_id,
-         (SELECT COUNT(*) FROM repos r  WHERE r.agent_profile_id = ap.id) AS repos_using,
-         (SELECT COUNT(*) FROM tasks t  WHERE t.agent_profile_id = ap.id) AS tasks_using
-       FROM agent_profiles ap
-       LEFT JOIN models m ON m.id = ap.model_pk
-       ORDER BY ap.id`
-    )
+    .prepare(`${AGENT_PROFILE_WITH_STATS_SELECT} ORDER BY ap.id`)
     .all() as Record<string, unknown>[];
-  return rows.map((row) => {
-    const base = hydrateAgentProfile(row)!;
-    return {
-      ...base,
-      repos_using: Number(row.repos_using ?? 0),
-      tasks_using: Number(row.tasks_using ?? 0),
-      provider_id: (row.joined_provider_id as string | null) ?? null,
-      model_id: (row.joined_model_id as string | null) ?? null,
-    };
-  });
+  return rows.map(hydrateProfileWithStats);
+}
+
+/** Singleton variant of `getAgentProfilesWithStats` used by POST/PATCH
+ *  response paths. Same column set, same hydration function, so the
+ *  list and singleton response shapes can never diverge. */
+export function getAgentProfileWithStats(
+  id: string
+): AgentProfileWithJoinedStats | undefined {
+  const row = getDb()
+    .prepare(`${AGENT_PROFILE_WITH_STATS_SELECT} WHERE ap.id = ?`)
+    .get(id) as Record<string, unknown> | undefined;
+  if (!row) return undefined;
+  return hydrateProfileWithStats(row);
 }
 
 /** Single-pass per-provider active-slot tally for the dashboard.
@@ -1018,6 +1068,57 @@ export function deleteAgentProfile(id: string): void {
   })();
 }
 
+/** Atomically check delete-safety invariants AND delete the profile in a
+ *  single transaction (M4). The route-layer check + delete was previously
+ *  split across two non-transactional reads: a concurrent
+ *  `PATCH /api/settings` setting the default to THIS profile between the
+ *  check and the delete would slip past the route check, then the
+ *  DB-layer transactional clear in `deleteAgentProfile` would silently
+ *  wipe the freshly-set legitimate pointer.
+ *
+ *  Wrapping both reads (`getSetting`, `countReposUsingProfile`,
+ *  `countTasksUsingProfile`) and the delete in one transaction
+ *  serialises against any concurrent settings/repos/tasks writes via
+ *  SQLite's WAL transaction semantics (per-connection serialisable),
+ *  so the post-check state we delete against is the same state the
+ *  caller saw.
+ *
+ *  Returns the reason the delete was refused, or null on success. */
+export function deleteAgentProfileIfUnreferenced(id: string): string | null {
+  const db = getDb();
+  return db.transaction(() => {
+    const defaultRow = db
+      .prepare("SELECT value FROM settings WHERE key = 'default_agent_profile_id'")
+      .get() as { value: string } | undefined;
+    if (defaultRow?.value === id) {
+      return (
+        `'${id}' is the global default profile. ` +
+        `Set a different default before deleting.`
+      );
+    }
+    const reposUsing = (
+      db
+        .prepare('SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ?')
+        .get(id) as { n: number }
+    ).n;
+    const tasksUsing = (
+      db
+        .prepare('SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ?')
+        .get(id) as { n: number }
+    ).n;
+    if (reposUsing > 0 || tasksUsing > 0) {
+      return (
+        `Profile is referenced by ${reposUsing} repo(s) and ${tasksUsing} ` +
+        `task(s). Reassign those before deleting.`
+      );
+    }
+    // Inline the delete here (rather than calling `deleteAgentProfile`
+    // recursively) so the whole check+delete is one db.transaction frame.
+    db.prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
+    return null;
+  })();
+}
+
 export function countReposUsingProfile(profileId: string): number {
   const row = getDb()
     .prepare('SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ?')
@@ -1080,7 +1181,16 @@ export function getSettingInt(key: SettingsKey): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function updateSetting(key: SettingsKey, value: string): void {
+/** Upsert (or delete) a settings row. `null` deletes the row so the
+ *  next `getSetting` returns `undefined`, which callers reading the
+ *  resolution chain (e.g. agent_profile_id) interpret as "no fallback
+ *  configured". Used by Global Settings to support clearing
+ *  `default_agent_profile_id`. */
+export function updateSetting(key: SettingsKey, value: string | null): void {
+  if (value === null) {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run(key);
+    return;
+  }
   getDb()
     .prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
     .run(key, value);

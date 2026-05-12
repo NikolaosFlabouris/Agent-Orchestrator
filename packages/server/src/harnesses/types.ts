@@ -80,13 +80,17 @@ export interface HarnessSpec {
   display_name: string;
   /** Whether this harness's runtime is the SDK script or the CLI script. */
   runtime: 'sdk' | 'cli';
-  /** Provider kinds this harness can target. The orchestrator does NOT
-   *  enforce this at config-save time (operators have agreed E3: no
-   *  save-time validation). At launch time, if a profile points at a
-   *  provider kind not in this list, `buildInvocation` throws with a
-   *  clear "harness X doesn't support kind Y" message — produces a loud
-   *  failure rather than the binary crashing with whatever it spits out
-   *  for an unsupported provider. */
+  /** Provider kinds this harness can target. Enforced at BOTH
+   *  config-save time and task-launch time:
+   *    - Save time: `/api/agent-profiles` POST/PATCH calls
+   *      `checkHarnessProviderCompatibility` against this list. The
+   *      operator sees the error immediately in the Settings UI.
+   *    - Launch time: `buildInvocation` re-checks and throws with a
+   *      "harness X doesn't support kind Y" message that includes
+   *      `profile.id`, `model.model_id`, `provider.id` so on-call
+   *      operators can find the offending row without DB lookups.
+   *  The launch-time check is the authoritative gate; the save-time
+   *  check is the friendly early surface for the same condition. */
   supported_provider_kinds: readonly ProviderKind[];
   /** Build the launch invocation. The runtime context (provider creds,
    *  model id, profile config) is bundled in `inputs`. Throw on
@@ -99,7 +103,8 @@ export interface HarnessSpec {
    *  by the agent_profile API route on save. Throw with a human-readable
    *  message if a knob is malformed (e.g. `max_turns` not a positive
    *  integer). This is well-formedness validation, NOT harness↔provider
-   *  compatibility validation (which is intentionally absent — see
-   *  E3). Default implementation accepts any object and returns. */
+   *  compatibility validation — that's `supported_provider_kinds`,
+   *  checked separately by the same save-time validator. Default
+   *  implementation accepts any object and returns. */
   validateConfig?(config_json: Record<string, unknown>): void;
 }

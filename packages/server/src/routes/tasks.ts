@@ -68,9 +68,16 @@ function asPositiveInt(v: unknown): number | null {
 
 /** Validate the `agent_profile_id` field from a task create-body. The
  *  field is optional; when present it must be either null (no override)
- *  or a string that references an existing profile. Returns the
- *  validated value (null when absent or explicit null), or an error
- *  message for the client. */
+ *  or a non-empty string referencing an existing profile.
+ *
+ *  Empty string is treated as "no override" (equivalent to null /
+ *  absent). The CreateTask form initializes the field to '' to mean
+ *  "inherit from repo/global default", and POSTs the literal '' rather
+ *  than omitting the key. Without this normalization the empty string
+ *  would land in `validateAgentProfile('')` which would then return
+ *  the malformed error "Unknown agent_profile_id: " (no id, dangling
+ *  colon). Treating '' as null fixes both the UX and the error shape
+ *  in one place. (H5) */
 function validateTaskAgentProfile(
   raw: unknown
 ): { ok: true; value: string | null } | { ok: false; error: string } {
@@ -78,9 +85,11 @@ function validateTaskAgentProfile(
   if (typeof raw !== 'string') {
     return { ok: false, error: 'agent_profile_id must be a string or null' };
   }
-  const v = validateAgentProfile(raw, getAgentProfile);
+  const trimmed = raw.trim();
+  if (trimmed === '') return { ok: true, value: null };
+  const v = validateAgentProfile(trimmed, getAgentProfile);
   if (!v.valid) return { ok: false, error: v.error };
-  return { ok: true, value: raw };
+  return { ok: true, value: trimmed };
 }
 
 export function createTaskRoutes(
@@ -381,7 +390,20 @@ export function createTaskRoutes(
               error: 'agent_profile_id must be a string or null',
             });
           }
-          const newProfile = raw as string | null;
+          // PATCH semantics: null = clear override (inherit). Empty
+          // string is rejected explicitly rather than silently
+          // normalized to null — the caller is editing in-place and
+          // should be clear about intent. This also avoids the
+          // "Unknown agent_profile_id: " dangling-colon error shape
+          // that the underlying helper produces for empty strings
+          // (H5). Use null to clear instead.
+          if (typeof raw === 'string' && raw.trim() === '') {
+            return reply.status(400).send({
+              error:
+                'agent_profile_id cannot be empty. Pass null to clear the per-task override.',
+            });
+          }
+          const newProfile = (raw === null ? null : (raw as string).trim());
 
           const validation = validateAgentProfile(newProfile, getAgentProfile);
           if (!validation.valid) {

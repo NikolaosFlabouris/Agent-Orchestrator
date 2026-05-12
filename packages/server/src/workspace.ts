@@ -477,14 +477,46 @@ export async function writeHarnessConfigFiles(
     }
     try {
       await fsp.mkdir(path.dirname(v.target), { recursive: true });
+      // Walk parent components looking for symlinks. Best-effort fail-
+      // closed check; the actual safety on the FINAL component is the
+      // O_NOFOLLOW open below (closes the lstat→write TOCTOU window —
+      // H2). Keeping the walk gives clearer errors when an attacker
+      // plants a symlink on a parent directory.
       await assertNoSymlinkOnPath(v.target, workdir);
-      await fsp.writeFile(v.target, file.content);
-      if (process.platform === 'linux') {
-        try {
-          await fsp.chown(v.target, AGENT_UID, AGENT_GID);
-        } catch {
-          /* best effort */
+      // Atomic write with O_NOFOLLOW on the final component. If
+      // v.target IS a symlink (planted between assertNoSymlinkOnPath
+      // and this open), the open fails with ELOOP — we never follow it
+      // and never overwrite an arbitrary file. O_TRUNC matches the
+      // previous writeFile semantics (replace contents); O_CREAT lets
+      // first-time writes succeed; mode 0o600 keeps the file readable
+      // only by the orchestrator and (after chown) the agent uid.
+      //
+      // O_NOFOLLOW is defined on Linux and macOS; on Windows (which
+      // doesn't support POSIX symlinks for this workflow anyway) the
+      // constant is 0 and the flag has no effect, but the rest of the
+      // code already assumes a Unix-like container host for agent runs.
+      const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+      const flags =
+        fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        fs.constants.O_TRUNC |
+        O_NOFOLLOW;
+      const handle = await fsp.open(v.target, flags, 0o600);
+      try {
+        await handle.writeFile(file.content);
+        if (process.platform === 'linux') {
+          // Chown via the fd, not the path, so a symlink swap-in after
+          // open can't redirect this either. Best effort — on platforms
+          // where fchown isn't honoured we accept whatever ownership
+          // the file ends up with.
+          try {
+            await handle.chown(AGENT_UID, AGENT_GID);
+          } catch {
+            /* best effort */
+          }
         }
+      } finally {
+        await handle.close();
       }
       repoExcludeEntries.push(v.rel);
       log.info(
