@@ -9,6 +9,26 @@
 # See docs/quick-start.md for the full bring-up procedure.
 
 services:
+  # One-shot init that ensures the `agent-network` Docker network
+  # exists before anything else runs. We mark the network as
+  # `external: true` below — meaning compose attaches to it but
+  # doesn't own its lifecycle — because the orchestrator-spawned
+  # agent containers are NOT part of this compose project and we don't
+  # want `docker compose down` to try to remove a network with live
+  # attachments. But `external: true` means compose itself won't
+  # create the network on a fresh install either, so this init service
+  # bridges the gap: idempotently inspects-or-creates. Uses
+  # docker:cli (~5 MB) so we don't bake docker into a custom image.
+  network-init:
+    image: docker:cli
+    command:
+      - "sh"
+      - "-c"
+      - "docker network inspect agent-network >/dev/null 2>&1 || docker network create --driver bridge agent-network"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: "no"
+
   # Build-only service. Produces the `orchestrator-agent:latest` image that
   # the orchestrator spawns task containers from at run-time. The container
   # itself executes `true` and exits 0 immediately — we only care about the
@@ -52,13 +72,17 @@ services:
     # must opt in; either one alone keeps you on loopback.
     ports:
       - "0.0.0.0:8081:8080"
-    # Wait for the agent-image build to complete before the orchestrator
-    # boots. If we didn't, the orchestrator could come up and accept task
-    # creations before the agent image was tagged, and the first task to
-    # try to launch would 404. service_completed_successfully treats the
-    # one-shot `true` exit as the unblock signal.
+    # Wait for the agent-image build AND the network-init step to
+    # complete before the orchestrator boots. If we didn't, the
+    # orchestrator could come up and accept task creations before
+    # either was ready, and the first task to try to launch would
+    # either 404 on the image or fail to attach to the network.
+    # `service_completed_successfully` treats the one-shot `true` /
+    # network-inspect exits as the unblock signal.
     depends_on:
       agent-image:
+        condition: service_completed_successfully
+      network-init:
         condition: service_completed_successfully
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -81,20 +105,23 @@ services:
       - agent-network
 
 networks:
-  # Shared bridge network for orchestrator <-> agent containers. Compose-
-  # managed (not `external: true`) so a fresh clone of the repo can run
-  # `docker compose up -d --build` without a separate `docker network
-  # create agent-network` step. The literal `name:` keeps it as the bare
-  # string `agent-network` rather than the compose-project-prefixed name
-  # (compose's default), since the orchestrator's docker.ts hardcodes
-  # this network name when spawning agent containers.
+  # Shared bridge network for orchestrator <-> agent containers. Marked
+  # `external: true` because the orchestrator-spawned agent containers
+  # are NOT part of this compose project — keeping the network's
+  # lifecycle outside compose means `docker compose down` won't try to
+  # remove a network that may still have live agent containers
+  # attached, and won't refuse to start on installs whose network was
+  # created without compose's labels (the upgrade path from earlier
+  # versions of this file).
   #
-  # `ensureAgentNetwork()` in packages/server/src/docker.ts is still the
-  # safety net: it (re)creates the network at orchestrator startup if it
-  # was somehow removed while the orchestrator was down.
+  # The `network-init` service above ensures the network exists before
+  # anything that depends on it tries to attach. `ensureAgentNetwork()`
+  # in packages/server/src/docker.ts is the per-process safety net for
+  # the case where the network gets removed while the orchestrator is
+  # running.
   agent-network:
+    external: true
     name: agent-network
-    driver: bridge
 
 volumes:
   orchestrator-data:
