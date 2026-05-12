@@ -134,7 +134,6 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
 7. **Attempt tracking**
    - `startAttempt`, `completeAttempt`
    - Output archiving before each new container launch
-   - (Cost tracking was removed in schema v14 — see `docs/05-orchestrator-core.md`.)
 
 **Validation:** Insert a queued task. Mock dev agent runs, commits, pushes. Orchestrator verifies push, creates PR. Mock review agent runs, writes approved verdict. Orchestrator merges PR, closes issue. Task reaches `status/merged`. Verify the rework cycle: mock review rejects → dev agent reruns → review approves → merge.
 
@@ -195,7 +194,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - Tailwind CSS configuration
 
 4. **Dashboard view** (`packages/ui/src/views/Dashboard.tsx`)
-   - Header bar: status, slots, queue depth, daily cost
+   - Header bar: status, slots, queue depth
    - Active tasks section
    - Queue section (read-only for now)
    - Recent completions section
@@ -205,8 +204,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - Task header with status, PR link, Forgejo link
    - Timeline (read-only)
    - Agent output panel with live WebSocket streaming
-   - Attempt history with cost/token display
-   - Cost summary
+   - Attempt history
 
 6. **WebSocket client** (`packages/ui/src/ws.ts`)
    - Dashboard connection: snapshot on connect, incremental events, exponential backoff reconnection

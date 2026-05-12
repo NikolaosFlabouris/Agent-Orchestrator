@@ -397,9 +397,9 @@ function AgentProfilesSection() {
         Required wall-clock timeout (minutes) for any agent attempt using
         this profile. Form pre-fills new profiles with <Code>2880</Code>{' '}
         (48 h), matching the DB column default and the seeded bootstrap
-        profile. Typical values: <Code>120</Code> for paid APIs to cap
-        token-burn on a runaway agent; <Code>2880</Code> for free local
-        servers where a slow generation is cheap.
+        profile. Typical values: <Code>120</Code> for paid APIs to cap a
+        runaway agent; <Code>2880</Code> for free local servers where a
+        slow generation is cheap.
       </p>
     </section>
   );
@@ -640,7 +640,7 @@ function UIControls() {
           <strong>Cancel</strong> (active tasks) — stop the running container,
           clean up the branch and PR, move the task to{' '}
           <Code>cancelled</Code>. Use for tasks that are clearly going nowhere
-          and shouldn't keep burning tokens.
+          and shouldn't keep running.
         </li>
         <li>
           <strong>Reset</strong> (failed / cancelled / awaiting-human statuses)

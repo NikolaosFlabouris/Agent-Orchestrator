@@ -21,7 +21,7 @@ These tests validate the full task lifecycle against a running orchestrator with
 5. Orchestrator verifies push, creates PR (status: in-review)
 6. Mock review agent writes approved verdict
 7. Orchestrator merges PR, closes issue (status: merged)
-8. Verify: issue is closed, PR is merged, task status is `merged`, attempt rows have cost data, timeline events are recorded
+8. Verify: issue is closed, PR is merged, task status is `merged`, timeline events are recorded
 
 ### 2. Rework cycle: review rejects → dev rework → review approves → merge
 

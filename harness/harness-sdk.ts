@@ -31,7 +31,6 @@ interface Result {
   status: 'success' | 'failure' | 'timeout';
   exit_code: number;
   error_message: string | null;
-  usage: { input_tokens: number; output_tokens: number; model: string } | null;
 }
 
 const meta: Meta = JSON.parse(readFileSync('/task/meta.json', 'utf-8'));
@@ -44,8 +43,8 @@ const prompt = readFileSync('/task/prompt.md', 'utf-8');
 // agent profile and writes it into meta.json at launch. An empty/
 // missing value here means the orchestrator produced a malformed
 // launch context, not that we should silently fall back to a guess.
-// Fail loudly so the bug surfaces immediately rather than producing
-// usage rows attributed to the wrong model.
+// Fail loudly so the bug surfaces immediately rather than running
+// against an unintended model.
 if (!meta.model || typeof meta.model !== 'string') {
   writeFileSync(
     '/output/result.json',
@@ -55,7 +54,6 @@ if (!meta.model || typeof meta.model !== 'string') {
       error_message:
         "meta.model missing or empty — orchestrator failed to resolve a model id at launch time. " +
         "Check the agent profile's model_pk and the provider/model rows.",
-      usage: null,
     })
   );
   process.exit(0);
@@ -81,7 +79,6 @@ if (meta.install_commands && meta.install_commands.length > 0) {
           status: 'failure',
           exit_code: 1,
           error_message: `Install step failed (${step.command} in ${step.cwd}): ${msg}`,
-          usage: null,
         })
       );
       process.exit(0);
@@ -94,12 +91,6 @@ async function main() {
     status: 'success',
     exit_code: 0,
     error_message: null,
-    usage: null,
-  };
-  const usage = {
-    input_tokens: 0,
-    output_tokens: 0,
-    model: meta.model,
   };
   const timeoutMs = meta.max_runtime_minutes * 60 * 1000;
   const timer = setTimeout(() => {
@@ -107,7 +98,6 @@ async function main() {
     result.exit_code = 124;
     result.error_message =
       'Agent exceeded timeout of ' + meta.max_runtime_minutes + ' minutes';
-    result.usage = usage;
     writeFileSync('/output/result.json', JSON.stringify(result));
     process.exit(0);
   }, timeoutMs);
@@ -130,11 +120,6 @@ async function main() {
         model: meta.model,
       },
     })) {
-      // Accumulate token usage from each message
-      if ((message as any).usage) {
-        usage.input_tokens += (message as any).usage.input_tokens || 0;
-        usage.output_tokens += (message as any).usage.output_tokens || 0;
-      }
       writeFileSync('/output/progress.log', JSON.stringify(message) + '\n', {
         flag: 'a',
       });
@@ -147,7 +132,6 @@ async function main() {
   }
 
   clearTimeout(timer);
-  result.usage = usage;
 
   // For review agents, verify review.json was produced
   if (meta.role === 'review') {

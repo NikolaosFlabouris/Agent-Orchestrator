@@ -127,7 +127,6 @@ Field notes:
 - `agent_profile_id` is the per-task override; `null` means inherit from `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`
 - `blocked_by` is computed from dependency parsing (array of issue IDs that are still open)
 - Active and queued tasks are always returned in full; completed tasks are limited by `limit`
-- Cost tracking was removed in schema v14 — there is no `total_cost_usd` field on the task or `cost_usd`/`input_tokens`/`output_tokens` on the per-attempt rows
 
 Frontend grouping: active = `status IN ('preparing', 'in-progress', 'in-review', 'changes-needed')`, queued = `status == 'queued'`, completed = everything else.
 
@@ -460,9 +459,7 @@ Note: `poll_interval_seconds` (60s), `default_max_attempts` (7), and
 `packages/server/src/constants.ts`, not editable settings. Per-task
 `max_attempts` overrides are settable via `POST /api/tasks` at create time
 and via `PATCH /api/tasks/:id` (with `{ max_attempts: N }`) on the Task
-Detail page for non-terminal tasks. Cost tracking (`model_pricing`,
-`daily_cost_usd`, per-task / per-attempt cost) was removed in schema v14 —
-use the provider's own console for spend visibility.
+Detail page for non-terminal tasks.
 
 #### HTTP Status Codes
 

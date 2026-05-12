@@ -45,12 +45,7 @@ if [ "$MOCK_MODE" = "failure" ]; then
 {
   "status": "failure",
   "exit_code": 1,
-  "error_message": "Mock agent simulated failure",
-  "usage": {
-    "input_tokens": 1000,
-    "output_tokens": 500,
-    "model": "mock-model"
-  }
+  "error_message": "Mock agent simulated failure"
 }
 EOF
   exit 1
@@ -87,12 +82,7 @@ Attempt: ${ATTEMPT}"
   cat > "$RESULT_FILE" << EOF
 {
   "status": "success",
-  "exit_code": 0,
-  "usage": {
-    "input_tokens": 5000,
-    "output_tokens": 2000,
-    "model": "mock-model"
-  }
+  "exit_code": 0
 }
 EOF
 
@@ -129,12 +119,7 @@ EOF
   cat > "$RESULT_FILE" << EOF
 {
   "status": "success",
-  "exit_code": 0,
-  "usage": {
-    "input_tokens": 3000,
-    "output_tokens": 1000,
-    "model": "mock-model"
-  }
+  "exit_code": 0
 }
 EOF
 fi

@@ -618,27 +618,13 @@ complete_attempt(task, result):
 
 On orchestrator restart, `task.current_attempt_id` is lost (it's in-memory). If recovery processes results from an exited container, it looks up the attempt row by `(task_id, attempt_number, role)` with `status = 'running'` and updates it. If no matching row exists (the orchestrator crashed before creating it), recovery creates a new attempt row.
 
-## Cost Tracking
-
-Removed in schema v14. Background: the harness layer recorded
-`meta.json.model` (the user's intended model alias, e.g. `'sonnet'`) rather
-than the actual model id reported by the agent's stream (e.g.
-`claude-sonnet-4-20250514`). The pricing lookup keyed on the latter, so
-every lookup missed and `cost_usd` was always 0 on default installs.
-Rather than fix the harness bug + maintain a model-pricing table that
-needs hand-updating whenever Anthropic publishes new prices, the whole
-cost-tracking feature was dropped: the `model_pricing` setting, the
-`attempts.cost_usd / input_tokens / output_tokens` columns, the dashboard
-daily-cost tile, and the per-attempt cost/token displays. The Anthropic
-console is the source of truth for spend.
-
 ## Post-Agent Flows
 
 ### After Dev Agent
 
 ```
 on_dev_agent_complete(task, result):
-  complete_attempt(task, result)  # updates attempt row: status, completed_at, cost
+  complete_attempt(task, result)  # updates attempt row: status, completed_at
 
   if result.status == "success":
     # post_dev_agent verifies push, salvages if needed, creates/updates PR.

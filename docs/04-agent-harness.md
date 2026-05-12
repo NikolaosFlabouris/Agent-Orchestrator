@@ -121,13 +121,6 @@ The harness always exits with code 0. The `result.json` file carries the real st
 
 The `error_message` field is null on success and populated on failure/timeout with a diagnostic string. The SDK harness captures the caught exception message. The CLI harness captures the last 5 lines of stderr. This gives the orchestrator a meaningful error message for issue comments and log entries.
 
-> Note: the SDK and CLI harnesses both still emit a `usage` block
-> (`input_tokens`, `output_tokens`, `model`) into `result.json`, but the
-> orchestrator no longer reads it (cost tracking was removed in schema
-> v14). The field remains in the harness output to avoid an unnecessary
-> image rebuild and to keep the door open for future re-introduction;
-> nothing downstream depends on it.
-
 For review agents, the additional `/output/review.json`:
 
 ```json

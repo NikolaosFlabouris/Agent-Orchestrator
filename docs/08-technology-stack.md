@@ -318,12 +318,13 @@ CREATE TABLE attempts (
   -- agent profile, model row, or any of the upstream FK targets.
   model_id TEXT,
   harness_id TEXT
-  -- Cost tracking (input_tokens, output_tokens, cost_usd) was removed in
-  -- schema v14. The harness layer recorded the user's intended model alias
-  -- rather than the actual model id reported by the agent's stream, so the
-  -- pricing lookup missed every time and cost was always 0. Rather than fix
-  -- the bug + maintain a pricing table, the whole cost-tracking feature is
-  -- gone. Use the provider's console for spend visibility.
+  -- Historical note: schema v14 dropped cost / token tracking
+  -- (input_tokens, output_tokens, cost_usd columns plus the model_pricing
+  -- setting and dashboard daily-cost tile). The harness layer recorded the
+  -- user's intended model alias rather than the actual stream-reported
+  -- model id, so the pricing lookup always missed and cost was always 0.
+  -- Rather than fix the bug + maintain a hand-curated pricing table, the
+  -- feature was removed; use the provider's own console for spend.
 );
 
 CREATE INDEX idx_attempts_task_id ON attempts(task_id);
@@ -478,24 +479,7 @@ Compile-time constants (live in `packages/server/src/constants.ts` — not edita
 
 Each migration is idempotent and runs inside the startup sequence before the scheduler starts. No external migration framework is needed — the schema is small enough that a sequential version check covers all foreseeable changes.
 
-## Cost Considerations
-
-### Paid APIs (Anthropic, OpenAI, Gemini, Mistral, DeepSeek, OpenRouter)
-
-Per-task cost depends on the model, task complexity, and codebase size. Rough Anthropic figures for reference:
-
-| Model | Per Task (est.) | 20 tasks/day | Monthly (weekdays) |
-|-------|----------------|--------------|-------------------|
-| Sonnet | $2-10 | $40-200/day | $800-4,000 |
-| Opus | $10-50 | $200-1,000/day | $4,000-20,000 |
-
-**Recommendation:** create separate agent profiles per (model, harness) pair the team actually uses, set the cheapest one as the default in Global Settings, and override per-repo or per-task when a heavier model is warranted. Spend visibility lives on the provider's own console — the orchestrator no longer tracks token usage (schema v14).
-
-### Local / self-hosted (Ollama)
-
-Infrastructure cost only. No per-token charges. Quality depends on the model — smaller local models may produce lower quality code and require more rework cycles, potentially offsetting the cost savings. Register the Ollama server as a `kind=ollama` provider, add the loaded models, and create a profile pointing the OpenCode or pi harness at it.
-
-### Infrastructure
+## Infrastructure Sizing
 
 The orchestrator and agent containers run on a single machine. Resource requirements scale with max concurrency:
 
@@ -506,3 +490,5 @@ The orchestrator and agent containers run on a single machine. Resource requirem
 | 20 agents | 96 GB | 48 cores |
 
 These are rough estimates assuming 4GB RAM and 2 CPU cores per agent container plus overhead for the orchestrator and OS.
+
+API spend (for paid providers like Anthropic, OpenAI, etc.) is not tracked by the orchestrator — use the provider's own console. See the historical note in the `attempts` schema above for the design rationale.
