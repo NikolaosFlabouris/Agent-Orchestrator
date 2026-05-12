@@ -1228,11 +1228,18 @@ export function insertTaskEvent(
   eventType: string,
   message: string
 ): TaskEvent {
+  // We populate `created_at` explicitly with `new Date().toISOString()` to
+  // match the rest of the codebase, which always emits ISO 8601 UTC with the
+  // trailing `Z`. The column DEFAULT `(datetime('now'))` still exists in the
+  // schema but is intentionally no longer the source of truth — it returns
+  // `"YYYY-MM-DD HH:MM:SS"` with no `T`/`Z`, which the browser parses as
+  // local time and breaks the timeline's "X ago" display (issue #72).
+  const createdAt = new Date().toISOString();
   const result = getDb()
     .prepare(
-      'INSERT INTO task_events (task_id, event_type, message) VALUES (?, ?, ?)'
+      'INSERT INTO task_events (task_id, event_type, message, created_at) VALUES (?, ?, ?, ?)'
     )
-    .run(taskId, eventType, message);
+    .run(taskId, eventType, message, createdAt);
 
   return getDb()
     .prepare('SELECT * FROM task_events WHERE id = ?')

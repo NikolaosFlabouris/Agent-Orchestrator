@@ -72,8 +72,24 @@ export function Timeline({ events }: { events: TaskEventResponse[] }) {
   );
 }
 
-function formatTimestamp(ts: string): string {
-  const date = new Date(ts);
+/**
+ * Format a server-emitted timestamp string as a human-readable "X ago"
+ * relative to wallclock now, falling back to a locale string for older
+ * events.
+ *
+ * The server is supposed to emit ISO 8601 UTC strings (e.g.
+ * `"2026-05-12T12:31:59.123Z"`). However, legacy rows written before the fix
+ * for issue #72 may still hold the naive SQLite `datetime('now')` format
+ * (e.g. `"2026-05-12 12:31:59"`) which the JS `Date` constructor parses as
+ * *local* time, producing an "X hours ago" offset equal to the viewer's UTC
+ * offset. To stay correct for those legacy rows without a destructive DB
+ * backfill, we normalize any string that lacks both a `T` separator and a
+ * trailing timezone marker (`Z` or `±HH:MM`) by treating it as UTC.
+ *
+ * Pure function — no DOM / network access.
+ */
+export function formatTimestamp(ts: string): string {
+  const date = new Date(normalizeTimestamp(ts));
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
 
@@ -82,4 +98,17 @@ function formatTimestamp(ts: string): string {
   if (diffMs < 86400_000) return `${Math.floor(diffMs / 3600_000)}h ago`;
 
   return date.toLocaleString();
+}
+
+/**
+ * If `ts` already has a `T` separator or an explicit timezone marker
+ * (`Z` or `±HH:MM` at the end), return it unchanged. Otherwise assume it is
+ * a SQLite-style naive UTC string like `"YYYY-MM-DD HH:MM:SS"` and rewrite
+ * it to ISO 8601 UTC so `new Date(...)` interprets it as UTC.
+ */
+function normalizeTimestamp(ts: string): string {
+  const hasT = ts.includes('T');
+  const hasTzMarker = /(Z|[+-]\d{2}:?\d{2})$/.test(ts);
+  if (hasT || hasTzMarker) return ts;
+  return ts.replace(' ', 'T') + 'Z';
 }
