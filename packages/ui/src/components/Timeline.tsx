@@ -31,6 +31,7 @@ const EVENT_COLORS: Record<string, string> = {
   // status_failed so they pop in the timeline; the TaskDetail page
   // also surfaces them as a dedicated banner above the timeline.
   agent_image_missing: 'bg-red-600',
+  harness_entrypoint_exec_failed: 'bg-red-600',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {

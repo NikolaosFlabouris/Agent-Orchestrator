@@ -609,6 +609,7 @@ export function TaskDetail() {
  *  server is the source of truth for the wording. */
 const STRUCTURAL_FAILURE_EVENT_TYPES = new Set([
   'agent_image_missing',
+  'harness_entrypoint_exec_failed',
 ]);
 
 function StructuralFailureBanner({ task }: { task: TaskDetailResponse }) {

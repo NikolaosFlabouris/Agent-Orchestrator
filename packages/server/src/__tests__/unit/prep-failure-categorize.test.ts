@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { categorizePrepFailure } from '../../scheduler.js';
+import {
+  categorizePrepFailure,
+  categorizeContainerExitFailure,
+} from '../../scheduler.js';
 
 /** Unit tests for the prep-failure categorizer. The categorizer maps
  *  known recurring docker / scheduler error shapes into a stable
@@ -64,6 +67,62 @@ describe('categorizePrepFailure', () => {
 
     it('returns null for an empty string', () => {
       expect(categorizePrepFailure('')).toBeNull();
+    });
+  });
+});
+
+describe('categorizeContainerExitFailure', () => {
+  describe('harness_entrypoint_exec_failed', () => {
+    it('matches the canonical kernel exec error on the CLI harness', () => {
+      // This is the exact string the Docker daemon emits to container
+      // stderr when the kernel can't exec the entrypoint — the
+      // symptom of CRLF line endings in the harness shebang.
+      const result = categorizeContainerExitFailure(
+        'exec /usr/local/bin/harness-cli: no such file or directory'
+      );
+      expect(result).not.toBeNull();
+      expect(result!.eventType).toBe('harness_entrypoint_exec_failed');
+      expect(result!.message).toMatch(/CRLF/);
+      expect(result!.message).toMatch(/docker compose build agent-image/);
+    });
+
+    it('matches the SDK harness variant too', () => {
+      // SDK harness uses npx tsx; if the .ts file's shebang gets
+      // CRLF-mangled, similar failure shape but harness-sdk in the
+      // path. The regex permits both `harness-cli` and `harness-sdk`.
+      const result = categorizeContainerExitFailure(
+        'exec /usr/local/bin/harness-sdk: no such file or directory'
+      );
+      expect(result?.eventType).toBe('harness_entrypoint_exec_failed');
+    });
+
+    it('matches with surrounding container-log noise', () => {
+      const result = categorizeContainerExitFailure(
+        'some other line\nexec /usr/local/bin/harness-cli: no such file or directory\nmore noise'
+      );
+      expect(result?.eventType).toBe('harness_entrypoint_exec_failed');
+    });
+  });
+
+  describe('unknown failures', () => {
+    it('returns null when the logs do not match a known pattern', () => {
+      expect(
+        categorizeContainerExitFailure('agent crashed: syntax error in prompt')
+      ).toBeNull();
+    });
+
+    it('returns null for empty logs', () => {
+      expect(categorizeContainerExitFailure('')).toBeNull();
+    });
+
+    it('does not match an unrelated "no such file" error', () => {
+      // Defensive: only fire when the missing file is one of the
+      // harness entrypoints. A generic "no such file or directory"
+      // elsewhere shouldn't trip this categorizer.
+      const result = categorizeContainerExitFailure(
+        'cat: /repo/missing.txt: no such file or directory'
+      );
+      expect(result).toBeNull();
     });
   });
 });

@@ -125,6 +125,42 @@ interface InstallCommand {
   cwd: string;
 }
 
+/** Pattern-match a container's log output into a known category +
+ *  actionable operator message, for the case where the container
+ *  exited without producing result.json. The most common cause we've
+ *  observed is the kernel failing to exec the entrypoint because of
+ *  CRLF line endings in the shebang (a Windows-host-checkout hazard).
+ *  Distinct from `categorizePrepFailure`: that one runs on launch-
+ *  side exceptions BEFORE the container starts; this one runs on
+ *  COMPLETED containers that just died without writing output.
+ *
+ *  Exported for unit-test coverage. */
+export function categorizeContainerExitFailure(
+  containerLogs: string
+): { eventType: string; message: string } | null {
+  // Kernel-level exec failure on the harness entrypoint. The Docker
+  // daemon's wrapper emits "exec /usr/local/bin/harness-cli: no such
+  // file or directory" (or similar) into the container's stderr when
+  // the script's shebang interpreter can't be found — overwhelmingly
+  // caused by CRLF line endings in the script (the kernel reads
+  // `#!/bin/bash\r` and looks for an interpreter literally named
+  // `/bin/bash\r`).
+  if (/exec\s+\/usr\/local\/bin\/harness-[a-z]+.*no such file or directory/i.test(containerLogs)) {
+    return {
+      eventType: 'harness_entrypoint_exec_failed',
+      message:
+        "The agent container's harness script failed to exec — almost " +
+        "always CRLF line endings in `harness/harness-cli.sh` or " +
+        "`harness/harness-sdk.ts` (a Windows-host-checkout hazard). " +
+        "Rebuild the agent image with `docker compose build agent-image` " +
+        "after pulling the latest changes (the .gitattributes file and " +
+        "the Dockerfile's sed normalisation step together prevent this). " +
+        "Then reset this task and re-apply `status/queued` in Forgejo.",
+    };
+  }
+  return null;
+}
+
 /** Pattern-match a prep-failure error message into a known category +
  *  actionable operator message. Returns null when the message doesn't
  *  match any known structural failure — in that case the caller falls
@@ -561,6 +597,36 @@ export class Scheduler {
         'result.json not found or invalid — treating as failure'
       );
       result = { status: 'failure', error_message: 'No result.json produced by agent' };
+
+      // The harness wrapper never wrote result.json. The most useful
+      // diagnostic at this point is the container's own log buffer —
+      // the kernel exec failure ("no such file or directory" for a
+      // CRLF-shebang script) and similar early failures show up there
+      // but never make it to /output/result.json or progress.log
+      // because the wrapper never started. Pattern-match a small tail
+      // of logs into a categorized task_event when we recognise the
+      // failure mode; the UI's StructuralFailureBanner picks it up.
+      try {
+        const container = getContainer(task.container_id!);
+        const logBuf = await container.logs({
+          stdout: true,
+          stderr: true,
+          tail: 200,
+        });
+        const logText =
+          typeof logBuf === 'string'
+            ? logBuf
+            : Buffer.isBuffer(logBuf)
+              ? logBuf.toString('utf-8')
+              : '';
+        const category = categorizeContainerExitFailure(logText);
+        if (category) {
+          recordTaskEvent(task.id, category.eventType, category.message);
+        }
+      } catch {
+        // Best effort — if the container's gone or logs API errors,
+        // fall through to the generic "no result.json" failure.
+      }
     }
 
     // Read role from the latest attempt row. The attempts table is the

@@ -1,0 +1,24 @@
+# Force LF line endings on files where CRLF would break runtime behaviour.
+#
+# Why this file exists: on Windows clones, git defaults to converting LF
+# to CRLF on checkout. When the agent image Dockerfile COPYs these
+# scripts into the container, the CRLFs are preserved. The kernel then
+# parses `#!/bin/bash\r\n` and looks for an interpreter literally named
+# `/bin/bash\r` (with a carriage return), which doesn't exist. The
+# container exits 255 with the confusing error
+# `exec /usr/local/bin/harness-cli: no such file or directory` — pointing
+# at the script even though the script itself is fine. This file
+# prevents that on future clones; the agent Dockerfile's `sed -i 's/\r$//'`
+# step is the defensive belt-and-braces for clones that already happened.
+
+# Harness scripts run inside Linux containers — must be LF regardless of
+# host OS.
+harness/*.sh    text eol=lf
+harness/*.ts    text eol=lf
+
+# Shell scripts in general.
+*.sh            text eol=lf
+
+# Dockerfiles are read by the daemon (Linux) and should also be LF.
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
