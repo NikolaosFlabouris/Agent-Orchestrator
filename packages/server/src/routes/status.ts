@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import {
   getQueuedTasks,
-  getDb,
   getSettingInt,
   getProviders,
   getActivePerProviderCounts,
@@ -29,14 +28,6 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
         cpu_cores: getSettingInt('max_agent_cpu_cores'),
       };
       const queueDepth = getQueuedTasks().length;
-
-      // Daily completions
-      const dailyRow = getDb()
-        .prepare(
-          `SELECT COUNT(*) as completions
-           FROM attempts WHERE date(completed_at) = date('now')`,
-        )
-        .get() as { completions: number };
 
       // Disk usage — served from a 60s cache refreshed in the background so
       // the scan never blocks the event loop. See ../disk-usage.ts.
@@ -69,7 +60,6 @@ export function createStatusRoutes(scheduler: Scheduler, poller?: Poller) {
           cpu_total_cores: pool.cpu_cores,
         },
         queue_depth: queueDepth,
-        daily_completions: dailyRow.completions,
         forgejo_base_url: process.env.FORGEJO_URL ?? 'http://forgejo:3000',
         forgejo_connected: true,
         last_poll_at: poller?.lastPollAt ?? null,

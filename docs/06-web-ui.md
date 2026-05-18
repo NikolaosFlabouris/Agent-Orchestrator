@@ -489,14 +489,13 @@ All error responses include a JSON body: `{ "error": "Human-readable description
     "cpu_total_cores": 10
   },
   "queue_depth": 7,
-  "daily_completions": 12,
   "forgejo_connected": true,
   "last_poll_at": "2025-03-15T11:00:03Z",
   "uptime_seconds": 86400
 }
 ```
 
-The UI dashboard header uses `state`, `host_pool` (rendered as `Mem: used/total GB · CPU: used/total`), `queue_depth`, and `daily_completions`. The remaining fields (`forgejo_connected`, `last_poll_at`, `uptime_seconds`) are visibility-only — the orchestrator no longer alerts on a disk threshold (use OS-level disk monitoring instead). The host resource pool replaces the older count-based `active_slots` / `max_concurrency` pair: per-repo `container_memory_mb` / `container_cpu_cores` make a count of running tasks a leaky proxy for actual host capacity.
+The UI dashboard header uses `state`, `host_pool` (rendered as `Mem: used/total GB · CPU: used/total`), and `queue_depth`. The remaining fields (`forgejo_connected`, `last_poll_at`, `uptime_seconds`) are visibility-only — the orchestrator no longer alerts on a disk threshold (use OS-level disk monitoring instead). The host resource pool replaces the older count-based `active_slots` / `max_concurrency` pair: per-repo `container_memory_mb` / `container_cpu_cores` make a count of running tasks a leaky proxy for actual host capacity.
 
 ### WebSocket Endpoints
 

@@ -24,7 +24,6 @@ interface DashboardState {
   hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
-  dailyCompletions: number;
   forgejoBaseUrl: string;
   alerts: Alert[];
   resourceVersions: ResourceVersions;
@@ -45,7 +44,6 @@ interface DashboardState {
     queueDepth: number;
   }) => void;
   setHostPool: (hostPool: HostPool) => void;
-  setDailyCompletions: (count: number) => void;
   setForgejoBaseUrl: (url: string) => void;
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
@@ -68,7 +66,6 @@ export const useStore = create<DashboardState>((set) => ({
   hostPool: ZERO_POOL,
   queueDepth: 0,
   paused: false,
-  dailyCompletions: 0,
   forgejoBaseUrl: '',
   alerts: [],
   resourceVersions: { providers: 0, models: 0, profiles: 0 },
@@ -104,7 +101,6 @@ export const useStore = create<DashboardState>((set) => ({
     }),
 
   setHostPool: (hostPool) => set({ hostPool }),
-  setDailyCompletions: (count) => set({ dailyCompletions: count }),
   setForgejoBaseUrl: (url) => set({ forgejoBaseUrl: url }),
 
   addAlert: (alert) =>

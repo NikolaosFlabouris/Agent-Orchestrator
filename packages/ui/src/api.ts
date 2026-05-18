@@ -201,7 +201,6 @@ export interface StatusResponse {
     cpu_total_cores: number;
   };
   queue_depth: number;
-  daily_completions: number;
   forgejo_base_url: string;
   forgejo_connected: boolean;
   uptime_seconds: number;

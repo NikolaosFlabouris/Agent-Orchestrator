@@ -25,7 +25,6 @@ export function Dashboard() {
   const hostPool = useStore((s) => s.hostPool);
   const queueDepth = useStore((s) => s.queueDepth);
   const paused = useStore((s) => s.paused);
-  const dailyCompletions = useStore((s) => s.dailyCompletions);
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
   const alerts = useStore((s) => s.alerts);
 
@@ -48,7 +47,6 @@ export function Dashboard() {
     // as values). Same identity guarantee as the selector pattern,
     // just without the unused subscription overhead.
     const {
-      setDailyCompletions,
       setForgejoBaseUrl,
       setHostPool: setHostPoolFn,
       setSnapshot,
@@ -58,12 +56,10 @@ export function Dashboard() {
       bumpResourceVersion,
     } = useStore.getState();
 
-    // Pull status immediately and every 5 s. Daily completions come from the
-    // same payload; providers are sampled often so the Pools row stays close
-    // to live.
+    // Pull status immediately and every 5 s. Providers are sampled often so
+    // the Pools row stays close to live.
     const refresh = () => {
       api.getStatus().then((s) => {
-        setDailyCompletions(s.daily_completions);
         setForgejoBaseUrl(s.forgejo_base_url);
         setHostPoolFn({
           memory_used_mb: s.host_pool.memory_used_mb,
@@ -167,7 +163,6 @@ export function Dashboard() {
             </span>
             <HostPoolDisplay pool={hostPool} />
             <span>Queue: {queueDepth}</span>
-            <span>Today: {dailyCompletions} tasks</span>
             <button
               onClick={async () => {
                 if (paused) {
