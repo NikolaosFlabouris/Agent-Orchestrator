@@ -400,7 +400,12 @@ This approach keeps quality enforcement close to the code (each repo defines its
 3. Explore the relevant codebase to understand existing patterns
 4. Implement the changes described in the task
 5. Run any existing tests to verify your changes don't break anything
-6. Ensure your changes are complete and ready for review
+6. Self-review before committing — critique your own work; do not rely solely on the downstream review:
+   - Re-read the task requirements and acceptance criteria above.
+   - Compare them against your working tree (git status / git diff).
+   - Explicitly enumerate any unmet requirements, bugs, missing tests, or unrelated/incidental changes.
+   - (Rework cycles only) Also re-check your diff against the "Review Feedback" section below and confirm every feedback item is fully addressed.
+   - Fix every gap you found, then continue.
 7. Commit your changes and push:
    git add -A
    git commit -m "feat: <concise description>"

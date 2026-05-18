@@ -78,6 +78,36 @@ describe('buildDevPrompt', () => {
     expect(prompt).toContain('Follow the existing code style');
     expect(prompt).toContain('Do not modify files unrelated to the task');
   });
+
+  it('includes a self-review step before commit/push (initial attempt)', () => {
+    const prompt = buildDevPrompt(mockTask, mockRepo, mockIssue, null);
+    expect(prompt).toContain('Self-review before committing');
+    expect(prompt).toContain('Re-read the task requirements');
+    expect(prompt).toContain(
+      'Explicitly enumerate any unmet requirements, bugs, missing tests, or unrelated/incidental changes'
+    );
+    const selfReviewIdx = prompt.indexOf('Self-review before committing');
+    const commitIdx = prompt.indexOf('Commit your changes and push');
+    expect(selfReviewIdx).toBeGreaterThan(-1);
+    expect(commitIdx).toBeGreaterThan(-1);
+    expect(selfReviewIdx).toBeLessThan(commitIdx);
+  });
+
+  it('omits the review-feedback self-review sub-point on the initial attempt', () => {
+    const prompt = buildDevPrompt(mockTask, mockRepo, mockIssue, null);
+    expect(prompt).not.toContain('"Review Feedback" section below');
+  });
+
+  it('self-review also checks the diff against review feedback on rework', () => {
+    const reworkTask = { ...mockTask, attempt: 2 };
+    const feedback = 'Missing null check on line 42';
+    const prompt = buildDevPrompt(reworkTask, mockRepo, mockIssue, feedback);
+    expect(prompt).toContain('Self-review before committing');
+    expect(prompt).toContain('"Review Feedback" section below');
+    const selfReviewIdx = prompt.indexOf('Self-review before committing');
+    const commitIdx = prompt.indexOf('Commit your changes and push');
+    expect(selfReviewIdx).toBeLessThan(commitIdx);
+  });
 });
 
 describe('buildReviewPrompt', () => {
