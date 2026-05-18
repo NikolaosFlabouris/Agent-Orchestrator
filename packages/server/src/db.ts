@@ -790,6 +790,31 @@ export function getRunningAttempt(
     .get(taskId, attemptNumber, role) as Attempt | undefined;
 }
 
+/** Cumulative review-feedback history for a task: every COMPLETED review
+ *  attempt that returned `changes_needed` with non-null feedback, oldest
+ *  → newest by attempt_number. This is the authoritative source for the
+ *  rework prompt's feedback section — an implementer fixing attempt N
+ *  regresses earlier fixes when it can't see attempts 1..N-1. Reading
+ *  the persisted attempts table (rather than in-memory state) keeps the
+ *  full history available even after an orchestrator restart mid-rework.
+ *  `verdict` is only ever written on review-role rows by completeAttempt,
+ *  so the role filter is belt-and-braces against future schema changes.
+ *  The `id` tiebreaker makes ordering deterministic if a retried review
+ *  ever produced two completed rows for one attempt_number. */
+export function getReviewFeedbackHistory(taskId: number): Attempt[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM attempts
+        WHERE task_id = ?
+          AND role = 'review'
+          AND status = 'completed'
+          AND verdict = 'changes_needed'
+          AND feedback IS NOT NULL
+        ORDER BY attempt_number ASC, id ASC`
+    )
+    .all(taskId) as Attempt[];
+}
+
 // -- Repos --
 
 /** SQLite stores `install_steps` as a JSON string and `allow_script_steps`

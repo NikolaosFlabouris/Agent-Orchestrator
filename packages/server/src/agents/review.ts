@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
-import { getRepo, getTask, updateTask } from '../db.js';
+import {
+  getRepo,
+  getTask,
+  updateTask,
+  getReviewFeedbackHistory,
+} from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { getOutputDir } from '../workspace.js';
@@ -177,6 +182,74 @@ export function formatReviewForRework(review: ReviewVerdict): string {
   const feedbackMd = formatReviewFeedback(review.feedback);
   if (feedbackMd) parts.push(`### Feedback\n\n${feedbackMd}`);
   return parts.join('\n\n');
+}
+
+/**
+ * Render one persisted attempt's feedback (the JSON-serialised
+ * `review.feedback` written by `completeAttempt`) through the same
+ * single-review renderer used for the live verdict, so historical
+ * sections compose with task #82's formatter rather than re-parsing.
+ * `completeAttempt` only persists `review.feedback` (not the rubric), so
+ * historical sections carry feedback only. Defensive: a missing, empty,
+ * or unparsable payload yields '' so the caller skips the attempt
+ * instead of failing the rework.
+ */
+export function renderPersistedAttemptFeedback(raw: string | null): string {
+  if (raw == null || raw.trim() === '') return '';
+  let parsed: ReviewVerdict['feedback'];
+  try {
+    parsed = JSON.parse(raw) as ReviewVerdict['feedback'];
+  } catch {
+    // completeAttempt always JSON.stringifies, but a hand-edited DB or a
+    // future serialisation change must not be fatal — treat the raw text
+    // as a bare-string feedback payload.
+    parsed = raw;
+  }
+  try {
+    return formatReviewForRework({
+      verdict: 'changes_needed',
+      feedback: parsed,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Assemble the cumulative review feedback handed to the rework dev agent:
+ * every prior `changes_needed` attempt's persisted feedback plus the
+ * current one, oldest → newest, each section attributed to its attempt
+ * number. The current attempt is rendered from the live in-memory
+ * `review` (it carries the rubric, which `completeAttempt` does not
+ * persist) so the single-attempt case stays byte-identical to the prior
+ * behaviour. Prior rows whose feedback is missing/empty/unparsable are
+ * skipped, never fatal. When only one section survives (first rework, or
+ * all prior rows degraded) the result is exactly `currentFeedback` with
+ * no attribution wrapper — no regression for the single-attempt case.
+ */
+export function assembleCumulativeReviewFeedback(
+  history: ReadonlyArray<{
+    attempt_number: number | null;
+    feedback: string | null;
+  }>,
+  currentAttempt: number,
+  currentFeedback: string
+): string {
+  const sections: Array<{ n: number; body: string }> = [];
+  for (const row of history) {
+    const n = row.attempt_number ?? 0;
+    // The current attempt's persisted row is rendered from the live
+    // `review` instead (rubric preservation), so skip it here along with
+    // any defensively-unexpected rows at/after the current number.
+    if (n >= currentAttempt) continue;
+    const body = renderPersistedAttemptFeedback(row.feedback);
+    if (body) sections.push({ n, body });
+  }
+  sections.push({ n: currentAttempt, body: currentFeedback });
+  if (sections.length === 1) return sections[0].body;
+  return sections
+    .map((s) => `### Attempt ${s.n}\n\n${s.body}`)
+    .join('\n\n');
 }
 
 /**
@@ -626,8 +699,31 @@ export async function processReviewVerdict(
         'Review rejected — starting rework'
       );
 
+      // Hand the dev agent the *cumulative* review feedback (every prior
+      // changes_needed attempt plus this one), not just the latest: a weak
+      // implementer fixing attempt N regresses earlier fixes when it can't
+      // see attempts 1..N-1. The history is sourced from the persisted
+      // attempts table so it survives an orchestrator restart mid-rework.
+      // The PR/issue comments above intentionally stay per-attempt (each
+      // attempt already posted its own comment — repeating the whole
+      // history every time would just be noise). Falls back to the
+      // current attempt's feedback if accumulation throws for any reason.
+      let reworkFeedback = feedbackStr;
+      try {
+        reworkFeedback = assembleCumulativeReviewFeedback(
+          getReviewFeedbackHistory(task.id),
+          freshTask.attempt,
+          feedbackStr
+        );
+      } catch (err) {
+        log.warn(
+          { event: 'cumulative_feedback_failed', task_id: task.id, err },
+          'Cumulative feedback assembly failed — using latest attempt only'
+        );
+      }
+
       const updatedTask = getTask(task.id)!;
-      await launchDevContainer(updatedTask, feedbackStr);
+      await launchDevContainer(updatedTask, reworkFeedback);
     }
   } else if (review.verdict === 'unclear') {
     updateTaskWithSync(task.id, {
