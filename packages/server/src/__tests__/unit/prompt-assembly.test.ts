@@ -121,23 +121,74 @@ describe('buildReviewPrompt', () => {
     expect(prompt).toContain('git diff origin/main...HEAD');
   });
 
-  it('includes review.json output format', () => {
+  it('names and requires all five rubric dimensions', () => {
+    const prompt = buildReviewPrompt(mockTask, mockRepo, mockIssue);
+    expect(prompt).toContain('## Review Rubric');
+    for (const dim of [
+      'requirements',
+      'correctness',
+      'tests',
+      'security',
+      'quality',
+    ]) {
+      expect(prompt).toContain(dim);
+    }
+    // Reviewer must address every dimension explicitly, not skip any.
+    expect(prompt).toMatch(/do not skip\s+any/i);
+  });
+
+  it('documents the exact review.json schema', () => {
     const prompt = buildReviewPrompt(mockTask, mockRepo, mockIssue);
     expect(prompt).toContain('/output/review.json');
     expect(prompt).toContain('"verdict"');
     expect(prompt).toContain('"approved"');
     expect(prompt).toContain('"changes_needed"');
+    expect(prompt).toContain('"unclear"');
+    expect(prompt).toContain('"summary"');
+    expect(prompt).toContain('"rubric"');
+    expect(prompt).toContain('"feedback"');
+    expect(prompt).toContain('"category"');
+    expect(prompt).toContain('"severity"');
+    expect(prompt).toContain('"suggestion"');
+    expect(prompt).toContain('"blocker"');
+    expect(prompt).toContain('"major"');
+    expect(prompt).toContain('"minor"');
+    expect(prompt).toContain('"pass"');
+    expect(prompt).toContain('"concern"');
+    expect(prompt).toContain('"fail"');
   });
 
-  it('includes approval criteria', () => {
+  it('documents the unclear verdict as a human-routing escape hatch', () => {
     const prompt = buildReviewPrompt(mockTask, mockRepo, mockIssue);
-    expect(prompt).toContain('All task requirements are met');
-    expect(prompt).toContain('Tests pass');
-    expect(prompt).toContain('No bugs or security issues');
+    expect(prompt).toMatch(/genuinely cannot determine/i);
+  });
+
+  it('requires a non-empty actionable suggestion for changes_needed', () => {
+    const prompt = buildReviewPrompt(mockTask, mockRepo, mockIssue);
+    expect(prompt).toMatch(/AT LEAST ONE/);
+    expect(prompt).toMatch(/non-empty[\s\S]*?suggestion/i);
+    expect(prompt).toMatch(/not a restatement of the problem/i);
   });
 
   it('references the base branch', () => {
     const prompt = buildReviewPrompt(mockTask, mockRepo, mockIssue);
     expect(prompt).toContain('main');
+  });
+});
+
+describe('buildDevPrompt is unchanged by the review rubric work', () => {
+  it('does not leak review rubric or review.json schema into the dev prompt', () => {
+    const prompt = buildDevPrompt(mockTask, mockRepo, mockIssue, null);
+    expect(prompt).not.toContain('Review Rubric');
+    expect(prompt).not.toContain('review.json');
+    expect(prompt).not.toContain('rubric');
+  });
+
+  it('keeps the original dev prompt structure', () => {
+    const prompt = buildDevPrompt(mockTask, mockRepo, mockIssue, null);
+    expect(prompt).toContain('## Task');
+    expect(prompt).toContain('## Context');
+    expect(prompt).toContain('## Instructions');
+    expect(prompt).toContain('## Constraints');
   });
 });

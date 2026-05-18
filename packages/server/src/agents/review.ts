@@ -15,10 +15,168 @@ import type { FastifyBaseLogger } from 'fastify';
 
 const MAX_REVIEW_RETRIES = 2;
 
+const RUBRIC_DIMENSIONS = [
+  'requirements',
+  'correctness',
+  'tests',
+  'security',
+  'quality',
+] as const;
+
+type RubricDimension = (typeof RUBRIC_DIMENSIONS)[number];
+
+interface RubricEntry {
+  status: 'pass' | 'concern' | 'fail' | string;
+  note?: string;
+}
+
+interface FeedbackItem {
+  file: string;
+  line: number;
+  category?: RubricDimension | string;
+  severity?: 'blocker' | 'major' | 'minor' | string;
+  comment: string;
+  suggestion?: string;
+}
+
 interface ReviewVerdict {
   verdict: 'approved' | 'changes_needed' | 'unclear';
   summary?: string;
-  feedback?: Array<{ file: string; line: number; comment: string }> | string;
+  rubric?: Partial<Record<RubricDimension, RubricEntry>> &
+    Record<string, RubricEntry>;
+  // New shape carries category/severity/suggestion. The legacy
+  // {file,line,comment} object shape and a bare string are still accepted
+  // because review.json is LLM-produced and must degrade gracefully.
+  feedback?:
+    | FeedbackItem[]
+    | Array<{ file: string; line: number; comment: string }>
+    | string;
+}
+
+const SEVERITY_ORDER = ['blocker', 'major', 'minor'] as const;
+
+function asString(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
+/**
+ * Render the rubric object as a short markdown summary. Tolerates a missing,
+ * partial, or extra-keyed rubric without throwing.
+ */
+export function formatRubricMarkdown(
+  rubric: ReviewVerdict['rubric']
+): string {
+  if (!rubric || typeof rubric !== 'object') return '';
+  const keys = Object.keys(rubric);
+  const ordered = [
+    ...RUBRIC_DIMENSIONS.filter((k) => k in rubric),
+    ...keys.filter((k) => !(RUBRIC_DIMENSIONS as readonly string[]).includes(k)),
+  ];
+  const lines: string[] = [];
+  for (const key of ordered) {
+    const entry = (rubric as Record<string, RubricEntry>)[key];
+    if (!entry || typeof entry !== 'object') continue;
+    const status = asString(entry.status) ?? 'unknown';
+    const note = asString(entry.note);
+    lines.push(
+      `- **${key}**: ${status.toUpperCase()}${note ? ` — ${note}` : ''}`
+    );
+  }
+  if (lines.length === 0) return '';
+  return `### Rubric\n\n${lines.join('\n')}`;
+}
+
+/**
+ * Render review feedback as a readable, grouped markdown list (by severity,
+ * then file). Handles the new shape, the legacy {file,line,comment} shape,
+ * and a bare string. Never throws on malformed input.
+ */
+export function formatReviewFeedback(
+  feedback: ReviewVerdict['feedback']
+): string {
+  if (feedback == null) return '';
+  if (typeof feedback === 'string') return feedback.trim();
+  if (!Array.isArray(feedback)) {
+    try {
+      return JSON.stringify(feedback, null, 2);
+    } catch {
+      return String(feedback);
+    }
+  }
+  if (feedback.length === 0) return '';
+
+  const items = feedback.map((raw) => {
+    const f = (raw ?? {}) as Record<string, unknown>;
+    const lineRaw = f.line;
+    const line =
+      typeof lineRaw === 'number'
+        ? String(lineRaw)
+        : typeof lineRaw === 'string' && lineRaw.trim() !== ''
+          ? lineRaw.trim()
+          : null;
+    return {
+      file: asString(f.file) ?? 'unknown',
+      line,
+      category: asString(f.category),
+      severity: asString(f.severity)?.toLowerCase() ?? null,
+      comment: asString(f.comment) ?? '',
+      suggestion: asString(f.suggestion),
+    };
+  });
+
+  const groups = new Map<string, typeof items>();
+  for (const item of items) {
+    const sev =
+      item.severity &&
+      (SEVERITY_ORDER as readonly string[]).includes(item.severity)
+        ? item.severity
+        : 'other';
+    const bucket = groups.get(sev);
+    if (bucket) bucket.push(item);
+    else groups.set(sev, [item]);
+  }
+
+  const severityKeys = [
+    ...SEVERITY_ORDER.filter((s) => groups.has(s)),
+    ...[...groups.keys()].filter(
+      (s) => !(SEVERITY_ORDER as readonly string[]).includes(s)
+    ),
+  ];
+
+  const sections: string[] = [];
+  for (const sev of severityKeys) {
+    const groupItems = [...groups.get(sev)!].sort((a, b) =>
+      a.file.localeCompare(b.file)
+    );
+    const heading =
+      sev === 'other' ? 'Other' : sev.charAt(0).toUpperCase() + sev.slice(1);
+    const lines: string[] = [`#### ${heading}`];
+    for (const item of groupItems) {
+      const loc = item.line != null ? `${item.file}:${item.line}` : item.file;
+      const cat = item.category ? ` _(${item.category})_` : '';
+      lines.push(`- **${loc}**${cat}: ${item.comment}`.trimEnd());
+      if (item.suggestion) {
+        lines.push(`  - Suggested change: ${item.suggestion}`);
+      }
+    }
+    sections.push(lines.join('\n'));
+  }
+  return sections.join('\n\n');
+}
+
+/**
+ * Build the full markdown body (rubric summary + grouped feedback) used for
+ * the PR comment, the issue comment, and the rework prompt handed back to the
+ * dev agent. Always returns a string; degrades gracefully on legacy/malformed
+ * review.json.
+ */
+export function formatReviewForRework(review: ReviewVerdict): string {
+  const parts: string[] = [];
+  const rubricMd = formatRubricMarkdown(review.rubric);
+  if (rubricMd) parts.push(rubricMd);
+  const feedbackMd = formatReviewFeedback(review.feedback);
+  if (feedbackMd) parts.push(`### Feedback\n\n${feedbackMd}`);
+  return parts.join('\n\n');
 }
 
 /**
@@ -420,24 +578,23 @@ export async function processReviewVerdict(
   } else if (review.verdict === 'changes_needed') {
     const newAttempt = freshTask.attempt + 1;
     const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
-    const feedbackStr =
-      typeof review.feedback === 'string'
-        ? review.feedback
-        : JSON.stringify(review.feedback, null, 2);
+    const feedbackStr = formatReviewForRework(review);
+    const summary = review.summary ?? '';
 
-    // Post feedback as PR comment and issue comment
+    // Post feedback as PR comment and issue comment, rendered as readable
+    // markdown (rubric summary + grouped feedback) rather than raw JSON.
     try {
       if (freshTask.pr_number) {
         await forgejo.commentOnPr(
           repo,
           freshTask.pr_number,
-          `Review found issues (attempt ${freshTask.attempt}):\n\n${review.summary ?? ''}\n\n${feedbackStr}`
+          `Review found issues (attempt ${freshTask.attempt}):\n\n${summary}\n\n${feedbackStr}`
         );
       }
       await forgejo.commentOnIssue(
         repo,
         task.issue_id,
-        `Review found issues (attempt ${freshTask.attempt}). Sending back for rework.\n\n${review.summary ?? ''}`
+        `Review found issues (attempt ${freshTask.attempt}). Sending back for rework.\n\n${summary}\n\n${feedbackStr}`
       );
     } catch { /* best effort */ }
 
