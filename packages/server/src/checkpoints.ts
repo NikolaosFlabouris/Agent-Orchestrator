@@ -38,6 +38,22 @@ export function getStep<T = unknown>(
   return row ? (JSON.parse(row.result_json) as T) : undefined;
 }
 
+/**
+ * Delete every recorded step for a task, across all attempts.
+ *
+ * Called by resetTask. A reset deletes the branch, PR, and workspace and
+ * recycles the attempt counter back to 1. Step checkpoints are keyed only on
+ * (task_id, attempt_number, step_name), so without this the next requeued
+ * attempt (attempt 1 again) would have runStep/getStep replay stale rows from
+ * the pre-reset run — e.g. a stale `create-pr` row makes the orchestrator
+ * skip PR creation and then try to merge the now-closed PR, which Forgejo
+ * answers with a 404 and the task is marked failed. Clearing the rows on
+ * reset makes a requeued task start from a clean slate.
+ */
+export function deleteStepsForTask(taskId: number): void {
+  getDb().prepare('DELETE FROM task_steps WHERE task_id = ?').run(taskId);
+}
+
 /** Return all recorded steps for a (task_id, attempt_number) pair, in insertion order. */
 export function listStepsForAttempt(
   taskId: number,

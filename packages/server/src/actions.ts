@@ -10,6 +10,7 @@ import {
   removeContainer,
 } from './docker.js';
 import { getWorkdir } from './workspace.js';
+import { deleteStepsForTask } from './checkpoints.js';
 import type { Scheduler } from './scheduler.js';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -195,6 +196,12 @@ export async function resetTask(
   }
 
   // 6. Clean up internal state
+  // Drop step checkpoints from the pre-reset run. The attempt counter is
+  // recycled below (back to 1 on a user reset), and checkpoints are keyed
+  // only on (task_id, attempt_number, step_name) — leaving them would let a
+  // requeued attempt replay a stale `verify-push`/`create-pr` and try to
+  // merge the PR that this reset just closed (Forgejo 404 → task failed).
+  deleteStepsForTask(task.id);
   recordTaskEvent(task.id, 'task_reset', `Reset: ${reason}`);
   const nextStatus = requeue ? 'queued' : 'reset';
   const nextAttempt = incrementAttempt ? task.attempt + 1 : 1;

@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { initDatabase } from '../../db.js';
-import { recordStep, getStep, listStepsForAttempt, runStep } from '../../checkpoints.js';
+import {
+  recordStep,
+  getStep,
+  listStepsForAttempt,
+  runStep,
+  deleteStepsForTask,
+} from '../../checkpoints.js';
+import { getDb } from '../../db.js';
 
 // ---------------------------------------------------------------------------
 // Set up an isolated in-memory database before each test so tests do not
@@ -167,5 +174,63 @@ describe('recordStep / getStep', () => {
     recordStep(1, 1, 'overwrite-step', 'original');
     recordStep(1, 1, 'overwrite-step', 'updated');
     expect(getStep(1, 1, 'overwrite-step')).toBe('updated');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteStepsForTask — reset cleanup
+// ---------------------------------------------------------------------------
+
+describe('deleteStepsForTask', () => {
+  it('removes every step for the task across all attempts', () => {
+    recordStep(1, 1, 'verify-push', { branch_exists: true });
+    recordStep(1, 1, 'create-pr', { pr_number: 73 });
+    recordStep(1, 2, 'verify-push', { branch_exists: true });
+
+    deleteStepsForTask(1);
+
+    expect(getStep(1, 1, 'verify-push')).toBeUndefined();
+    expect(getStep(1, 1, 'create-pr')).toBeUndefined();
+    expect(getStep(1, 2, 'verify-push')).toBeUndefined();
+    expect(listStepsForAttempt(1, 1)).toEqual([]);
+  });
+
+  it('leaves steps for other tasks untouched', () => {
+    // A second task so we can assert the delete is scoped by task_id.
+    getDb()
+      .prepare(
+        `INSERT INTO tasks (id, issue_id, repo_id, status, queue_position, max_attempts, prep_failure_count)
+         VALUES (2, 200, 1, 'in-progress', 2, 3, 0)`
+      )
+      .run();
+    recordStep(1, 1, 'create-pr', { pr_number: 73 });
+    recordStep(2, 1, 'create-pr', { pr_number: 99 });
+
+    deleteStepsForTask(1);
+
+    expect(getStep(1, 1, 'create-pr')).toBeUndefined();
+    expect(getStep(2, 1, 'create-pr')).toEqual({ pr_number: 99 });
+  });
+
+  it('is a no-op when the task has no recorded steps', () => {
+    expect(() => deleteStepsForTask(1)).not.toThrow();
+  });
+
+  it('lets runStep re-execute fn after the stale checkpoint is cleared', async () => {
+    // Reproduces the bug: a stale `create-pr` row keyed on (task=1,
+    // attempt=1) would otherwise be replayed verbatim when the attempt
+    // counter recycles to 1 after a reset.
+    recordStep(1, 1, 'create-pr', { pr_number: 73, created: true });
+
+    deleteStepsForTask(1);
+
+    let called = false;
+    const result = await runStep(1, 1, 'create-pr', () => {
+      called = true;
+      return { pr_number: 101, created: true };
+    });
+
+    expect(called).toBe(true);
+    expect(result).toEqual({ pr_number: 101, created: true });
   });
 });
