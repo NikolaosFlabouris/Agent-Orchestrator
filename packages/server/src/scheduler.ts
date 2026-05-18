@@ -1699,28 +1699,76 @@ ${issue.body}
 3. Run: git diff origin/${repo.base_branch}...HEAD --name-only for a summary of affected files
 4. Read and understand every changed file
 5. Run the test suite if one exists
-6. Evaluate against the task requirements
-7. Check for bugs, security issues, and code quality problems
+6. Evaluate the change against the rubric below, one dimension at a time
+
+## Review Rubric
+
+Evaluate the change against every one of these five dimensions. Do not skip
+any dimension — each must be assessed and reported explicitly, even when the
+outcome is "pass".
+
+1. requirements — Does the change satisfy every stated requirement in the
+   task description above? Missing or partial requirements are a fail.
+2. correctness — Are there bugs, logic errors, broken edge cases, or
+   incorrect assumptions in the changed code?
+3. tests — Are there adequate tests for the new/changed behaviour, and does
+   the existing test suite pass? Absent or insufficient tests are a concern
+   or fail depending on risk.
+4. security — Does the change introduce vulnerabilities (injection, secrets
+   exposure, missing authz/authn, unsafe input handling, etc.)?
+5. quality — Does the change follow existing conventions, stay readable, and
+   keep scope discipline (no unrelated or out-of-scope changes)?
+
+Base the verdict on the rubric outcome: any dimension that is "fail" (or a
+"concern" serious enough to block) means the verdict is "changes_needed".
 
 ## Output
 
-Create a file at /output/review.json with this exact structure:
+Create a file at /output/review.json with EXACTLY this structure:
 
 {
-  "verdict": "approved" or "changes_needed",
-  "summary": "Brief overall assessment in 1-2 sentences",
+  "verdict": "approved" | "changes_needed" | "unclear",
+  "summary": "1-2 sentence overall assessment",
+  "rubric": {
+    "requirements": { "status": "pass" | "concern" | "fail", "note": "..." },
+    "correctness":  { "status": "pass" | "concern" | "fail", "note": "..." },
+    "tests":        { "status": "pass" | "concern" | "fail", "note": "..." },
+    "security":     { "status": "pass" | "concern" | "fail", "note": "..." },
+    "quality":      { "status": "pass" | "concern" | "fail", "note": "..." }
+  },
   "feedback": [
-    {"file": "path/to/file.ts", "line": 42, "comment": "description of issue"}
+    {
+      "file": "path/to/file.ts",
+      "line": 42,
+      "category": "requirements" | "correctness" | "tests" | "security" | "quality",
+      "severity": "blocker" | "major" | "minor",
+      "comment": "What is wrong and why it matters",
+      "suggestion": "A concrete, actionable change the implementer can make — not a restatement of the problem"
+    }
   ]
 }
 
-Set verdict to "approved" only if:
-- All task requirements are met
-- Tests pass (or no test suite exists)
-- No bugs or security issues found
-- Code quality is acceptable
+Schema rules:
+- "verdict":
+  - "approved" — every rubric dimension is "pass" (or a benign "concern"),
+    all task requirements met, tests pass (or no suite exists), no bugs or
+    security issues, quality acceptable.
+  - "changes_needed" — any concrete issue exists. Requires AT LEAST ONE
+    "feedback" entry, and every entry MUST include a non-empty, concrete
+    "suggestion". Feedback without an actionable suggestion is invalid.
+  - "unclear" — you genuinely cannot determine whether the change is correct
+    (e.g. the diff is unreadable, the task is ambiguous, or you lack the
+    context to judge). Use this sparingly; it routes to a human.
+- "rubric": one entry per dimension above, with the dimension name as the
+  key. Every dimension MUST be present. "note" briefly justifies the status.
+- "feedback": each entry's "category" MUST be one of the five rubric
+  dimensions. "severity" is "blocker" (must fix), "major" (should fix), or
+  "minor" (nice to fix). Cite the precise "file" and "line". "suggestion"
+  must describe the specific change to make, so a weaker implementer can act
+  on it without re-deriving the problem.
 
-Set verdict to "changes_needed" if any concrete issues exist.
-Include specific, actionable feedback for every issue found.
+Walk the rubric dimension by dimension before writing the file. Do not emit
+vague feedback such as "improve error handling"; say which file and line,
+what is wrong, and exactly what to change.
 `;
 }
