@@ -25,6 +25,8 @@ import { providerRoutes } from "./routes/providers.js";
 import { agentProfileRoutes } from "./routes/agent-profiles.js";
 import { createStatusRoutes } from "./routes/status.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
+import { createMcpRoutes } from "./routes/mcp.js";
+import { createMcpOAuthRoutes } from "./routes/mcp-oauth.js";
 import { createDashboardWs, broadcastStatusChanged } from "./ws/dashboard.js";
 import { outputWs } from "./ws/output.js";
 import { registerAuth, authDisabled } from "./auth.js";
@@ -223,6 +225,20 @@ async function main() {
   await app.register(createRepoRoutes(forgejo));
   await app.register(providerRoutes);
   await app.register(agentProfileRoutes);
+  // MCP OAuth (Phase 3 Workstream C). Discovery + DCR + authorize +
+  // token endpoints. These are NOT gated by MCP_ENABLED — the
+  // discovery + DCR endpoints publish metadata about the MCP
+  // endpoint's auth model and stay reachable independent of the
+  // /mcp transport itself. The endpoints have their own auth model
+  // (authorize → cookie session, token + register → public client +
+  // PKCE), so the global /api/* hook deliberately doesn't fire on
+  // them (it's an opt-in hook, not opt-out).
+  await app.register(createMcpOAuthRoutes());
+  // MCP transport (Phase 3 Workstream B + C). Gated by MCP_ENABLED=1;
+  // when enabled, requires a valid OAuth bearer JWT (issued by the
+  // mcp-oauth endpoints above). When disabled, returns a 503 stub
+  // at /mcp.
+  await app.register(createMcpRoutes({ forgejo, scheduler, log }));
   // Poller created here so status routes can access lastPollAt
   const poller = new Poller(forgejo, scheduler, log);
   await app.register(createStatusRoutes(scheduler, poller));

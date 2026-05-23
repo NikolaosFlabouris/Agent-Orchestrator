@@ -105,11 +105,13 @@ describe('v23 seed migration', () => {
       .get() as { value: string };
     expect(defaultProfile.value).toBe('default-claude-sdk');
 
-    // Schema version bumped.
+    // Schema version bumped to the current level — the migration
+    // sweep runs every block from `version` up to CURRENT_SCHEMA_VERSION,
+    // so a v22 install rolled forward through v23 lands on v24 too.
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('23');
+    expect(versionRow.value).toBe('24');
 
     db.close();
   });

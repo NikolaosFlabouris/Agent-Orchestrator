@@ -1,0 +1,17 @@
+{
+  "name": "agent-orchestrator",
+  "owner": {
+    "name": "Agent Orchestrator"
+  },
+  "metadata": {
+    "description": "Tools and slash commands for the Agent Orchestrator. Distributed via this repository — devs add the marketplace with `/plugin marketplace add <git-host>/<owner>/agent-orchestration` and install plugins from it."
+  },
+  "plugins": [
+    {
+      "name": "agent-orchestrator",
+      "source": "./plugin",
+      "description": "Create and queue Agent Orchestrator tasks from any project. Communicates with a running orchestrator over MCP (Model Context Protocol) with OAuth-delegated authentication — no credentials or repo access required on the developer's machine.",
+      "version": "0.1.0"
+    }
+  ]
+}

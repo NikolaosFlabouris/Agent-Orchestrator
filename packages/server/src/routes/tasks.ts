@@ -3,11 +3,8 @@ import {
   getTask,
   getTasks,
   getRepo,
-  getRepos,
   getAttempts,
   getTaskEvents,
-  insertTask,
-  updateTask,
   getAgentProfile,
   getSetting,
 } from '../db.js';
@@ -16,7 +13,7 @@ import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { cancelTask, resetTask, requeueTask, extendTask } from '../actions.js';
-import { updateTaskWithSync, notifyTaskCreated, recordTaskEvent } from '../state-sync.js';
+import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
 import { getSnapshot, warmRepoSnapshots } from '../forgejo-snapshot.js';
@@ -26,6 +23,11 @@ import {
   getContainerDisplayName,
 } from '../orphan-recovery.js';
 import { listContainers } from '../docker.js';
+import {
+  createTask as createTaskService,
+  queueExistingIssue as queueExistingIssueService,
+  type TaskIntakeError,
+} from '../services/task-intake.js';
 
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 
@@ -51,45 +53,19 @@ const REQUEUEABLE_STATUSES = new Set([
 
 const EXTENDABLE_STATUSES = new Set(['failed']);
 
-/** Coerce a body value to a positive integer (>= 1). Returns null when
- *  the value is missing, the wrong type, non-finite, fractional, or
- *  zero/negative. JSON allows strings that look like numbers, so we
- *  accept those too. */
-function asPositiveInt(v: unknown): number | null {
-  if (typeof v === 'number') {
-    return Number.isInteger(v) && v >= 1 ? v : null;
+/** Map a tagged service error onto an HTTP status. Kept here next to the
+ *  routes (rather than in the service) because the mapping is a transport
+ *  decision — MCP tools, for example, won't surface a 404 but a tool-error
+ *  envelope. The service stays transport-agnostic by emitting kinds. */
+function statusForIntakeError(error: TaskIntakeError): number {
+  switch (error.kind) {
+    case 'invalid':
+      return 400;
+    case 'not_found':
+      return 404;
+    case 'forgejo_failure':
+      return 500;
   }
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v);
-    return Number.isInteger(n) && n >= 1 ? n : null;
-  }
-  return null;
-}
-
-/** Validate the `agent_profile_id` field from a task create-body. The
- *  field is optional; when present it must be either null (no override)
- *  or a non-empty string referencing an existing profile.
- *
- *  Empty string is treated as "no override" (equivalent to null /
- *  absent). The CreateTask form initializes the field to '' to mean
- *  "inherit from repo/global default", and POSTs the literal '' rather
- *  than omitting the key. Without this normalization the empty string
- *  would land in `validateAgentProfile('')` which would then return
- *  the malformed error "Unknown agent_profile_id: " (no id, dangling
- *  colon). Treating '' as null fixes both the UX and the error shape
- *  in one place. (H5) */
-function validateTaskAgentProfile(
-  raw: unknown
-): { ok: true; value: string | null } | { ok: false; error: string } {
-  if (raw === undefined || raw === null) return { ok: true, value: null };
-  if (typeof raw !== 'string') {
-    return { ok: false, error: 'agent_profile_id must be a string or null' };
-  }
-  const trimmed = raw.trim();
-  if (trimmed === '') return { ok: true, value: null };
-  const v = validateAgentProfile(trimmed, getAgentProfile);
-  if (!v.valid) return { ok: false, error: v.error };
-  return { ok: true, value: trimmed };
 }
 
 export function createTaskRoutes(
@@ -220,154 +196,39 @@ export function createTaskRoutes(
       }
     );
 
-    // POST /api/tasks — create new issue and queue
+    // POST /api/tasks — create new issue and queue.
+    // Thin adapter: hand the raw body to the task-intake service, which
+    // owns validation, Forgejo issue creation, label application, the row
+    // insert with overrides, the dashboard broadcast, and the scheduler
+    // tick. The route only knows how to turn a tagged-union result into
+    // an HTTP response. (The MCP `create_task` tool calls the same
+    // service — they cannot diverge on rules or side effects.)
     app.post('/api/tasks', async (request, reply) => {
-      const body = request.body as Record<string, unknown>;
-      if (!body?.repo_id || !body?.title || !body?.description) {
+      const result = await createTaskService(
+        request.body as Record<string, unknown>,
+        { forgejo, scheduler, log }
+      );
+      if (!result.ok) {
         return reply
-          .status(400)
-          .send({ error: 'Required: repo_id, title, description' });
+          .status(statusForIntakeError(result.error))
+          .send({ error: result.error.message });
       }
-
-      const repoId = asPositiveInt(body.repo_id);
-      if (repoId === null) {
-        return reply.status(400).send({ error: 'repo_id must be a positive integer' });
-      }
-      const repo = getRepo(repoId);
-      if (!repo) return reply.status(404).send({ error: 'Repo not found' });
-
-      if (typeof body.title !== 'string' || typeof body.description !== 'string') {
-        return reply
-          .status(400)
-          .send({ error: 'title and description must be strings' });
-      }
-
-      const profileCheck = validateTaskAgentProfile(body.agent_profile_id);
-      if (!profileCheck.ok) {
-        return reply.status(400).send({ error: profileCheck.error });
-      }
-
-      const maxAttemptsRaw = body.max_attempts;
-      let maxAttempts: number | undefined;
-      if (maxAttemptsRaw !== undefined && maxAttemptsRaw !== null) {
-        const v = asPositiveInt(maxAttemptsRaw);
-        if (v === null) {
-          return reply
-            .status(400)
-            .send({ error: 'max_attempts must be a positive integer' });
-        }
-        maxAttempts = v;
-      }
-
-      // Create the Forgejo issue
-      let issue;
-      try {
-        issue = await forgejo.createIssue(repo, {
-          title: body.title,
-          body: body.description,
-        });
-      } catch (err) {
-        return reply.status(500).send({
-          error: `Failed to create Forgejo issue: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-
-      // Apply labels
-      try {
-        const labelNames = ['status/queued'];
-        if (body.human_merge) labelNames.push('human-merge');
-        if (body.human_review) labelNames.push('human-review');
-        await forgejo.replaceLabelByNames(repo, issue.number, labelNames);
-      } catch {
-        // Best effort
-      }
-
-      // Insert task in DB
-      const task = insertTask({
-        issue_id: issue.number,
-        issue_title: issue.title,
-        repo_id: repoId,
-        status: 'queued',
-        max_attempts: maxAttempts,
-        agent_profile_id: profileCheck.value,
-      });
-
-      notifyTaskCreated(task);
-      scheduler.triggerTick();
-      return reply.status(201).send(enrichTask(task));
+      return reply.status(201).send(enrichTask(result.value.task));
     });
 
-    // POST /api/tasks/queue — queue existing issue
+    // POST /api/tasks/queue — queue an issue that already exists in
+    // Forgejo. Same service, sibling entry point.
     app.post('/api/tasks/queue', async (request, reply) => {
-      const body = request.body as Record<string, unknown>;
-      if (!body?.issue_id || !body?.repo_id) {
+      const result = await queueExistingIssueService(
+        request.body as Record<string, unknown>,
+        { forgejo, scheduler, log }
+      );
+      if (!result.ok) {
         return reply
-          .status(400)
-          .send({ error: 'Required: issue_id, repo_id' });
+          .status(statusForIntakeError(result.error))
+          .send({ error: result.error.message });
       }
-
-      const repoId = asPositiveInt(body.repo_id);
-      if (repoId === null) {
-        return reply.status(400).send({ error: 'repo_id must be a positive integer' });
-      }
-      const repo = getRepo(repoId);
-      if (!repo) return reply.status(404).send({ error: 'Repo not found' });
-
-      const issueId = asPositiveInt(body.issue_id);
-      if (issueId === null) {
-        return reply
-          .status(400)
-          .send({ error: 'issue_id must be a positive integer' });
-      }
-
-      const profileCheck = validateTaskAgentProfile(body.agent_profile_id);
-      if (!profileCheck.ok) {
-        return reply.status(400).send({ error: profileCheck.error });
-      }
-
-      const maxAttemptsRaw = body.max_attempts;
-      let maxAttempts: number | undefined;
-      if (maxAttemptsRaw !== undefined && maxAttemptsRaw !== null) {
-        const v = asPositiveInt(maxAttemptsRaw);
-        if (v === null) {
-          return reply
-            .status(400)
-            .send({ error: 'max_attempts must be a positive integer' });
-        }
-        maxAttempts = v;
-      }
-
-      // Fetch the issue title from Forgejo
-      let issueTitle: string | null = null;
-      try {
-        const issue = await forgejo.getIssue(repo, issueId);
-        issueTitle = issue.title;
-      } catch {
-        // Best effort — will fall back to "Issue #N" in enrichTask
-      }
-
-      // Apply labels
-      try {
-        const labelNames = ['status/queued'];
-        if (body.human_merge) labelNames.push('human-merge');
-        if (body.human_review) labelNames.push('human-review');
-        await forgejo.replaceLabelByNames(repo, issueId, labelNames);
-      } catch {
-        // Best effort
-      }
-
-      const task = insertTask({
-        issue_id: issueId,
-        issue_title: issueTitle,
-        repo_id: repoId,
-        status: 'queued',
-        max_attempts: maxAttempts,
-        agent_profile_id: profileCheck.value,
-      });
-
-      notifyTaskCreated(task);
-      scheduler.triggerTick();
-      return reply.status(201).send(enrichTask(task));
+      return reply.status(201).send(enrichTask(result.value.task));
     });
 
     // PATCH /api/tasks/:id — task actions

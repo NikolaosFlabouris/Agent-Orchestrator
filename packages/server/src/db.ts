@@ -15,7 +15,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 23;
+const CURRENT_SCHEMA_VERSION = 24;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -243,6 +243,84 @@ function createTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_task_steps_task_attempt
       ON task_steps(task_id, attempt_number);
+
+    -- ---- MCP OAuth (Phase 3 Workstream C) -------------------------------
+    --
+    -- Three tables back the orchestrator's embedded OAuth 2.1 Authorization
+    -- Server for the MCP endpoint (/mcp). The AS issues HS256 JWTs for
+    -- access tokens (stateless, validated by signature + aud + exp) and
+    -- opaque rotating refresh tokens (stateful, looked up here). DCR
+    -- (RFC 7591) clients land in mcp_oauth_clients; one-time-use
+    -- authorization codes live in mcp_oauth_codes; refresh tokens in
+    -- mcp_oauth_refresh, indexed by family for chain-revocation on reuse.
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+      -- Random opaque id issued by /mcp/oauth/register. Presented by the
+      -- client on every authorize + token request.
+      client_id TEXT PRIMARY KEY,
+      client_name TEXT,
+      -- JSON array of redirect URIs registered at DCR time. Application
+      -- layer enforces loopback-only (http://127.0.0.1:PORT/callback or
+      -- http://localhost:PORT/callback) — see RFC 8252.
+      redirect_uris TEXT NOT NULL CHECK(json_valid(redirect_uris)),
+      -- "native" is the only value accepted today. Stored for forward
+      -- compatibility with future client types (web, browser-based).
+      application_type TEXT NOT NULL DEFAULT 'native',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_codes (
+      -- The authorization code itself (opaque random, ~32 bytes). PK
+      -- so the token endpoint can look up + consume in one statement.
+      code TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES mcp_oauth_clients(client_id) ON DELETE CASCADE,
+      -- Redirect URI used in the authorize request — RFC 6749 §4.1.3
+      -- mandates exact match on token-exchange.
+      redirect_uri TEXT NOT NULL,
+      -- PKCE S256-encoded challenge. The token endpoint verifies
+      -- BASE64URL(SHA256(code_verifier)) === code_challenge.
+      code_challenge TEXT NOT NULL,
+      -- Resource indicator (RFC 8707) the issued access token will be
+      -- audience-bound to. The token endpoint requires the resource
+      -- parameter to match this value.
+      resource TEXT NOT NULL,
+      -- Forgejo user login resolved from the orchestrator session
+      -- cookie at authorize time. Propagates to the access JWT's sub
+      -- claim — this is the identity the resulting token represents.
+      forgejo_user_login TEXT NOT NULL,
+      -- ISO timestamp; codes expire ~60s after issue.
+      expires_at TEXT NOT NULL,
+      -- One-time-use marker. NULL = consumable; set on successful
+      -- redemption. A second presentation of a consumed code is an
+      -- error (and a strong signal of theft).
+      consumed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_codes_expires ON mcp_oauth_codes(expires_at);
+
+    CREATE TABLE IF NOT EXISTS mcp_oauth_refresh (
+      -- Opaque refresh token value (~32 bytes random). PK.
+      token_id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES mcp_oauth_clients(client_id) ON DELETE CASCADE,
+      -- Refresh-token family. All refresh tokens descending from the
+      -- same authorization_code grant share a single family_id; each
+      -- rotation propagates it. On reuse-detection (a previously-
+      -- revoked or rotated-out token presented again), every row with
+      -- this family_id is revoked — the entire client session is
+      -- invalidated and the client must re-authorize.
+      family_id TEXT NOT NULL,
+      forgejo_user_login TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      scope TEXT,
+      issued_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL,
+      -- ISO timestamp when this token was rotated out OR a reuse was
+      -- detected on it. A revoked token cannot be exchanged.
+      revoked_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_family ON mcp_oauth_refresh(family_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_client ON mcp_oauth_refresh(client_id);
   `);
 }
 
@@ -335,6 +413,47 @@ function runMigrations(db: Database.Database): void {
         // Idempotent: same INSERT OR IGNORE statements seedBootstrap
         // uses, so re-applying on a hand-edited DB is harmless.
         seedClaudeSubscription(db);
+      }
+      if (version < 24) {
+        // v24: add the three MCP OAuth tables (mcp_oauth_clients /
+        // mcp_oauth_codes / mcp_oauth_refresh) that back the embedded
+        // Authorization Server at /mcp/oauth/*. createTables already
+        // contains the canonical shape with IF NOT EXISTS; the
+        // migration just re-runs the same DDL idempotently for
+        // existing installs that didn't go through a fresh boot.
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+            client_id TEXT PRIMARY KEY,
+            client_name TEXT,
+            redirect_uris TEXT NOT NULL CHECK(json_valid(redirect_uris)),
+            application_type TEXT NOT NULL DEFAULT 'native',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          CREATE TABLE IF NOT EXISTS mcp_oauth_codes (
+            code TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES mcp_oauth_clients(client_id) ON DELETE CASCADE,
+            redirect_uri TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            forgejo_user_login TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_mcp_oauth_codes_expires ON mcp_oauth_codes(expires_at);
+          CREATE TABLE IF NOT EXISTS mcp_oauth_refresh (
+            token_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES mcp_oauth_clients(client_id) ON DELETE CASCADE,
+            family_id TEXT NOT NULL,
+            forgejo_user_login TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            scope TEXT,
+            issued_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_family ON mcp_oauth_refresh(family_id);
+          CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_client ON mcp_oauth_refresh(client_id);
+        `);
       }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"

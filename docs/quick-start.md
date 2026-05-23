@@ -129,6 +129,38 @@ Track progress in the UI:
 - **Task Detail** streams the agent's live output and lists each attempt with the snapshotted harness id and model id.
 - Forgejo shows the new branch `agent/issue-N-*`, a PR, and an audit-trail comment stream on the issue.
 
+## 7. (Optional) Connect Claude Code via MCP
+
+The orchestrator can expose its task-creation surface as a Model Context Protocol server so developers can create and queue tasks from any project without Forgejo credentials, Docker access, or repo checkouts on their machines. Configuration is OAuth-delegated through the same Forgejo OAuth app the UI uses — no new IdP.
+
+**Operator side (in `.env`):**
+
+```bash
+MCP_ENABLED=1
+# Optional: explicit dedicated signing key. If omitted, the orchestrator
+# derives one from COOKIE_SECRET via HKDF (zero-config, equivalent strength).
+MCP_OAUTH_SIGNING_SECRET=$(openssl rand -hex 32)
+```
+
+Restart the orchestrator. For LAN-exposed deployments, terminate TLS at a reverse proxy and set `ORCHESTRATOR_URL=https://...` — OAuth Authorization Server endpoints require HTTPS off-loopback. Same-host `http://localhost:8081` development works without TLS.
+
+**Developer side (per machine, one-time):**
+
+```bash
+# 1. Add this repo as a Claude Code marketplace.
+claude plugin marketplace add <git-host>/<owner>/agent-orchestration
+
+# 2. Install the plugin into user scope.
+claude plugin install agent-orchestrator@agent-orchestrator
+
+# 3. Configure the orchestrator URL (default http://localhost:8081).
+#    /plugin in any Claude Code session → select agent-orchestrator → Configure.
+```
+
+First invocation of `/agent-orchestrator:create-task` triggers a browser-delegated OAuth login (Dynamic Client Registration + PKCE, routed through the orchestrator's existing Forgejo login). Claude Code stores and refreshes the resulting bearer token transparently; the developer never sees a credential.
+
+See [13 - MCP Endpoint](./13-mcp-endpoint.md) for the full operator runbook (rotation, revocation, troubleshooting, security model).
+
 ## Troubleshooting
 
 - **"Agent profile 'X' not found"** — the repo or task references a profile id that no longer exists. Reassign via Settings > Repositories or Settings > Agent Profiles.

@@ -1,0 +1,21 @@
+{
+  "name": "agent-orchestrator",
+  "version": "0.1.0",
+  "description": "Create and queue Agent Orchestrator tasks from any project via the orchestrator's MCP endpoint. Claude Code handles OAuth (DCR + PKCE) automatically on first use — no static credentials live in this plugin.",
+  "author": {
+    "name": "Agent Orchestrator"
+  },
+  "homepage": "https://github.com/agent-orchestrator/agent-orchestrator",
+  "repository": "https://github.com/agent-orchestrator/agent-orchestrator",
+  "mcpServers": "./.mcp.json",
+  "commands": "./commands/",
+  "userConfig": {
+    "orchestrator_url": {
+      "type": "string",
+      "title": "Orchestrator URL",
+      "description": "Browser-reachable base URL of the running Agent Orchestrator instance. The plugin's MCP server uses this to reach the orchestrator's /mcp endpoint. Example: http://localhost:8081 for a local docker-compose install on the same machine, or https://orchestrator.example.com for a remote deployment behind TLS termination.",
+      "default": "http://localhost:8081",
+      "required": true
+    }
+  }
+}

@@ -6,6 +6,13 @@ const OAUTH_CLIENT_ID = process.env.FORGEJO_OAUTH_CLIENT_ID ?? '';
 const OAUTH_CLIENT_SECRET = process.env.FORGEJO_OAUTH_CLIENT_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
 const COOKIE_NAME = 'orchestrator_session';
+/** Short-lived signed cookie used to round-trip a post-login redirect
+ *  target across the Forgejo OAuth flow. The MCP authorize endpoint
+ *  sets this before bouncing through /auth/login when it finds no
+ *  session; the /auth/callback below reads + clears it and redirects
+ *  to the stored URL. Restricted to safe paths to prevent open-
+ *  redirect abuse (see the `return_to` validation in the callback). */
+const RETURN_TO_COOKIE = 'orchestrator_post_login_return_to';
 
 /** True when the orchestrator should run without OAuth — i.e. OAuth env
  *  vars are missing AND the operator opted in via the dev flag. The
@@ -111,6 +118,30 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
         maxAge: 60 * 60 * 24 * 7, // 7 days
       });
 
+      // Post-login bounce: if a previous request stashed a return-to
+      // target in the `orchestrator_post_login_return_to` cookie
+      // (currently only the MCP authorize endpoint does this), redirect
+      // there instead of the dashboard. Restricted to safe internal
+      // paths to prevent the cookie from being weaponized into an
+      // open-redirect: must start with `/mcp/oauth/authorize?`. The
+      // cookie itself is signed (httpOnly, sameSite=lax), so an
+      // off-origin attacker can't set it; the path check is the
+      // defence-in-depth.
+      const returnToRaw = request.cookies[RETURN_TO_COOKIE];
+      reply.clearCookie(RETURN_TO_COOKIE, { path: '/' });
+      if (returnToRaw) {
+        try {
+          const unsigned = (request as any).unsignCookie(returnToRaw);
+          if (unsigned.valid && typeof unsigned.value === 'string') {
+            if (isSafeReturnTo(unsigned.value)) {
+              return reply.redirect(unsigned.value);
+            }
+          }
+        } catch {
+          // Fall through to default redirect.
+        }
+      }
+
       return reply.redirect('/');
     } catch (err) {
       app.log.error({ event: 'oauth_callback_failed', err }, 'OAuth callback failed');
@@ -192,4 +223,36 @@ function getSession(request: FastifyRequest): SessionData | null {
   } catch {
     return null;
   }
+}
+
+/** Public helper: does this request carry a valid orchestrator
+ *  session cookie? Exported so the MCP authorize endpoint can
+ *  short-circuit to the Forgejo login bounce when the user isn't
+ *  signed in yet. Returns null when the cookie is absent, malformed,
+ *  or its signature doesn't verify. The /api auth hook above uses
+ *  the private `getSession`; this is the same call, exported. */
+export function getSessionFromRequest(
+  request: FastifyRequest
+): SessionData | null {
+  return getSession(request);
+}
+
+/** Name of the short-lived signed cookie used to round-trip a
+ *  post-login return target. Exported so the MCP authorize endpoint
+ *  can set it before redirecting to /auth/login. */
+export const POST_LOGIN_RETURN_TO_COOKIE = RETURN_TO_COOKIE;
+
+/** Allowlist for the post-login redirect target. Keeps the cookie
+ *  from being weaponized into an open-redirect. Today only the MCP
+ *  authorize endpoint sets the cookie, and only its own path is
+ *  honoured. New callers must extend this allowlist deliberately. */
+function isSafeReturnTo(value: string): boolean {
+  // Must be a relative URL (no scheme, no host) anchored at our
+  // known path. Query string allowed; fragment ignored. We reject
+  // anything starting with `//` (protocol-relative) or `http`.
+  if (!value.startsWith('/mcp/oauth/authorize')) return false;
+  if (value.startsWith('//')) return false;
+  // Length cap as belt-and-braces against pathological inputs.
+  if (value.length > 4096) return false;
+  return true;
 }
