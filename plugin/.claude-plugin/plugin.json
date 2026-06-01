@@ -15,7 +15,7 @@
       "title": "Orchestrator URL",
       "description": "Browser-reachable base URL of the running Agent Orchestrator instance. The plugin's MCP server uses this to reach the orchestrator's /mcp endpoint. Example: http://localhost:8081 for a local docker-compose install on the same machine, or https://orchestrator.example.com for a remote deployment behind TLS termination.",
       "default": "http://localhost:8081",
-      "required": true
+      "required": false
     }
   }
 }
