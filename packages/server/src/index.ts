@@ -24,6 +24,7 @@ import { createRepoRoutes } from "./routes/repos.js";
 import { providerRoutes } from "./routes/providers.js";
 import { agentProfileRoutes } from "./routes/agent-profiles.js";
 import { createStatusRoutes } from "./routes/status.js";
+import { createMeRoutes } from "./routes/me.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
 import { createMcpRoutes } from "./routes/mcp.js";
 import { createMcpOAuthRoutes } from "./routes/mcp-oauth.js";
@@ -218,6 +219,11 @@ async function main() {
 
   // -- Webhook endpoint (must be registered before other routes to get raw body parser) --
   await app.register(createWebhookRoutes(forgejo, scheduler));
+
+  // -- Signed-in user identity --
+  // /api/me reads the identity captured at /auth/callback from the
+  // session cookie; the /api/* auth hook above gates it.
+  await app.register(createMeRoutes());
 
   // -- REST API routes --
   await app.register(createTaskRoutes(forgejo, scheduler));

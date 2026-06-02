@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TaskResponse, AgentProfileResponse } from './api.js';
+import type { AuthUser, TaskResponse, AgentProfileResponse } from './api.js';
 import type { HostPool } from './ws.js';
 
 interface Alert {
@@ -27,6 +27,10 @@ interface DashboardState {
   forgejoBaseUrl: string;
   alerts: Alert[];
   resourceVersions: ResourceVersions;
+  /** Signed-in Forgejo user, captured once at startup by the AuthGate
+   *  via GET /api/me. Null when auth is disabled or the userinfo
+   *  lookup failed at login. */
+  user: AuthUser | null;
 
   // Actions
   setSnapshot: (data: {
@@ -48,6 +52,7 @@ interface DashboardState {
   addAlert: (alert: Alert) => void;
   clearAlerts: () => void;
   setAgentProfiles: (profiles: AgentProfileResponse[]) => void;
+  setUser: (user: AuthUser | null) => void;
   /** Bump the version counter for one resource. Called by the WS
    *  handler in Dashboard when a `resource_changed` event arrives. */
   bumpResourceVersion: (resource: keyof ResourceVersions) => void;
@@ -69,6 +74,7 @@ export const useStore = create<DashboardState>((set) => ({
   forgejoBaseUrl: '',
   alerts: [],
   resourceVersions: { providers: 0, models: 0, profiles: 0 },
+  user: null,
 
   setSnapshot: (data) =>
     set({
@@ -109,6 +115,8 @@ export const useStore = create<DashboardState>((set) => ({
   clearAlerts: () => set({ alerts: [] }),
 
   setAgentProfiles: (profiles) => set({ agentProfiles: profiles }),
+
+  setUser: (user) => set({ user }),
 
   bumpResourceVersion: (resource) => {
     // Debounce per-resource (L): coalesce a burst of rapid mutations

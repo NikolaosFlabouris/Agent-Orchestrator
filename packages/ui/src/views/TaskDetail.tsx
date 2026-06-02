@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import type { TaskDetailResponse, AttemptResponse, TaskAction } from '../api.js';
 import { connectDashboardWs, connectOutputWs } from '../ws.js';
 import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
+import { AppHeader } from '../components/AppHeader.js';
 import { Timeline } from '../components/Timeline.js';
 import { filterLogLine } from '../logFilter.js';
 import { useStore } from '../store.js';
@@ -242,49 +243,45 @@ export function TaskDetail() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* Header */}
-      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="flex items-center gap-4">
-              <Link
-                to="/"
-                className="text-blue-400 hover:text-blue-300 text-sm"
-              >
-                &larr; Dashboard
-              </Link>
-              <Link
-                to="/help"
-                className="text-blue-400 hover:text-blue-300 text-sm"
-              >
-                Help
-              </Link>
-              {/* Soft logout — full-page nav, not a Link. */}
+      <AppHeader
+        back={
+          <div className="flex items-center gap-4">
+            <Link
+              to="/"
+              className="text-blue-400 hover:text-blue-300 text-sm"
+            >
+              &larr; Dashboard
+            </Link>
+            <Link
+              to="/help"
+              className="text-blue-400 hover:text-blue-300 text-sm"
+            >
+              Help
+            </Link>
+          </div>
+        }
+        title={
+          <>
+            {forgejoBaseUrl && task.repo ? (
               <a
-                href="/auth/logout"
-                className="text-blue-400 hover:text-blue-300 text-sm"
+                href={`${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-blue-400 font-mono hover:underline"
               >
-                Sign out
+                #{task.issue_id}
               </a>
-            </div>
-            <h1 className="text-xl font-semibold mt-1">
-              {forgejoBaseUrl && task.repo ? (
-                <a
-                  href={`${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="text-blue-400 font-mono hover:underline"
-                >
-                  #{task.issue_id}
-                </a>
-              ) : (
-                <span className="text-blue-400 font-mono">
-                  #{task.issue_id}
-                </span>
-              )}{' '}
-              {task.issue_title}
-            </h1>
-            <div className="text-sm text-gray-400 mt-1 space-x-4">
+            ) : (
+              <span className="text-blue-400 font-mono">
+                #{task.issue_id}
+              </span>
+            )}{' '}
+            {task.issue_title}
+          </>
+        }
+        meta={
+          <>
+            <div className="text-sm text-gray-400 space-x-4">
               {task.repo && (
                 <span>
                   {task.repo.owner}/{task.repo.name}
@@ -345,71 +342,72 @@ export function TaskDetail() {
                 <span className="text-xs text-red-400">{agentProfileError}</span>
               )}
             </div>
+          </>
+        }
+      >
+        <div className="text-right">
+          <div className="flex items-center gap-2 justify-end">
+            <StatusBadge status={task.status} />
+            {task.health === 'orphaned' && <HealthBadge health={task.health} />}
           </div>
-          <div className="text-right">
-            <div className="flex items-center gap-2 justify-end">
-              <StatusBadge status={task.status} />
-              {task.health === 'orphaned' && <HealthBadge health={task.health} />}
-            </div>
-            <div className="text-sm text-gray-400 mt-1 flex items-center gap-2 justify-end">
-              {editingMaxAttempts && MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) ? (
-                <>
-                  <span>Attempt {task.attempt}/</span>
-                  <input
-                    type="number"
-                    min={task.attempt}
-                    value={maxAttemptsDraft ?? ''}
-                    onChange={(e) => {
-                      const v = parseInt(e.target.value, 10);
-                      setMaxAttemptsDraft(Number.isNaN(v) ? null : v);
-                      if (maxAttemptsError) setMaxAttemptsError(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleMaxAttemptsSave();
-                      else if (e.key === 'Escape') cancelEditMaxAttempts();
-                    }}
-                    autoFocus
-                    disabled={maxAttemptsPending}
-                    className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-right"
-                  />
+          <div className="text-sm text-gray-400 mt-1 flex items-center gap-2 justify-end">
+            {editingMaxAttempts && MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) ? (
+              <>
+                <span>Attempt {task.attempt}/</span>
+                <input
+                  type="number"
+                  min={task.attempt}
+                  value={maxAttemptsDraft ?? ''}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setMaxAttemptsDraft(Number.isNaN(v) ? null : v);
+                    if (maxAttemptsError) setMaxAttemptsError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleMaxAttemptsSave();
+                    else if (e.key === 'Escape') cancelEditMaxAttempts();
+                  }}
+                  autoFocus
+                  disabled={maxAttemptsPending}
+                  className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-right"
+                />
+                <button
+                  onClick={handleMaxAttemptsSave}
+                  disabled={maxAttemptsPending}
+                  className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={cancelEditMaxAttempts}
+                  disabled={maxAttemptsPending}
+                  className="text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <span>Attempt {task.attempt}/{task.max_attempts}</span>
+                {MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) && (
                   <button
-                    onClick={handleMaxAttemptsSave}
-                    disabled={maxAttemptsPending}
-                    className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                    onClick={startEditMaxAttempts}
+                    className="text-xs text-blue-400 hover:text-blue-300"
+                    title="Change max attempts"
                   >
-                    Save
+                    Edit
                   </button>
-                  <button
-                    onClick={cancelEditMaxAttempts}
-                    disabled={maxAttemptsPending}
-                    className="text-xs text-gray-500 hover:text-gray-300"
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span>Attempt {task.attempt}/{task.max_attempts}</span>
-                  {MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) && (
-                    <button
-                      onClick={startEditMaxAttempts}
-                      className="text-xs text-blue-400 hover:text-blue-300"
-                      title="Change max attempts"
-                    >
-                      Edit
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-            {maxAttemptsError && (
-              <div className="text-xs text-red-400 mt-1 text-right">
-                {maxAttemptsError}
-              </div>
+                )}
+              </>
             )}
           </div>
+          {maxAttemptsError && (
+            <div className="text-xs text-red-400 mt-1 text-right">
+              {maxAttemptsError}
+            </div>
+          )}
         </div>
-      </header>
+      </AppHeader>
 
       {/* Actions bar */}
       <div className="border-b border-gray-800 bg-gray-900/50 px-6 py-3">

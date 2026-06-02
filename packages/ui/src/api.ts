@@ -23,6 +23,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  // -- Identity --
+  getMe: () => request<MeResponse>('GET', '/api/me'),
+
   // -- Tasks --
   getTasks: (params?: { status?: string; limit?: number }) => {
     const qs = new URLSearchParams();
@@ -119,6 +122,19 @@ export const api = {
 };
 
 // -- Types --
+
+/** Forgejo identity captured at login. Fields are optional because the
+ *  /auth/callback userinfo lookup is best-effort — a session can exist
+ *  with no identity attached. `user` is null when auth is disabled. */
+export interface AuthUser {
+  login?: string;
+  name?: string;
+  avatar_url?: string;
+}
+
+export interface MeResponse {
+  user: AuthUser | null;
+}
 
 export interface TaskResponse {
   id: number;

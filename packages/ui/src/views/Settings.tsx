@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { AppHeader } from '../components/AppHeader.js';
 import { GlobalSettings } from './Settings/GlobalSettings.js';
 import { RepoSettings } from './Settings/RepoSettings.js';
 import { ProviderSettings } from './Settings/ProviderSettings.js';
@@ -30,26 +31,18 @@ export function Settings() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div className="flex items-center justify-between">
+      <AppHeader
+        back={
           <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
             &larr; Dashboard
           </Link>
-          <div className="flex items-center gap-4">
-            <Link to="/help" className="text-blue-400 hover:text-blue-300 text-sm">
-              Help
-            </Link>
-            {/* Soft logout — full-page nav, not a Link. */}
-            <a
-              href="/auth/logout"
-              className="text-blue-400 hover:text-blue-300 text-sm"
-            >
-              Sign out
-            </a>
-          </div>
-        </div>
-        <h1 className="text-xl font-semibold mt-1">Settings</h1>
-      </header>
+        }
+        title="Settings"
+      >
+        <Link to="/help" className="text-blue-400 hover:text-blue-300 text-sm">
+          Help
+        </Link>
+      </AppHeader>
 
       <main className="mx-auto max-w-4xl px-6 py-6">
         <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit">

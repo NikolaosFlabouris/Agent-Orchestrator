@@ -1,29 +1,26 @@
 import { Link } from 'react-router-dom';
+import { AppHeader } from '../components/AppHeader.js';
 
 export function Help() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div className="flex items-center justify-between">
+      <AppHeader
+        back={
           <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
             &larr; Dashboard
           </Link>
-          {/* Soft logout — full-page nav, not a Link. */}
-          <a
-            href="/auth/logout"
-            className="text-blue-400 hover:text-blue-300 text-sm"
-          >
-            Sign out
-          </a>
-        </div>
-        <h1 className="text-xl font-semibold mt-1">Help &amp; Usage Guide</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          How to configure and drive the orchestrator from this UI. For host-side
-          bring-up (Docker, compose, <code className="font-mono">.env</code>,
-          building images, Forgejo OAuth / webhook secret), see{' '}
-          <code className="font-mono">docs/quick-start.md</code> in the repo.
-        </p>
-      </header>
+        }
+        title="Help & Usage Guide"
+        meta={
+          <p className="text-sm text-gray-400">
+            How to configure and drive the orchestrator from this UI. For
+            host-side bring-up (Docker, compose,{' '}
+            <code className="font-mono">.env</code>, building images, Forgejo
+            OAuth / webhook secret), see{' '}
+            <code className="font-mono">docs/quick-start.md</code> in the repo.
+          </p>
+        }
+      />
 
       <main className="mx-auto max-w-4xl px-6 py-6 grid grid-cols-[200px_1fr] gap-8">
         <TableOfContents />
