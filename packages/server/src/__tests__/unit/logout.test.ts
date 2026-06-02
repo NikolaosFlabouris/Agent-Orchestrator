@@ -88,6 +88,33 @@ describe('POST /auth/logout', () => {
     }
   });
 
+  it('clears the cookie and redirects for a real form submit (urlencoded content-type)', async () => {
+    // A browser <form method="post"> sends application/x-www-form-urlencoded
+    // by default, even with an empty body. The route's context must have a
+    // parser for that content-type or Fastify 415s before the handler runs.
+    // This is the regression guard for that 415.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = await buildLogoutApp();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/logout',
+        headers: {
+          cookie: signedSessionCookie(VALID_SESSION),
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        payload: '',
+      });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe('/signed-out');
+      expect(clearsSessionCookie(res.headers['set-cookie'])).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('attempts RFC 7009 revocation for both the refresh and access token', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetchMock);

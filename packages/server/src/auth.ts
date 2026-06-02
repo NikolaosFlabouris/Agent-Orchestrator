@@ -258,10 +258,13 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
  * no session cookie, so the handler runs without a session and the
  * attacker's POST is a no-op for the victim. No CSRF token needed.
  *
- * The handler reads nothing from the request body, so the Sign out
- * control can POST with no body at all (a body-less form or a fetch
- * POST that then navigates to /signed-out) — no global urlencoded
- * body parser is required for it to work.
+ * The handler reads nothing from the request body, but a browser form
+ * submit sends `application/x-www-form-urlencoded` by default (even with
+ * an empty body), and Fastify rejects a POST whose Content-Type has no
+ * registered parser with a 415 *before* the handler runs — regardless of
+ * whether the handler touches the body. So the route's context must have
+ * a urlencoded parser. We register one scoped to an encapsulated plugin
+ * (mirroring routes/mcp-oauth.ts) rather than polluting the root context.
  *
  * Logout stays soft: we best-effort revoke the OAuth tokens at Forgejo
  * so they don't remain valid server-side until natural expiry, then
@@ -270,13 +273,33 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
  * Forgejo.
  */
 export function registerLogoutRoute(app: FastifyInstance): void {
-  app.post('/auth/logout', async (request, reply) => {
-    const session = getSession(request);
-    if (session) {
-      await revokeForgejoTokens(app, session);
-    }
-    reply.clearCookie(COOKIE_NAME, { path: '/' });
-    return reply.redirect('/signed-out');
+  void app.register(async (scoped) => {
+    // The Sign out control is an HTML <form method="post">, which the
+    // browser submits as application/x-www-form-urlencoded. The handler
+    // ignores the parsed value, but Fastify still needs a parser for that
+    // content-type registered in this context or it 415s before the
+    // handler runs. Scoped to this plugin so the root context keeps only
+    // the default JSON/text parsers.
+    scoped.addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'string' },
+      (_req, body, done) => {
+        try {
+          done(null, Object.fromEntries(new URLSearchParams(body as string)));
+        } catch (err) {
+          done(err as Error, undefined);
+        }
+      }
+    );
+
+    scoped.post('/auth/logout', async (request, reply) => {
+      const session = getSession(request);
+      if (session) {
+        await revokeForgejoTokens(app, session);
+      }
+      reply.clearCookie(COOKIE_NAME, { path: '/' });
+      return reply.redirect('/signed-out');
+    });
   });
 }
 
