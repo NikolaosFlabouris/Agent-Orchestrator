@@ -5,7 +5,9 @@ const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 const OAUTH_CLIENT_ID = process.env.FORGEJO_OAUTH_CLIENT_ID ?? '';
 const OAUTH_CLIENT_SECRET = process.env.FORGEJO_OAUTH_CLIENT_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
-const COOKIE_NAME = 'orchestrator_session';
+/** Name of the signed, httpOnly session cookie. Exported so tests can
+ *  build a valid session for the logout route. */
+export const COOKIE_NAME = 'orchestrator_session';
 /** Short-lived signed cookie used to round-trip a post-login redirect
  *  target across the Forgejo OAuth flow. The MCP authorize endpoint
  *  sets this before bouncing through /auth/login when it finds no
@@ -178,16 +180,7 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // Logout route — soft logout: clears the orchestrator session
-  // cookie only and lands on the public `/signed-out` page. The
-  // Forgejo SSO session is intentionally left intact, so re-login can
-  // be one click if the user is still signed in upstream. Redirecting
-  // to `/` would 401 against `/api/*` and silently bounce through
-  // Forgejo, making logout look like a no-op.
-  app.get('/auth/logout', async (_request, reply) => {
-    reply.clearCookie(COOKIE_NAME, { path: '/' });
-    return reply.redirect('/signed-out');
-  });
+  registerLogoutRoute(app);
 
   // Auth middleware for /api/* routes
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -248,6 +241,66 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     { event: 'auth_enabled' },
     'OAuth2 authentication enabled'
   );
+}
+
+/**
+ * Registers the `POST /auth/logout` route.
+ *
+ * Pulled out of registerAuth so it can be exercised in isolation by
+ * tests — standing up the full @fastify/oauth2 plugin performs OIDC
+ * discovery against Forgejo at registration time, which we don't want
+ * in a unit test of the logout flow.
+ *
+ * Why POST: a state-changing GET is reachable via a top-level cross-
+ * origin navigation (a hostile link or <img src> would suffice), which
+ * would let any other origin force a logout. POST + `sameSite=lax` on
+ * the session cookie closes that gap: a cross-site form POST carries
+ * no session cookie, so the handler runs without a session and the
+ * attacker's POST is a no-op for the victim. No CSRF token needed.
+ *
+ * The handler reads nothing from the request body, but a browser form
+ * submit sends `application/x-www-form-urlencoded` by default (even with
+ * an empty body), and Fastify rejects a POST whose Content-Type has no
+ * registered parser with a 415 *before* the handler runs — regardless of
+ * whether the handler touches the body. So the route's context must have
+ * a urlencoded parser. We register one scoped to an encapsulated plugin
+ * (mirroring routes/mcp-oauth.ts) rather than polluting the root context.
+ *
+ * Logout stays soft: we best-effort revoke the OAuth tokens at Forgejo
+ * so they don't remain valid server-side until natural expiry, then
+ * clear the cookie. We do NOT bounce through Forgejo's SSO logout —
+ * signing out of the orchestrator must not sign the user out of
+ * Forgejo.
+ */
+export function registerLogoutRoute(app: FastifyInstance): void {
+  void app.register(async (scoped) => {
+    // The Sign out control is an HTML <form method="post">, which the
+    // browser submits as application/x-www-form-urlencoded. The handler
+    // ignores the parsed value, but Fastify still needs a parser for that
+    // content-type registered in this context or it 415s before the
+    // handler runs. Scoped to this plugin so the root context keeps only
+    // the default JSON/text parsers.
+    scoped.addContentTypeParser(
+      'application/x-www-form-urlencoded',
+      { parseAs: 'string' },
+      (_req, body, done) => {
+        try {
+          done(null, Object.fromEntries(new URLSearchParams(body as string)));
+        } catch (err) {
+          done(err as Error, undefined);
+        }
+      }
+    );
+
+    scoped.post('/auth/logout', async (request, reply) => {
+      const session = getSession(request);
+      if (session) {
+        await revokeForgejoTokens(app, session);
+      }
+      reply.clearCookie(COOKIE_NAME, { path: '/' });
+      return reply.redirect('/signed-out');
+    });
+  });
 }
 
 function getSession(request: FastifyRequest): SessionData | null {
@@ -322,6 +375,66 @@ async function fetchForgejoUser(
       'Forgejo userinfo lookup threw; session will lack identity'
     );
     return null;
+  }
+}
+
+/** Best-effort RFC 7009 revocation against Forgejo's
+ *  `/login/oauth/revoke`. Called on logout so the OAuth tokens stop
+ *  being valid server-side immediately rather than lingering until
+ *  natural expiry. Failure here MUST NOT block logout: a 404 (older
+ *  Forgejo without the endpoint), a network error, or any non-2xx
+ *  response is logged and swallowed. RFC 7009 says one token per
+ *  request, so we issue separate calls for the refresh token and the
+ *  access token. */
+async function revokeForgejoTokens(
+  app: FastifyInstance,
+  session: SessionData
+): Promise<void> {
+  const tokens: Array<{ token: string; hint: 'refresh_token' | 'access_token' }> = [];
+  if (session.refresh_token) {
+    tokens.push({ token: session.refresh_token, hint: 'refresh_token' });
+  }
+  if (session.access_token) {
+    tokens.push({ token: session.access_token, hint: 'access_token' });
+  }
+  for (const { token, hint } of tokens) {
+    try {
+      const body = new URLSearchParams({
+        token,
+        token_type_hint: hint,
+        client_id: OAUTH_CLIENT_ID,
+        client_secret: OAUTH_CLIENT_SECRET,
+      });
+      // Hard deadline so a stalled connection (accepted then hung —
+      // network partition, overloaded Forgejo) can't delay the logout
+      // redirect. The AbortError surfaces as a thrown rejection and is
+      // caught + swallowed below like any other failure.
+      const res = await fetch(`${FORGEJO_URL}/login/oauth/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.status === 404) {
+        // Older Forgejo build without RFC 7009 support — nothing to do.
+        app.log.debug(
+          { event: 'oauth_revoke_unavailable', hint },
+          'Forgejo revocation endpoint not present; skipping'
+        );
+        return;
+      }
+      if (!res.ok) {
+        app.log.debug(
+          { event: 'oauth_revoke_failed', hint, status: res.status },
+          'Forgejo token revocation returned non-2xx; ignoring'
+        );
+      }
+    } catch (err) {
+      app.log.debug(
+        { event: 'oauth_revoke_error', hint, err },
+        'Forgejo token revocation threw; ignoring'
+      );
+    }
   }
 }
 
