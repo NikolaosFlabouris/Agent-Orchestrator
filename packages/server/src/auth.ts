@@ -5,7 +5,9 @@ const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
 const OAUTH_CLIENT_ID = process.env.FORGEJO_OAUTH_CLIENT_ID ?? '';
 const OAUTH_CLIENT_SECRET = process.env.FORGEJO_OAUTH_CLIENT_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
-const COOKIE_NAME = 'orchestrator_session';
+/** Name of the signed, httpOnly session cookie. Exported so tests can
+ *  build a valid session for the logout route. */
+export const COOKIE_NAME = 'orchestrator_session';
 /** Short-lived signed cookie used to round-trip a post-login redirect
  *  target across the Forgejo OAuth flow. The MCP authorize endpoint
  *  sets this before bouncing through /auth/login when it finds no
@@ -178,28 +180,7 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // Logout route — POST only.
-  //
-  // Why POST: a state-changing GET is reachable via a top-level cross-
-  // origin navigation (a hostile link or <img src> would suffice), which
-  // would let any other origin force a logout. POST + `sameSite=lax` on
-  // the session cookie closes that gap: a cross-site form POST carries
-  // no session cookie, so the handler runs without a session and the
-  // attacker's POST is a no-op for the victim. No CSRF token needed.
-  //
-  // Logout stays soft: we best-effort revoke the OAuth tokens at
-  // Forgejo so they don't remain valid server-side until natural
-  // expiry, then clear the cookie. We do NOT bounce through Forgejo's
-  // SSO logout — signing out of the orchestrator must not sign the
-  // user out of Forgejo.
-  app.post('/auth/logout', async (request, reply) => {
-    const session = getSession(request);
-    if (session) {
-      await revokeForgejoTokens(app, session);
-    }
-    reply.clearCookie(COOKIE_NAME, { path: '/' });
-    return reply.redirect('/signed-out');
-  });
+  registerLogoutRoute(app);
 
   // Auth middleware for /api/* routes
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -260,6 +241,43 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     { event: 'auth_enabled' },
     'OAuth2 authentication enabled'
   );
+}
+
+/**
+ * Registers the `POST /auth/logout` route.
+ *
+ * Pulled out of registerAuth so it can be exercised in isolation by
+ * tests — standing up the full @fastify/oauth2 plugin performs OIDC
+ * discovery against Forgejo at registration time, which we don't want
+ * in a unit test of the logout flow.
+ *
+ * Why POST: a state-changing GET is reachable via a top-level cross-
+ * origin navigation (a hostile link or <img src> would suffice), which
+ * would let any other origin force a logout. POST + `sameSite=lax` on
+ * the session cookie closes that gap: a cross-site form POST carries
+ * no session cookie, so the handler runs without a session and the
+ * attacker's POST is a no-op for the victim. No CSRF token needed.
+ *
+ * The handler reads nothing from the request body, so the Sign out
+ * control can POST with no body at all (a body-less form or a fetch
+ * POST that then navigates to /signed-out) — no global urlencoded
+ * body parser is required for it to work.
+ *
+ * Logout stays soft: we best-effort revoke the OAuth tokens at Forgejo
+ * so they don't remain valid server-side until natural expiry, then
+ * clear the cookie. We do NOT bounce through Forgejo's SSO logout —
+ * signing out of the orchestrator must not sign the user out of
+ * Forgejo.
+ */
+export function registerLogoutRoute(app: FastifyInstance): void {
+  app.post('/auth/logout', async (request, reply) => {
+    const session = getSession(request);
+    if (session) {
+      await revokeForgejoTokens(app, session);
+    }
+    reply.clearCookie(COOKIE_NAME, { path: '/' });
+    return reply.redirect('/signed-out');
+  });
 }
 
 function getSession(request: FastifyRequest): SessionData | null {
@@ -364,10 +382,15 @@ async function revokeForgejoTokens(
         client_id: OAUTH_CLIENT_ID,
         client_secret: OAUTH_CLIENT_SECRET,
       });
+      // Hard deadline so a stalled connection (accepted then hung —
+      // network partition, overloaded Forgejo) can't delay the logout
+      // redirect. The AbortError surfaces as a thrown rejection and is
+      // caught + swallowed below like any other failure.
       const res = await fetch(`${FORGEJO_URL}/login/oauth/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body.toString(),
+        signal: AbortSignal.timeout(3000),
       });
       if (res.status === 404) {
         // Older Forgejo build without RFC 7009 support — nothing to do.
