@@ -149,10 +149,15 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // Logout route
+  // Logout route — soft logout: clears the orchestrator session
+  // cookie only and lands on the public `/signed-out` page. The
+  // Forgejo SSO session is intentionally left intact, so re-login can
+  // be one click if the user is still signed in upstream. Redirecting
+  // to `/` would 401 against `/api/*` and silently bounce through
+  // Forgejo, making logout look like a no-op.
   app.get('/auth/logout', async (_request, reply) => {
     reply.clearCookie(COOKIE_NAME, { path: '/' });
-    return reply.redirect('/');
+    return reply.redirect('/signed-out');
   });
 
   // Auth middleware for /api/* routes

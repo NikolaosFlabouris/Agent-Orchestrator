@@ -259,6 +259,13 @@ export function TaskDetail() {
               >
                 Help
               </Link>
+              {/* Soft logout — full-page nav, not a Link. */}
+              <a
+                href="/auth/logout"
+                className="text-blue-400 hover:text-blue-300 text-sm"
+              >
+                Sign out
+              </a>
             </div>
             <h1 className="text-xl font-semibold mt-1">
               {forgejoBaseUrl && task.repo ? (

@@ -4,9 +4,18 @@ export function Help() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
-          &larr; Dashboard
-        </Link>
+        <div className="flex items-center justify-between">
+          <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
+            &larr; Dashboard
+          </Link>
+          {/* Soft logout — full-page nav, not a Link. */}
+          <a
+            href="/auth/logout"
+            className="text-blue-400 hover:text-blue-300 text-sm"
+          >
+            Sign out
+          </a>
+        </div>
         <h1 className="text-xl font-semibold mt-1">Help &amp; Usage Guide</h1>
         <p className="text-sm text-gray-400 mt-1">
           How to configure and drive the orchestrator from this UI. For host-side
