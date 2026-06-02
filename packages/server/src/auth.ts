@@ -22,10 +22,26 @@ export function authDisabled(): boolean {
   return !OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET;
 }
 
+/** Forgejo OIDC userinfo we surface to the UI. Captured at /auth/callback
+ *  from the userinfo endpoint and replayed verbatim from the session cookie
+ *  on /api/me so the dashboard never has to round-trip to Forgejo. All
+ *  fields optional because the userinfo call is best-effort — login still
+ *  succeeds with no identity if Forgejo's /login/oauth/userinfo is
+ *  unreachable or returns a partial payload. */
+export interface SessionUser {
+  login?: string;
+  name?: string;
+  avatar_url?: string;
+}
+
 interface SessionData {
   access_token: string;
   refresh_token: string;
   expires_at: number; // Unix timestamp ms
+  /** Optional Forgejo identity captured at login. May be absent if the
+   *  userinfo fetch failed; the silent-refresh path carries this forward
+   *  verbatim so the user chip survives across token rotation. */
+  user?: SessionUser;
 }
 
 /**
@@ -76,10 +92,14 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     return;
   }
 
-  // Register @fastify/oauth2 with Forgejo endpoints
+  // Register @fastify/oauth2 with Forgejo endpoints.
+  // Request OIDC identity scopes so the userinfo endpoint actually
+  // returns login/name/avatar — without `openid`, Forgejo's
+  // /login/oauth/userinfo refuses the request, and the dashboard
+  // can't show who's signed in.
   await app.register(fastifyOAuth2, {
     name: 'forgejoOAuth2',
-    scope: [],
+    scope: ['openid', 'profile'],
     credentials: {
       client: {
         id: OAUTH_CLIENT_ID,
@@ -104,10 +124,19 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
         await oauth2.getAccessTokenFromAuthorizationCodeFlow(request);
 
       const token = tokenResult.token;
+
+      // Best-effort identity lookup against Forgejo's OIDC userinfo
+      // endpoint. A failure here must NOT block login — the session
+      // is still created, just without the user chip. The /api/me
+      // route already tolerates `user` being absent, and the silent
+      // refresh path carries it forward, so once captured it sticks.
+      const user = await fetchForgejoUser(token.access_token, app);
+
       const session: SessionData = {
         access_token: token.access_token,
         refresh_token: token.refresh_token ?? '',
         expires_at: Date.now() + (token.expires_in ?? 3600) * 1000,
+        ...(user ? { user } : {}),
       };
 
       reply.setCookie(COOKIE_NAME, JSON.stringify(session), {
@@ -193,6 +222,12 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
           access_token: newToken.token.access_token,
           refresh_token: newToken.token.refresh_token ?? session.refresh_token,
           expires_at: Date.now() + (newToken.token.expires_in ?? 3600) * 1000,
+          // Carry the captured identity forward verbatim. The refresh
+          // path does NOT re-query Forgejo — identity is set once at
+          // /auth/callback and survives every rotation until the
+          // session cookie is cleared. (Without this the user chip
+          // would vanish silently when an access token expired.)
+          ...(session.user ? { user: session.user } : {}),
         };
 
         reply.setCookie(COOKIE_NAME, JSON.stringify(refreshed), {
@@ -246,6 +281,49 @@ export function getSessionFromRequest(
  *  post-login return target. Exported so the MCP authorize endpoint
  *  can set it before redirecting to /auth/login. */
 export const POST_LOGIN_RETURN_TO_COOKIE = RETURN_TO_COOKIE;
+
+/** Best-effort Forgejo userinfo lookup. Called once at /auth/callback
+ *  to capture {login, name, avatar_url} into the session cookie. A
+ *  failure (network error, non-2xx, malformed JSON) returns null and
+ *  login still completes — see `[[issue-89]]`. Maps OIDC claim names:
+ *  preferred_username→login, name→name, picture→avatar_url. */
+async function fetchForgejoUser(
+  accessToken: string,
+  app: FastifyInstance
+): Promise<SessionUser | null> {
+  try {
+    const res = await fetch(`${FORGEJO_URL}/login/oauth/userinfo`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      app.log.warn(
+        { event: 'oauth_userinfo_failed', status: res.status },
+        'Forgejo userinfo lookup returned non-2xx; session will lack identity'
+      );
+      return null;
+    }
+    const claims = (await res.json()) as {
+      preferred_username?: unknown;
+      name?: unknown;
+      picture?: unknown;
+    };
+    const user: SessionUser = {};
+    if (typeof claims.preferred_username === 'string')
+      user.login = claims.preferred_username;
+    if (typeof claims.name === 'string') user.name = claims.name;
+    if (typeof claims.picture === 'string') user.avatar_url = claims.picture;
+    // If userinfo returned but no usable claims, treat as missing so
+    // the cookie stays empty rather than holding an empty object.
+    if (!user.login && !user.name && !user.avatar_url) return null;
+    return user;
+  } catch (err) {
+    app.log.warn(
+      { event: 'oauth_userinfo_failed', err },
+      'Forgejo userinfo lookup threw; session will lack identity'
+    );
+    return null;
+  }
+}
 
 /** Allowlist for the post-login redirect target. Keeps the cookie
  *  from being weaponized into an open-redirect. Today only the MCP

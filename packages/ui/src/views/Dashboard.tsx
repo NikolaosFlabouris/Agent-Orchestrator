@@ -6,6 +6,7 @@ import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
 import { connectDashboardWs } from '../ws.js';
 import type { DashboardWsEvent, HostPool } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
+import { AppHeader } from '../components/AppHeader.js';
 import { QueueList } from '../components/QueueList.js';
 
 const ACTIVE_STATUSES = new Set([
@@ -153,68 +154,47 @@ export function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* Header */}
-      <header className="sticky top-0 z-20 border-b border-gray-800 bg-gray-900 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold">Agent Orchestrator</h1>
-          <div className="flex items-center gap-6 text-sm">
-            <span className={paused ? 'text-yellow-400' : 'text-green-400'}>
-              {paused ? 'Paused' : 'Running'}
-            </span>
-            <HostPoolDisplay pool={hostPool} />
-            <span>Queue: {queueDepth}</span>
-            <button
-              onClick={async () => {
-                if (paused) {
-                  await api.resume();
-                  setStatus({ paused: false, hostPool, queueDepth });
-                } else {
-                  await api.pause();
-                  setStatus({ paused: true, hostPool, queueDepth });
-                }
-              }}
-              className={`px-3 py-1 rounded text-xs font-medium ${
-                paused
-                  ? 'bg-green-900 text-green-300 hover:bg-green-800'
-                  : 'bg-yellow-900 text-yellow-300 hover:bg-yellow-800'
-              }`}
-            >
-              {paused ? 'Resume' : 'Pause'}
-            </button>
-            <Link
-              to="/settings"
-              className="text-blue-400 hover:text-blue-300"
-            >
-              Settings
-            </Link>
-             <Link
-               to="/help"
-               className="text-blue-400 hover:text-blue-300"
-             >
-               Help
-             </Link>
-             {forgejoBaseUrl && (
-               <a
-                 href={forgejoBaseUrl}
-                 target="_blank"
-                 rel="noreferrer noopener"
-                 className="text-blue-400 hover:text-blue-300"
-               >
-                 Forgejo ↗
-               </a>
-             )}
-             {/* Soft logout — full-page nav to the server endpoint,
-                 which clears the cookie and redirects to /signed-out.
-                 Must be <a>, not <Link>, or the server never sees it. */}
-             <a
-               href="/auth/logout"
-               className="text-blue-400 hover:text-blue-300"
-             >
-               Sign out
-             </a>
-           </div>
-        </div>
-      </header>
+      <AppHeader title="Agent Orchestrator">
+        <span className={paused ? 'text-yellow-400' : 'text-green-400'}>
+          {paused ? 'Paused' : 'Running'}
+        </span>
+        <HostPoolDisplay pool={hostPool} />
+        <span>Queue: {queueDepth}</span>
+        <button
+          onClick={async () => {
+            if (paused) {
+              await api.resume();
+              setStatus({ paused: false, hostPool, queueDepth });
+            } else {
+              await api.pause();
+              setStatus({ paused: true, hostPool, queueDepth });
+            }
+          }}
+          className={`px-3 py-1 rounded text-xs font-medium ${
+            paused
+              ? 'bg-green-900 text-green-300 hover:bg-green-800'
+              : 'bg-yellow-900 text-yellow-300 hover:bg-yellow-800'
+          }`}
+        >
+          {paused ? 'Resume' : 'Pause'}
+        </button>
+        <Link to="/settings" className="text-blue-400 hover:text-blue-300">
+          Settings
+        </Link>
+        <Link to="/help" className="text-blue-400 hover:text-blue-300">
+          Help
+        </Link>
+        {forgejoBaseUrl && (
+          <a
+            href={forgejoBaseUrl}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-blue-400 hover:text-blue-300"
+          >
+            Forgejo ↗
+          </a>
+        )}
+      </AppHeader>
 
        {pools.length > 0 && (
          <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
