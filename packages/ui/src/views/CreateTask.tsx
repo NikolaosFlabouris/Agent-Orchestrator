@@ -110,9 +110,18 @@ export function CreateTask() {
           <Link to="/" className="text-blue-400 hover:text-blue-300 text-sm">
             &larr; Dashboard
           </Link>
-          <Link to="/help" className="text-blue-400 hover:text-blue-300 text-sm">
-            Help
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link to="/help" className="text-blue-400 hover:text-blue-300 text-sm">
+              Help
+            </Link>
+            {/* Soft logout — full-page nav, not a Link. */}
+            <a
+              href="/auth/logout"
+              className="text-blue-400 hover:text-blue-300 text-sm"
+            >
+              Sign out
+            </a>
+          </div>
         </div>
         <h1 className="text-xl font-semibold mt-1">Create Task</h1>
       </header>

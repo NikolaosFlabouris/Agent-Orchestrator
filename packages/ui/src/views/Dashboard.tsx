@@ -203,6 +203,15 @@ export function Dashboard() {
                  Forgejo ↗
                </a>
              )}
+             {/* Soft logout — full-page nav to the server endpoint,
+                 which clears the cookie and redirects to /signed-out.
+                 Must be <a>, not <Link>, or the server never sees it. */}
+             <a
+               href="/auth/logout"
+               className="text-blue-400 hover:text-blue-300"
+             >
+               Sign out
+             </a>
            </div>
         </div>
       </header>

@@ -6,11 +6,15 @@ import { TaskDetail } from './views/TaskDetail.js';
 import { CreateTask } from './views/CreateTask.js';
 import { Settings } from './views/Settings.js';
 import { Help } from './views/Help.js';
+import { SignedOut } from './views/SignedOut.js';
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Public route — must NOT call /api/* or it will trip the
+            401-redirect in api.ts and bounce back into the login flow. */}
+        <Route path="/signed-out" element={<SignedOut />} />
         <Route path="/" element={<Dashboard />} />
         <Route path="/tasks/:id" element={<TaskDetail />} />
         <Route path="/tasks/new" element={<CreateTask />} />
