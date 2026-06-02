@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { useStore } from '../store.js';
+import { SignOutButton } from './SignOutButton.js';
 
 /** Shared sticky topbar used across every authenticated view.
  *  Extracted from the dashboard's header so the signed-in user chip
@@ -36,17 +37,13 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
         <div className="flex items-center gap-6 text-sm flex-shrink-0">
           {children}
           <UserChip />
-          {/* Soft logout — full-page nav to the server endpoint, which
-              clears the session cookie and redirects to /signed-out.
-              Must be <a>, not <Link>, or the server never sees it.
+          {/* Soft logout — a body-less POST form to the server endpoint,
+              which clears the session cookie and redirects to
+              /signed-out. POST (not a GET <a>) so a cross-origin
+              navigation can't force a logout; see SignOutButton.
               Rendered unconditionally (even in auth-disabled dev mode)
               so the control is always reachable. */}
-          <a
-            href="/auth/logout"
-            className="text-blue-400 hover:text-blue-300"
-          >
-            Sign out
-          </a>
+          <SignOutButton />
         </div>
       </div>
     </header>
