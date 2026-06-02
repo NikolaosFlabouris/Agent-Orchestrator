@@ -239,8 +239,17 @@ describe('MCP HTTP transport — bearer validation', () => {
   });
 
   it('returns 401 when the JWT signature is bad', async () => {
-    // Issue a valid token, then twiddle one character of the
-    // signature segment so the HMAC fails.
+    // Issue a valid token, then corrupt the signature so the HMAC
+    // fails. We flip the FIRST character of the signature segment,
+    // NOT the last: a 32-byte HS256 signature base64url-encodes to 43
+    // chars whose final char carries only 4 meaningful bits (the low
+    // 2 are zero padding), so ~1/16 of single-char substitutions there
+    // (e.g. 'U' -> 'X') decode to the SAME bytes — the token still
+    // verifies, sails past the bearer check, and the SDK transport
+    // answers 406 (missing Accept header) instead of 401. That was the
+    // source of an intermittent "expected 406 to be 401" flake. Every
+    // non-final char carries 6 meaningful bits, so flipping the first
+    // one always changes the decoded signature and the HMAC fails.
     const reg = registerClient({
       client_name: 't',
       redirect_uris: ['http://127.0.0.1:9999/cb'],
@@ -250,7 +259,9 @@ describe('MCP HTTP transport — bearer validation', () => {
       forgejo_user_login: 'alice',
       client_id: reg.client.client_id,
     });
-    const tampered = access.access_token.slice(0, -1) + 'X';
+    const [header, payload, signature] = access.access_token.split('.');
+    const flippedSig = (signature[0] === 'A' ? 'B' : 'A') + signature.slice(1);
+    const tampered = `${header}.${payload}.${flippedSig}`;
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: 'POST',
       headers: {
