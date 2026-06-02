@@ -92,29 +92,26 @@ export function deriveStatus(
       );
     }
 
-    // 4. PR exists but is not mergeable — conflicts need human or rebase.
-    if (!pr.mergeable && pr.state === 'open') {
-      // Only escalate if the orchestrator thought it was in a positive state;
-      // if it's already `changes-needed` or mid-rework, leave stored as-is.
-      if (
-        stored === 'in-review' ||
-        stored === 'awaiting-human-merge' ||
-        stored === 'awaiting-human-review'
-      ) {
-        return decide(
-          stored,
-          'awaiting-human-merge',
-          `PR #${pr.number} unmergeable — conflicts await resolution`
-        );
-      }
-    }
-
-    // 5. PR closed (and not merged) while issue is still open — unusual; the
+    // 4. PR closed (and not merged) while issue is still open — unusual; the
     //    human probably closed the PR but intends the task to re-run. Treat
     //    as failed so the UI surfaces it for a reset.
     if (pr.state === 'closed' && !pr.merged) {
       return decide(stored, 'failed', `PR #${pr.number} closed without merge`);
     }
+
+    // NOTE: PR mergeability is deliberately *not* a display signal. While the
+    // orchestrator is actively driving a task (preparing / in-progress /
+    // in-review / changes-needed) it owns conflict resolution: attemptMerge
+    // and the conflict-detector route an unmergeable PR back through the
+    // rebase/rework loop, and a genuinely stuck conflict surfaces as `failed`
+    // once the attempt budget is exhausted. A transient `mergeable === false`
+    // — common in the seconds after a push while Forgejo recomputes the merge
+    // check — must never masquerade as an `awaiting-human-*` handoff the
+    // orchestrator isn't performing. Tasks parked for a human (the label
+    // branches above) keep their own status; the human sees any conflict when
+    // they open the PR. (An earlier revision escalated unmergeable in-review
+    // tasks to `awaiting-human-merge` here, which made tasks flicker to a
+    // human-handoff chip mid-review — see status-derivation.test.ts.)
   }
 
   // 6. No Forgejo override — defer to the orchestrator's stored state. This

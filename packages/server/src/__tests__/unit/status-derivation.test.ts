@@ -153,23 +153,54 @@ describe('deriveStatus', () => {
     });
   });
 
-  describe('unmergeable PR', () => {
-    it('escalates in-review to awaiting-human-merge when the PR is unmergeable', () => {
+  describe('unmergeable PR is not a display signal', () => {
+    // The orchestrator owns conflict resolution (attemptMerge + the
+    // conflict-detector route an unmergeable PR back through rebase/rework,
+    // and a stuck conflict ends up `failed`). A momentary `mergeable: false`
+    // — common right after a push while Forgejo recomputes — must not flip an
+    // actively-driven task to a human-handoff chip.
+    it('keeps in-review when the PR reports unmergeable', () => {
       const task = makeTask({ status: 'in-review', pr_number: 10 });
+      const snapshot = snap({ pr: { state: 'open', mergeable: false } });
+      const result = deriveStatus(task, snapshot);
+      expect(result.status).toBe('in-review');
+      expect(result.overridden).toBe(false);
+    });
+
+    it('keeps changes-needed when the PR reports unmergeable (mid-rebase)', () => {
+      const task = makeTask({ status: 'changes-needed', pr_number: 10 });
+      const snapshot = snap({ pr: { state: 'open', mergeable: false } });
+      expect(deriveStatus(task, snapshot).status).toBe('changes-needed');
+    });
+
+    it('treats unknown mergeability (null) the same — no override', () => {
+      const task = makeTask({ status: 'in-review', pr_number: 10 });
+      const snapshot = snap({ pr: { state: 'open', mergeable: null } });
+      expect(deriveStatus(task, snapshot).status).toBe('in-review');
+    });
+
+    it('leaves awaiting-human-merge as-is rather than re-deriving it', () => {
+      const task = makeTask({ status: 'awaiting-human-merge', pr_number: 10 });
+      const snapshot = snap({ pr: { state: 'open', mergeable: false } });
+      expect(deriveStatus(task, snapshot).status).toBe('awaiting-human-merge');
+    });
+
+    it('does not hide a human-review handoff behind an unmergeable PR', () => {
+      // human-review label present + unmergeable PR: the human still needs to
+      // review, so the chip must stay awaiting-human-review (the old rule
+      // wrongly rewrote this to awaiting-human-merge).
+      const task = makeTask({ status: 'awaiting-human-review', pr_number: 10 });
       const snapshot = snap({
+        issue: { labels: ['human-review'] },
         pr: { state: 'open', mergeable: false },
       });
-      const result = deriveStatus(task, snapshot);
-      expect(result.status).toBe('awaiting-human-merge');
+      expect(deriveStatus(task, snapshot).status).toBe('awaiting-human-review');
     });
 
     it('does not escalate queued — the orchestrator has not started yet', () => {
       const task = makeTask({ status: 'queued', pr_number: 10 });
-      const snapshot = snap({
-        pr: { state: 'open', mergeable: false },
-      });
-      const result = deriveStatus(task, snapshot);
-      expect(result.status).toBe('queued');
+      const snapshot = snap({ pr: { state: 'open', mergeable: false } });
+      expect(deriveStatus(task, snapshot).status).toBe('queued');
     });
   });
 

@@ -40,7 +40,12 @@ export interface SnapshotPr {
   number: number;
   state: string;          // 'open' | 'closed'
   merged: boolean;
-  mergeable: boolean;
+  /** Forgejo's computed mergeability. `null` = not yet determined (Forgejo
+   *  recomputes asynchronously after a push, so a fresh PR reports null/false
+   *  before the check settles). Mirrors the tri-state in conflict-detector.ts.
+   *  Carried for diagnostics; `deriveStatus` intentionally does not act on it
+   *  (conflicts are the orchestrator's concern, not a display concern). */
+  mergeable: boolean | null;
   draft: boolean;
 }
 
@@ -210,13 +215,10 @@ export async function warmRepoSnapshots(
           number: prData.number,
           state: prData.state,
           merged: Boolean(prData.merged),
-          // Forgejo's pulls list endpoint computes `mergeable` server-side
-          // but it can be undefined for very fresh PRs. Treat undefined as
-          // mergeable=true so we don't spuriously escalate to
-          // awaiting-human-merge — the next webhook invalidation triggers a
-          // per-task refresh that gets the authoritative value.
-          mergeable:
-            prData.mergeable === undefined ? true : Boolean(prData.mergeable),
+          // Preserve "not yet determined" as null rather than collapsing it
+          // to a boolean. Forgejo's list endpoint can omit `mergeable` for
+          // very fresh PRs; the per-task fetch path treats it identically.
+          mergeable: prData.mergeable ?? null,
           draft: Boolean((prData as { draft?: boolean }).draft),
         };
       }
@@ -287,7 +289,8 @@ async function fetchSnapshot(
         number: prData.number,
         state: prData.state,
         merged: Boolean(prData.merged),
-        mergeable: Boolean(prData.mergeable),
+        // null = Forgejo hasn't computed mergeability yet (see SnapshotPr).
+        mergeable: prData.mergeable ?? null,
         draft: Boolean((prData as { draft?: boolean }).draft),
       };
     } catch {
