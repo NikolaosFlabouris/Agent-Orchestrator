@@ -53,7 +53,7 @@ The orchestrator and agent containers share Machine B because the orchestrator m
 
 ## Task Lifecycle Summary
 
-1. User creates a task via the web UI (creates a Forgejo issue or queues an existing one)
+1. User creates a task via the web UI — or over the [MCP endpoint](./13-mcp-endpoint.md) from a Claude Code client — which creates a Forgejo issue or queues an existing one
 2. Orchestrator claims the task (assigns to service account, relabels)
 3. Orchestrator prepares workspace (clone/fetch, create branch, assemble prompt)
 4. Orchestrator starts agent container (mounts workspace, injects task)
@@ -64,6 +64,13 @@ The orchestrator and agent containers share Machine B because the orchestrator m
 9. If approved: orchestrator merges the PR and closes the issue
 10. If rejected: orchestrator posts feedback and relaunches the dev agent (up to max attempts)
 11. Slot is freed, next queued task is picked up
+
+## Task Intake Surfaces
+
+Tasks reach the queue through two surfaces, both of which converge on the same Forgejo-issue-backed task record:
+
+1. **Web UI** — the primary surface. Create a task (new issue or existing one) and configure overrides from the browser.
+2. **MCP endpoint** (`/mcp`, optional, gated by `MCP_ENABLED=1`) — the orchestrator exposes "create and queue a task" as a Model Context Protocol tool, consumed by the bundled Claude Code plugin. Developers can queue tasks from any project with no Forgejo credentials, Docker access, or repo checkout on their machine. The endpoint is OAuth 2.1-protected: the orchestrator is both the MCP Resource Server and the Authorization Server, reusing the existing Forgejo-OAuth UI login for human identity. See [13 - MCP Endpoint](./13-mcp-endpoint.md).
 
 ## Related Documents
 
@@ -77,4 +84,8 @@ The orchestrator and agent containers share Machine B because the orchestrator m
 - [08 - Technology Stack](./08-technology-stack.md)
 - [09 - Testing Strategy](./09-testing-strategy.md)
 - [10 - Implementation Plan](./10-implementation-plan.md)
-- [11 - TODO](./11-todo.md)
+- [11 - End-to-End Test Plan](./11-e2e-test-plan.md)
+- [12 - TODO](./12-todo.md)
+- [13 - MCP Endpoint](./13-mcp-endpoint.md)
+- [Agent Profiles, Harnesses, Providers & Models](./Agents.md)
+- [Quick Start](./quick-start.md)

@@ -317,7 +317,12 @@ CREATE TABLE attempts (
   -- Stored on the attempt so audit records survive subsequent edits to the
   -- agent profile, model row, or any of the upstream FK targets.
   model_id TEXT,
-  harness_id TEXT
+  harness_id TEXT,
+  -- Snapshot of profile.timeout_minutes at attempt-launch time (added in
+  -- schema v22). Lets the stuck-task alert and the orchestrator-side
+  -- timeout kill use the threshold in effect at launch rather than a live
+  -- profile read; consumers fall back to a live read when this is NULL.
+  timeout_minutes_snapshot INTEGER
   -- Historical note: schema v14 dropped cost / token tracking
   -- (input_tokens, output_tokens, cost_usd columns plus the model_pricing
   -- setting and dashboard daily-cost tile). The harness layer recorded the
@@ -419,37 +424,79 @@ CREATE TABLE agent_profiles (
 CREATE INDEX idx_agent_profiles_model_pk ON agent_profiles(model_pk);
 ```
 
+The embedded MCP Authorization Server adds three further tables —
+`mcp_oauth_clients` (DCR registrations), `mcp_oauth_codes` (PKCE-bound
+authorization codes), and `mcp_oauth_refresh` (rotating refresh-token
+families) — introduced in schema v24. Their full DDL and token model live
+in [13 - MCP Endpoint](./13-mcp-endpoint.md); they are independent of the
+task-orchestration tables above.
+
 ### Schema Versioning
 
 The `settings` table contains a `schema_version` row that the orchestrator
 bumps as it applies migrations. On startup it checks the current version
 and runs any pending migrations sequentially. The current version is
-`21` — the v21 migration replaced the legacy `agent_tools` row with the
-three-layer `providers` / `models` / `agent_profiles` composition,
-swapped `tasks.agent_tool` + `tasks.model` for `tasks.agent_profile_id`,
-swapped `repos.agent_tool` for `repos.agent_profile_id`, renamed
-`attempts.model` to `attempts.model_id`, added `attempts.harness_id`,
-dropped `settings.default_model` in favour of
-`settings.default_agent_profile_id`, and seeded a bootstrap
-Anthropic-Sonnet Claude SDK profile so a fresh install with
+**`24`**.
+
+A fresh install does **not** replay the historical migration chain. The
+original 21-step chain was collapsed into a single `createTables` block
+(commit `7e5fe33`), so a new database is created directly at the current
+shape and stamped with `CURRENT_SCHEMA_VERSION`. v21 is therefore the
+baseline (`MIN_MIGRATABLE_VERSION`); only forward migrations from v21 live
+as `if (version < N)` blocks. The orchestrator refuses to boot against a DB
+whose `schema_version` is **newer** than it supports (binary was
+downgraded) or **older** than `MIN_MIGRATABLE_VERSION` (no migration code
+present — reset the DB or restore a newer backup).
+
+The v21 baseline replaced the legacy `agent_tools` row with the three-layer
+`providers` / `models` / `agent_profiles` composition, swapped
+`tasks.agent_tool` + `tasks.model` for `tasks.agent_profile_id`, swapped
+`repos.agent_tool` for `repos.agent_profile_id`, renamed `attempts.model`
+to `attempts.model_id`, added `attempts.harness_id`, dropped
+`settings.default_model` in favour of `settings.default_agent_profile_id`,
+and seeded a bootstrap Claude SDK profile so a fresh install with
 `ANTHROPIC_API_KEY` set in `.env` boots into a usable state.
 
+Forward migrations since the baseline:
+
+| Version | Change |
+|---|---|
+| `22` | Add `attempts.timeout_minutes_snapshot` — snapshots `profile.timeout_minutes` onto the attempt row so the stuck-task alert (and the orchestrator-side timeout kill) uses the threshold in effect at launch, not the live profile value. Nullable; consumers fall back to a live read when absent. |
+| `23` | Seed the **Claude Subscription** provider (kind `claude-subscription`), three Claude models, and a ready-to-use `default-claude-code-subscription` profile pairing the `claude-code` harness with Sonnet. Operators with an Anthropic Pro/Max subscription set `CLAUDE_CODE_OAUTH_TOKEN` and switch to it — no manual provider authoring needed. Idempotent (`INSERT OR IGNORE`). |
+| `24` | Add the three **MCP OAuth** tables (`mcp_oauth_clients`, `mcp_oauth_codes`, `mcp_oauth_refresh`) backing the embedded Authorization Server at `/mcp/oauth/*`. Idempotent `CREATE TABLE IF NOT EXISTS` DDL for existing installs (fresh installs get them via `createTables`). |
+
 ```typescript
-const CURRENT_SCHEMA_VERSION = 21;
+const CURRENT_SCHEMA_VERSION = 24;
+const MIN_MIGRATABLE_VERSION = 21;
 
 function runMigrations(db: Database) {
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'schema_version'").get();
-  const version = row ? parseInt(row.value, 10) : 0;
+  const version = readSchemaVersion(db); // 0 if no row → fresh install
 
-  if (version < 1) {
+  if (version === 0) {
+    // Fresh install: createTables already produced the current shape.
+    // Seed settings + bootstrap providers/models/profile, then stamp the
+    // current version — all in one transaction (rolls back on any throw).
     seedDefaultSettings(db);
-    db.exec("UPDATE settings SET value = '1' WHERE key = 'schema_version'");
+    seedBootstrapProfile(db);
+    setSchemaVersion(db, CURRENT_SCHEMA_VERSION);
+    return;
   }
 
-  // Each subsequent migration is a `if (version < N)` block that ALTERs in
-  // place and bumps schema_version. v21 wraps its work in a transaction so
-  // a crash mid-migration leaves the install at v20 and retries cleanly on
-  // the next boot.
+  if (version > CURRENT_SCHEMA_VERSION) throw new Error("DB newer than binary — downgraded?");
+  if (version < MIN_MIGRATABLE_VERSION) throw new Error("DB predates lowest migratable version");
+
+  // Forward migrations. Each `if (version < N)` block is a single ALTER (or
+  // idempotent DDL/seed) wrapped in one transaction together with the final
+  // schema_version write, so a partial apply rolls back and retries cleanly
+  // on the next boot.
+  if (version < CURRENT_SCHEMA_VERSION) {
+    db.transaction(() => {
+      if (version < 22) { /* ALTER TABLE attempts ADD COLUMN timeout_minutes_snapshot */ }
+      if (version < 23) { /* seedClaudeSubscription(db) */ }
+      if (version < 24) { /* CREATE TABLE IF NOT EXISTS mcp_oauth_* */ }
+      setSchemaVersion(db, CURRENT_SCHEMA_VERSION);
+    })();
+  }
 }
 ```
 
@@ -459,7 +506,7 @@ All settings keys, their types, and defaults. Seeded on first run by `seedDefaul
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `schema_version` | integer | `21` | Schema migration version |
+| `schema_version` | integer | `24` | Schema migration version |
 | `max_agent_memory_mb` | integer | `20480` | Host memory pool (MB) — sum of per-repo `container_memory_mb` across active tasks may not exceed this |
 | `max_agent_cpu_cores` | integer | `10` | Host CPU pool (cores) — sum of per-repo `container_cpu_cores` across active tasks may not exceed this |
 | `default_agent_profile_id` | string | `default-claude-sdk` | Fallback agent profile when neither task nor repo specifies one. The v21 bootstrap seeds a Claude SDK + Sonnet profile under this id. |
