@@ -3,22 +3,11 @@ import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
   ProviderResponse,
-  ProviderWriteRequest,
   ProviderKind,
   ProviderKindSpec,
   ModelResponse,
 } from '../../api.js';
-
-/** Tri-state for the inline auth_token form control (C1):
- *    - 'keep'    → form omits auth_token from the PATCH body; server
- *                  preserves the stored value untouched.
- *    - 'set'     → operator is typing a replacement; PATCH sends the
- *                  string verbatim.
- *    - 'clear'   → PATCH sends null to remove the stored token.
- *  The literal stored value is never shipped to the client, so the
- *  form can't preselect "edit existing"; replacement is always a fresh
- *  entry into the input. */
-type AuthTokenMode = 'keep' | 'set' | 'clear';
+import { buildProviderSavePayload, type AuthTokenMode } from './providerSavePayload.js';
 
 /** Providers & Models tab — per-provider connection identity (kind,
  *  URL, credential) + nested models list. */
@@ -84,71 +73,27 @@ export function ProviderSettings() {
     if (!editing) return;
     setError(null);
 
-    // Client-side mirrors of the server-side ProviderKindSpec checks so
-    // the operator gets immediate feedback instead of a round trip
-    // returning a 400. The server is still the source of truth.
     const spec = editing.kind
       ? kinds.find((k) => k.kind === editing.kind)
       : undefined;
-    if (spec?.requires_base_url) {
-      const base = (editing.base_url ?? '').trim();
-      if (!base) {
-        setError(`base_url is required for ${spec.display_name} providers`);
-        return;
-      }
-    }
-    // Mid-save snapshot of the auth-token state so we can both validate
-    // and build the request body without re-reading the tri-state.
-    const trimmedDraft = authTokenDraft.trim();
-    if (authTokenMode === 'set' && trimmedDraft.length === 0) {
-      setError(
-        'Auth token cannot be empty — use Clear if you want to remove the stored value.'
-      );
+    // Validation + request-body construction live in a pure helper so the
+    // credential edge-cases stay unit-testable (see providerSavePayload).
+    const result = buildProviderSavePayload({
+      editing,
+      spec,
+      authTokenMode,
+      authTokenDraft,
+    });
+    if ('error' in result) {
+      setError(result.error);
       return;
     }
-    if (spec && !spec.auth_optional) {
-      // "Will this provider have a credential after this save lands?"
-      //   keep  → it has one iff it already had one (has_auth_token=true)
-      //   set   → yes (a non-empty draft, checked above)
-      //   clear → no
-      const willHaveToken =
-        authTokenMode === 'set' ||
-        (authTokenMode === 'keep' && !!editing.has_auth_token);
-      const willHaveEnv = (editing.api_key_env_var ?? '').trim().length > 0;
-      if (!willHaveToken && !willHaveEnv) {
-        setError(
-          `${spec.display_name} providers require a credential. ` +
-            `Set either an inline auth token or an api_key_env_var.`
-        );
-        return;
-      }
-    }
-
-    // Build the request payload. `auth_token` is write-only on the wire
-    // (C1): only include it when the operator actively edited the
-    // tri-state, so "keep" PATCHes don't accidentally clear the stored
-    // value just because the form didn't display it.
-    const payload: ProviderWriteRequest = {
-      display_name: editing.display_name,
-      kind: editing.kind,
-      concurrency_limit: editing.concurrency_limit,
-      base_url: editing.base_url,
-      api_key_env_var: editing.api_key_env_var,
-      notes: editing.notes,
-    };
-    if (authTokenMode === 'set') {
-      payload.auth_token = trimmedDraft;
-    } else if (authTokenMode === 'clear') {
-      payload.auth_token = null;
-    }
-    // 'keep' → field omitted → server preserves existing value via the
-    // PATCH merge in routes/providers.ts.
 
     try {
       if (isNew) {
-        await api.createProvider({ id: editing.id, ...payload });
+        await api.createProvider({ id: editing.id, ...result.payload });
       } else {
-        await api.updateProvider(editing.id!, payload);
+        await api.updateProvider(editing.id!, result.payload);
       }
       setEditing(null);
       setIsNew(false);
