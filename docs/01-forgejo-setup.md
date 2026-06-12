@@ -191,7 +191,7 @@ Details:
   tool's `dependencies` parameter) writes this section through one
   canonical formatter, so the syntax never drifts.
 
-See `13-task-dependencies.md` for the full design.
+See `14-task-dependencies.md` for the full design.
 
 ## OAuth2 Provider Configuration
 

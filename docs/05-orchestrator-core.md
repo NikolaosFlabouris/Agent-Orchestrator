@@ -26,7 +26,7 @@ on TICK (triggered by: webhook event, container exit callback, or 60-second fall
      capacity), re-derive `task_dependencies` rows from the issue body's
      "## Dependencies" checklist and the live state of each referenced
      issue. Full passes are floored to one per 15s (webhook-burst guard);
-     never-evaluated tasks bypass the floor. See 13-task-dependencies.md.
+     never-evaluated tasks bypass the floor. See 14-task-dependencies.md.
 
   2. Fill empty slots (synchronous — runs within the tick)
      While host pool has spare memory AND CPU AND candidates remain:
