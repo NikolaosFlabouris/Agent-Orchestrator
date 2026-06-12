@@ -46,7 +46,7 @@ describe('v24 MCP OAuth table migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('24');
+    expect(v.value).toBe('25');
 
     db.close();
   });
@@ -97,7 +97,7 @@ describe('v24 MCP OAuth table migration', () => {
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('24');
+    expect(versionRow.value).toBe('25');
 
     db.close();
   });

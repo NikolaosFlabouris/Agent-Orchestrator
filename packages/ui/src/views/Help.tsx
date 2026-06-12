@@ -442,10 +442,18 @@ function RepositoriesSection() {
       <SubHeading>Field reference</SubHeading>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2">
         <li>
-          <Code>agent_profile_id</Code> — default agent profile for this
-          repo. Leave blank to inherit{' '}
+          <Code>agent_profile_id</Code> — default implementation-stage
+          agent profile for this repo. Leave blank to inherit{' '}
           <Code>settings.default_agent_profile_id</Code>. Can be
           overridden per-task when queueing.
+        </li>
+        <li>
+          <Code>review_agent_profile_id</Code> — default review-stage
+          agent profile for this repo. Leave blank to inherit the global
+          review default, which itself falls back to the implementation
+          profile (review runs with the same profile that implemented).
+          Useful when a cheap/local model implements and a stronger model
+          reviews. Can be overridden per-task when queueing.
         </li>
         <li>
           <Code>install_steps</Code> — ordered list of typed dependency-install
@@ -531,14 +539,22 @@ function GlobalSettingsSection() {
           the queue stacks up despite headroom.
         </li>
         <li>
-          <Code>default_agent_profile_id</Code> — the fallback agent profile
-          when neither the task nor the repo specifies one. Picker is
-          populated from{' '}
+          <Code>default_agent_profile_id</Code> — the fallback
+          implementation-stage profile when neither the task nor the repo
+          specifies one. Picker is populated from{' '}
           <Link to="/settings" className="text-blue-400 hover:text-blue-300">
             Settings &gt; Agent Profiles
           </Link>
           . The v21 bootstrap seeds this to the Claude SDK + Sonnet
           profile; switch it to whatever your team uses by default.
+        </li>
+        <li>
+          <Code>default_review_agent_profile_id</Code> — the fallback
+          review-stage profile when neither the task nor the repo
+          specifies one. Unset by default: reviews then run with the
+          same profile that implemented. Set it to send every automated
+          review to a stronger model regardless of which profile
+          implements.
         </li>
       </ul>
       <p className="text-xs text-gray-500 mt-3">

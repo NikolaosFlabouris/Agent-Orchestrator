@@ -74,6 +74,27 @@ describe('validateRepoAgentProfile', () => {
       expect(result.error).toMatch(/does not reference/);
     }
   });
+
+  it('names the supplied field in error messages (review default)', () => {
+    const wrongType = validateRepoAgentProfile(
+      42,
+      lookup,
+      'review_agent_profile_id'
+    );
+    expect(wrongType).toEqual({
+      ok: false,
+      error: 'review_agent_profile_id must be a string or null',
+    });
+    const dangling = validateRepoAgentProfile(
+      'does-not-exist',
+      lookup,
+      'review_agent_profile_id'
+    );
+    expect(dangling.ok).toBe(false);
+    if (!dangling.ok) {
+      expect(dangling.error).toMatch(/^review_agent_profile_id 'does-not-exist'/);
+    }
+  });
 });
 
 describe('validateRepoMergeStrategy', () => {

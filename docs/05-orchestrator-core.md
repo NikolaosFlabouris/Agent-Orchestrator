@@ -424,10 +424,10 @@ launch_dev_container(task, feedback=null):
   # 3. Prepare workspace (clone if new, checkout branch)
   prepare_workspace(task)
 
-  # 3. Resolve the agent profile chain and ask the harness to build its
-  #    invocation. If any link in the chain is missing, the launch fails
-  #    here and the task goes back to the queue (caught by the prep
-  #    failure handler).
+  # 3. Resolve the implementation-stage profile chain and ask the harness
+  #    to build its invocation. If any link in the chain is missing, the
+  #    launch fails here and the task goes back to the queue (caught by
+  #    the prep failure handler).
   profile_id = task.agent_profile_id
             || repo.agent_profile_id
             || db.getSetting('default_agent_profile_id')
@@ -524,8 +524,14 @@ launch_review_container(task):
   # 2. Record branch SHA before review (to detect if review agent modifies it)
   task.pre_review_sha = forgejo.get_branch(repo, task.branch_name).commit.sha
 
-  # 3. Resolve the agent profile chain (same as launch_dev_container)
-  profile_id = task.agent_profile_id
+  # 3. Resolve the REVIEW-stage profile chain. Review walks its own
+  #    three tiers first and falls back to the implementation chain when
+  #    none is set — installs without review profiles review with the
+  #    same profile that implemented.
+  profile_id = task.review_agent_profile_id
+            || repo.review_agent_profile_id
+            || db.getSetting('default_review_agent_profile_id')
+            || task.agent_profile_id
             || repo.agent_profile_id
             || db.getSetting('default_agent_profile_id')
   profile  = db.getAgentProfile(profile_id)
@@ -658,6 +664,17 @@ continue_to_review(task):
     relabel: status/awaiting-human-review
     free slot
   else:
+    # Provider-pool gate for the review stage. With per-stage profiles
+    # the review provider can differ from the dev one and may be
+    # saturated; if so, park the task as in-review with no container —
+    # fill_slots picks those up first (Priority 1) with full gating.
+    # The task itself is excluded from the count so a same-provider
+    # review still hands over the slot its dev run held.
+    review_provider = provider_for_stage(task, 'review')
+    if review_provider and pool_saturated(review_provider, excluding: task):
+      db.update_task(task.id, status: 'in-review', container_id: null)
+      log info "task={task.issue_id} event=review_deferred provider={review_provider}"
+      return
     # Start review immediately in the same slot — no queuing.
     # launch_review_container handles relabelling, SHA recording, and container start.
     launch_review_container(task)

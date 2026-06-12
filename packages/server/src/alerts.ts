@@ -3,8 +3,8 @@ import {
   getQueuedTasks,
   getRepo,
   getAgentProfile,
-  getSetting,
   getActiveAttempt,
+  resolveStageProfileId,
 } from './db.js';
 import { getActiveResources } from './queue.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
@@ -90,13 +90,14 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
       thresholdMinutes = active.timeout_minutes_snapshot;
       source = { kind: 'snapshot', attemptId: active.id };
     } else {
-      // Legacy / pre-v22 fallback. Same resolution as scheduler.
+      // Legacy / pre-v22 fallback. Same stage-aware resolution as the
+      // scheduler: the running attempt's role picks the chain; with no
+      // attempt row, derive the stage from the task status.
       const repo = getRepo(task.repo_id);
-      const profileId =
-        task.agent_profile_id ??
-        repo?.agent_profile_id ??
-        getSetting('default_agent_profile_id');
-      const profile = profileId ? getAgentProfile(profileId) : undefined;
+      const stage =
+        active?.role ?? (task.status === 'in-review' ? 'review' : 'develop');
+      const ref = resolveStageProfileId(task, repo, stage);
+      const profile = ref ? getAgentProfile(ref.id) : undefined;
       if (!profile) continue; // profile gone; can't determine threshold
       thresholdMinutes = profile.timeout_minutes;
       source = { kind: 'profile', profileId: profile.id };

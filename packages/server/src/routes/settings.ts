@@ -7,7 +7,19 @@ const EDITABLE_KEYS: SettingsKey[] = [
   'max_agent_memory_mb',
   'max_agent_cpu_cores',
   'default_agent_profile_id',
+  'default_review_agent_profile_id',
 ];
+
+/** Keys holding an agent-profile pointer. Same validation contract:
+ *  null clears, empty string is rejected, a non-empty value must
+ *  reference an existing profile. Clearing the review default is a
+ *  benign state (review falls back to the implementation profile);
+ *  clearing the implementation default is the documented "unset
+ *  default" state the UI warns about. */
+const PROFILE_KEYS = new Set<SettingsKey>([
+  'default_agent_profile_id',
+  'default_review_agent_profile_id',
+]);
 
 const INT_KEYS = new Set<SettingsKey>([
   'max_agent_memory_mb',
@@ -43,13 +55,15 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: `Unknown setting: ${key}` });
       }
 
-      // Special handling for default_agent_profile_id — `null` clears
-      // the stored value, which puts the orchestrator into an
-      // "unset default" state. Tasks without a per-task or repo
-      // override will then refuse to launch with a clear error. The UI
-      // (M2) surfaces this state explicitly, so operators who land in
-      // it via the picker have asked for it.
-      if (key === 'default_agent_profile_id' && value === null) {
+      // Special handling for the profile-pointer keys — `null` clears
+      // the stored value. For default_agent_profile_id that puts the
+      // orchestrator into an "unset default" state: tasks without a
+      // per-task or repo override will refuse to launch with a clear
+      // error; the UI (M2) surfaces this state explicitly, so operators
+      // who land in it via the picker have asked for it. For
+      // default_review_agent_profile_id the cleared state is benign —
+      // review falls back to the implementation profile.
+      if (PROFILE_KEYS.has(key as SettingsKey) && value === null) {
         updateSetting(key as SettingsKey, null);
         continue;
       }
@@ -70,15 +84,14 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      // Validate default_agent_profile_id points at an existing
-      // profile when it's set to a non-null value. Empty string is
-      // rejected — the unset state is reachable only via explicit
-      // null above, not via accidentally-blanked string input.
-      if (key === 'default_agent_profile_id') {
+      // Validate profile-pointer keys point at an existing profile when
+      // set to a non-null value. Empty string is rejected — the unset
+      // state is reachable only via explicit null above, not via
+      // accidentally-blanked string input.
+      if (PROFILE_KEYS.has(key as SettingsKey)) {
         if (!strValue) {
           return reply.status(400).send({
-            error:
-              'default_agent_profile_id cannot be empty string. Pass null to clear.',
+            error: `${key} cannot be empty string. Pass null to clear.`,
           });
         }
         if (!getAgentProfile(strValue)) {

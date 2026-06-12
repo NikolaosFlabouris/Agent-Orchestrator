@@ -6,7 +6,8 @@ import type {
   HostCapacityResponse,
 } from '../../api.js';
 
-/** Global Settings tab — host resource pool + default agent profile. */
+/** Global Settings tab — host resource pool + default agent profiles
+ *  (implementation + review stages). */
 export function GlobalSettings() {
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [profiles, setProfiles] = useState<AgentProfileResponse[]>([]);
@@ -109,7 +110,7 @@ export function GlobalSettings() {
 
       <div>
         <label className="block text-sm font-medium mb-1">
-          Default agent profile
+          Default agent profile (implementation)
         </label>
         {(() => {
           // Pull out the current stored value once so we can detect
@@ -175,6 +176,66 @@ export function GlobalSettings() {
                 <p className="text-xs text-yellow-500 mt-1">
                   ⚠ The stored default points at a profile that no longer
                   exists. Save with a replacement profile selected to
+                  recover.
+                </p>
+              )}
+            </>
+          );
+        })()}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium mb-1">
+          Default review agent profile
+        </label>
+        {(() => {
+          // Same unset/dangling detection as the implementation default
+          // above, minus the unset warning — an unset review default is
+          // the designed fallback (review runs with the implementation
+          // profile), not a misconfiguration.
+          const stored = String(
+            settings.default_review_agent_profile_id ?? ''
+          );
+          const knownIds = new Set(profiles.map((p) => p.id));
+          const isDangling = stored !== '' && !knownIds.has(stored);
+          return (
+            <>
+              <select
+                value={stored}
+                onChange={(e) =>
+                  update(
+                    'default_review_agent_profile_id',
+                    e.target.value === '' ? null : e.target.value
+                  )
+                }
+                className={`w-full bg-gray-900 border rounded px-3 py-2 text-sm ${
+                  isDangling ? 'border-yellow-600' : 'border-gray-700'
+                }`}
+              >
+                <option value="">
+                  (unset — reviews use the implementation profile)
+                </option>
+                {isDangling && (
+                  <option value={stored}>
+                    (dangling — '{stored}' is not in the current profile list;
+                    pick a replacement)
+                  </option>
+                )}
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name} ({p.id})
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Used for the automated review stage when neither the task nor
+                its repo specifies a review profile. Leave unset to review
+                with the same profile that implemented.
+              </p>
+              {isDangling && (
+                <p className="text-xs text-yellow-500 mt-1">
+                  ⚠ The stored review default points at a profile that no
+                  longer exists. Save with a replacement (or unset) to
                   recover.
                 </p>
               )}

@@ -32,7 +32,8 @@ code-defined.
 
 ## Resolution chain
 
-A task launch resolves the profile in this order:
+Each workflow stage resolves its own profile. The implementation
+(develop) stage walks:
 
 ```
 tasks.agent_profile_id
@@ -40,11 +41,35 @@ tasks.agent_profile_id
       ↳ settings.default_agent_profile_id
 ```
 
+The review stage walks its own chain first and falls back to the
+implementation chain when no review profile is configured at any tier
+— so installs that never set a review profile review with the same
+profile that implemented:
+
+```
+tasks.review_agent_profile_id
+  ↳ repos.review_agent_profile_id
+      ↳ settings.default_review_agent_profile_id
+          ↳ <the implementation chain above>
+```
+
+The chains are stage-independent: a task-level implementation override
+does NOT pin the review stage — a global review default still wins for
+review. This is what makes the "cheap local model implements, strong
+cloud model reviews" split a set-and-forget policy.
+
 The scheduler then walks `profile → models[model_pk] → providers[provider_id]`,
 calls `harness.buildInvocation` to produce
 `{ agent_command, config_files, extra_env, resolved_model }`, and writes
 that into the container's `meta.json` along with snapshots of
 `harness_id` and `agent_profile_id` for audit.
+
+Provider concurrency accounting is stage-aware: a task in `in-review`
+counts against its review profile's provider pool. When a dev run
+finishes and the review profile's provider is at its concurrency
+limit, the review is parked (status `in-review`, no container) and
+launched by the scheduler once a slot frees, instead of oversubscribing
+the provider.
 
 ## Shipped harnesses
 
@@ -106,14 +131,21 @@ generation is cheap.
 
 ### Repositories tab
 
-Each repo points at a default `agent_profile_id`. Leave it blank to
-inherit the global default from Global Settings.
+Each repo points at a default implementation `agent_profile_id`. Leave
+it blank to inherit the global default from Global Settings. A repo can
+also set a `review_agent_profile_id` for the review stage — blank means
+inherit the global review default, then the implementation profile.
 
 ### Global Settings tab
 
 `default_agent_profile_id` is the fallback when neither the task nor the
 repo specifies a profile. Set on first-run by the v21 bootstrap (to
 `default-claude-sdk`); change it via this tab.
+
+`default_review_agent_profile_id` is the review-stage counterpart.
+Unset by default — reviews then run with the implementation profile.
+Set it to route every automated review to a specific (typically
+stronger) profile regardless of which profile implements.
 
 ## Provider credentials
 

@@ -100,13 +100,15 @@ For shared cache directories, ownership is set once at creation and persists acr
 
 ### Repository Configuration
 
-Each repository is configured with a default agent profile and an
-ordered list of typed install steps via the Settings UI. The
-`agent_profile_id` selects the harness, model, and provider; it can be
-overridden per task. NULL falls back to
-`settings.default_agent_profile_id`. See [04 - Agent Harness, Profiles,
-Providers & Models](./04-agent-harness.md) for the profile model and the
-resolution chain.
+Each repository is configured with default agent profiles (one per
+workflow stage) and an ordered list of typed install steps via the
+Settings UI. The `agent_profile_id` selects the harness, model, and
+provider for the implementation stage; `review_agent_profile_id` does
+the same for the review stage. Both can be overridden per task. NULL
+falls back to the corresponding global default — and the review chain
+ultimately falls back to the implementation profile. See [04 - Agent
+Harness, Profiles, Providers & Models](./04-agent-harness.md) for the
+profile model and the resolution chains.
 
 ## Dependency Caching
 

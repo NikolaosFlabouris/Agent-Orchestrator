@@ -260,11 +260,16 @@ The `tasks.repo_id` is a foreign key to the `repos` table. All repo-level fields
 The agent-launch configuration is composed from three first-class tables —
 `providers` (connection identity), `models` (provider-scoped model_ids), and
 `agent_profiles` (the operator-composed `(harness_id, model_pk, config_json,
-timeout_minutes)` row that tasks reference). The resolution chain at task
-launch is `tasks.agent_profile_id → repos.agent_profile_id →
+timeout_minutes)` row that tasks reference). Each workflow stage resolves
+its own profile chain at launch. Implementation (develop):
+`tasks.agent_profile_id → repos.agent_profile_id →
 settings.default_agent_profile_id → agent_profiles → models → providers`.
-Harnesses themselves are code-defined (no DB-side registration); a profile
-just names which one of the four shipped harness ids it uses.
+Review: `tasks.review_agent_profile_id → repos.review_agent_profile_id →
+settings.default_review_agent_profile_id → <the implementation chain>` —
+when no review profile is configured anywhere, review runs with the same
+profile that implemented. Harnesses themselves are code-defined (no
+DB-side registration); a profile just names which one of the four shipped
+harness ids it uses.
 
 The issue `title` is not stored in the `tasks` table. The REST API populates `issue_title` from the Forgejo API when practical (single-task endpoints like `GET /api/tasks/:id`), and falls back to a placeholder (`Issue #N`) in list responses to avoid N Forgejo API calls. This avoids stale data if the issue title is edited in Forgejo, at the cost of titles only appearing after the Forgejo API is reachable. The UI can fetch updated titles client-side for display purposes.
 
@@ -288,10 +293,15 @@ CREATE TABLE tasks (
   attempt INTEGER DEFAULT 1,
   max_attempts INTEGER DEFAULT 7,
   prep_failure_count INTEGER DEFAULT 0,
-  -- Per-task profile override. NULL inherits from repos.agent_profile_id,
-  -- which inherits from settings.default_agent_profile_id. RESTRICT on
-  -- delete: operator must reassign or unset before deleting the profile.
+  -- Per-task implementation-stage profile override. NULL inherits from
+  -- repos.agent_profile_id, which inherits from
+  -- settings.default_agent_profile_id. RESTRICT on delete: operator must
+  -- reassign or unset before deleting the profile.
   agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+  -- Per-task review-stage profile override (schema v25). NULL inherits
+  -- from repos.review_agent_profile_id → settings.default_review_agent_
+  -- profile_id → the task's effective implementation profile.
+  review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
   container_id TEXT,
   started_at TEXT,
   completed_at TEXT,
@@ -344,9 +354,13 @@ CREATE TABLE repos (
   owner TEXT NOT NULL,
   name TEXT NOT NULL,
   base_branch TEXT DEFAULT 'main',
-  -- Per-repo default agent profile. NULL falls back to
+  -- Per-repo default implementation-stage profile. NULL falls back to
   -- settings.default_agent_profile_id at task-launch time.
   agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+  -- Per-repo default review-stage profile (schema v25). NULL falls back
+  -- to settings.default_review_agent_profile_id, then the implementation
+  -- profile.
+  review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
   install_steps TEXT NOT NULL DEFAULT '[]',   -- JSON array of typed { kind, cwd?, path? } entries; see InstallStep
   allow_script_steps INTEGER NOT NULL DEFAULT 0,  -- 1 = repo opted in to the `script` install-step kind
   container_memory_mb INTEGER,   -- per-repo override; NULL = use DEFAULT_CONTAINER_MEMORY_MB constant (4096)
@@ -464,9 +478,10 @@ Forward migrations since the baseline:
 | `22` | Add `attempts.timeout_minutes_snapshot` — snapshots `profile.timeout_minutes` onto the attempt row so the stuck-task alert (and the orchestrator-side timeout kill) uses the threshold in effect at launch, not the live profile value. Nullable; consumers fall back to a live read when absent. |
 | `23` | Seed the **Claude Subscription** provider (kind `claude-subscription`), three Claude models, and a ready-to-use `default-claude-code-subscription` profile pairing the `claude-code` harness with Sonnet. Operators with an Anthropic Pro/Max subscription set `CLAUDE_CODE_OAUTH_TOKEN` and switch to it — no manual provider authoring needed. Idempotent (`INSERT OR IGNORE`). |
 | `24` | Add the three **MCP OAuth** tables (`mcp_oauth_clients`, `mcp_oauth_codes`, `mcp_oauth_refresh`) backing the embedded Authorization Server at `/mcp/oauth/*`. Idempotent `CREATE TABLE IF NOT EXISTS` DDL for existing installs (fresh installs get them via `createTables`). |
+| `25` | Add `review_agent_profile_id` to **tasks** and **repos** (per-stage agent profiles). Nullable; existing rows stay NULL so review keeps inheriting the implementation profile. Idempotent via a `pragma_table_info` column-existence guard. The matching `default_review_agent_profile_id` settings key needs no migration (key/value table; absent = unset). |
 
 ```typescript
-const CURRENT_SCHEMA_VERSION = 24;
+const CURRENT_SCHEMA_VERSION = 25;
 const MIN_MIGRATABLE_VERSION = 21;
 
 function runMigrations(db: Database) {
@@ -494,6 +509,7 @@ function runMigrations(db: Database) {
       if (version < 22) { /* ALTER TABLE attempts ADD COLUMN timeout_minutes_snapshot */ }
       if (version < 23) { /* seedClaudeSubscription(db) */ }
       if (version < 24) { /* CREATE TABLE IF NOT EXISTS mcp_oauth_* */ }
+      if (version < 25) { /* ALTER TABLE tasks/repos ADD COLUMN review_agent_profile_id (guarded) */ }
       setSchemaVersion(db, CURRENT_SCHEMA_VERSION);
     })();
   }
@@ -506,10 +522,11 @@ All settings keys, their types, and defaults. Seeded on first run by `seedDefaul
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `schema_version` | integer | `24` | Schema migration version |
+| `schema_version` | integer | `25` | Schema migration version |
 | `max_agent_memory_mb` | integer | `20480` | Host memory pool (MB) — sum of per-repo `container_memory_mb` across active tasks may not exceed this |
 | `max_agent_cpu_cores` | integer | `10` | Host CPU pool (cores) — sum of per-repo `container_cpu_cores` across active tasks may not exceed this |
-| `default_agent_profile_id` | string | `default-claude-sdk` | Fallback agent profile when neither task nor repo specifies one. The v21 bootstrap seeds a Claude SDK + Sonnet profile under this id. |
+| `default_agent_profile_id` | string | `default-claude-sdk` | Fallback implementation-stage profile when neither task nor repo specifies one. The v21 bootstrap seeds a Claude SDK + Sonnet profile under this id. |
+| `default_review_agent_profile_id` | string | *(unset)* | Fallback review-stage profile. Absent by default — review then falls back to the effective implementation profile. |
 | `last_shutdown` | string | `''` | Records how the orchestrator last exited (`graceful` or empty). Used by startup recovery to distinguish clean shutdown from crash. |
 
 Compile-time constants (live in `packages/server/src/constants.ts` — not editable per-install):

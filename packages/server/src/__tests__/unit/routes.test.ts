@@ -404,4 +404,47 @@ describe('Settings routes', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('PATCH /api/settings accepts a valid default_review_agent_profile_id', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: {
+        default_review_agent_profile_id: 'default-claude-code-subscription',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const after = await app.inject({ method: 'GET', url: '/api/settings' });
+    expect(after.json().default_review_agent_profile_id).toBe(
+      'default-claude-code-subscription'
+    );
+  });
+
+  it('PATCH /api/settings rejects a dangling default_review_agent_profile_id', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: { default_review_agent_profile_id: 'does-not-exist' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not found/);
+  });
+
+  it('PATCH /api/settings accepts null default_review_agent_profile_id (clears to implementation fallback)', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: {
+        default_review_agent_profile_id: 'default-claude-code-subscription',
+      },
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: { default_review_agent_profile_id: null },
+    });
+    expect(res.statusCode).toBe(200);
+    const after = await app.inject({ method: 'GET', url: '/api/settings' });
+    expect(after.json().default_review_agent_profile_id).toBeUndefined();
+  });
 });

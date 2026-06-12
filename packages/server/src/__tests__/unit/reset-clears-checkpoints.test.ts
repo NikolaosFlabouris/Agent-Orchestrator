@@ -72,6 +72,7 @@ function task(overrides: Partial<Task> = {}): Task {
     max_attempts: 7,
     prep_failure_count: 0,
     agent_profile_id: null,
+    review_agent_profile_id: null,
     container_id: null,
     started_at: '2026-05-18T11:49:01.387Z',
     completed_at: null,

@@ -68,6 +68,9 @@ export function RepoSettings() {
         const profile = repo.agent_profile_id
           ? profiles.find((p) => p.id === repo.agent_profile_id)
           : null;
+        const reviewProfile = repo.review_agent_profile_id
+          ? profiles.find((p) => p.id === repo.review_agent_profile_id)
+          : null;
         return (
           <div
             key={repo.id}
@@ -84,6 +87,14 @@ export function RepoSettings() {
                     ? `${repo.agent_profile_id} (missing)`
                     : 'inherits global default'}
               </span>
+              {repo.review_agent_profile_id && (
+                <span className="text-gray-500 text-sm ml-3">
+                  review:{' '}
+                  {reviewProfile
+                    ? reviewProfile.display_name
+                    : `${repo.review_agent_profile_id} (missing)`}
+                </span>
+              )}
             </div>
             <button
               onClick={() => { setEditing({ ...repo }); setIsNew(false); }}
@@ -100,6 +111,7 @@ export function RepoSettings() {
           setEditing({
             base_branch: 'main',
             agent_profile_id: null,
+            review_agent_profile_id: null,
             merge_strategy: 'squash',
             install_steps: [],
             allow_script_steps: false,
@@ -157,7 +169,7 @@ export function RepoSettings() {
             </div>
             <div>
               <label className="block text-sm mb-1">
-                Default agent profile
+                Default implementation profile
               </label>
               <select
                 value={editing.agent_profile_id ?? ''}
@@ -190,6 +202,49 @@ export function RepoSettings() {
                   <p className="mt-1 text-xs text-yellow-400">
                     This repo is configured with a profile that no longer
                     exists. Pick a replacement or switch to Inherit.
+                  </p>
+                )}
+            </div>
+            <div>
+              <label className="block text-sm mb-1">
+                Default review profile
+              </label>
+              <select
+                value={editing.review_agent_profile_id ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    review_agent_profile_id: e.target.value || null,
+                  })
+                }
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+              >
+                <option value="">
+                  Inherit (global review default, else implementation profile)
+                </option>
+                {/* Synthetic option for a dangling profile id — same
+                    treatment as the implementation select above. */}
+                {editing.review_agent_profile_id &&
+                  !profiles.some(
+                    (p) => p.id === editing.review_agent_profile_id
+                  ) && (
+                    <option value={editing.review_agent_profile_id}>
+                      (missing profile — {editing.review_agent_profile_id})
+                    </option>
+                  )}
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
+                  </option>
+                ))}
+              </select>
+              {editing.review_agent_profile_id &&
+                !profiles.some(
+                  (p) => p.id === editing.review_agent_profile_id
+                ) && (
+                  <p className="mt-1 text-xs text-yellow-400">
+                    This repo's review profile no longer exists. Pick a
+                    replacement or switch to Inherit.
                   </p>
                 )}
             </div>

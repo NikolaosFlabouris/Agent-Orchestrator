@@ -12,11 +12,18 @@ export interface Task {
   attempt: number;
   max_attempts: number;
   prep_failure_count: number;
-  /** Per-task agent profile override. NULL = inherit from
-   *  `repos.agent_profile_id`, which itself falls back to
-   *  `settings.default_agent_profile_id`. The orchestrator resolves the
-   *  full chain when launching. */
+  /** Per-task agent profile override for the implementation (develop)
+   *  stage. NULL = inherit from `repos.agent_profile_id`, which itself
+   *  falls back to `settings.default_agent_profile_id`. The orchestrator
+   *  resolves the full chain when launching. Also the terminal fallback
+   *  for the review stage when no review profile is configured at any
+   *  tier. */
   agent_profile_id: string | null;
+  /** Per-task agent profile override for the review stage. NULL =
+   *  inherit from `repos.review_agent_profile_id`, then
+   *  `settings.default_review_agent_profile_id`, then finally the
+   *  task's effective implementation profile. */
+  review_agent_profile_id: string | null;
   container_id: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -72,9 +79,13 @@ export interface Repo {
   owner: string;
   name: string;
   base_branch: string;
-  /** Per-repo default agent profile. NULL = fall back to
-   *  `settings.default_agent_profile_id`. */
+  /** Per-repo default agent profile for the implementation (develop)
+   *  stage. NULL = fall back to `settings.default_agent_profile_id`. */
   agent_profile_id: string | null;
+  /** Per-repo default agent profile for the review stage. NULL = fall
+   *  back to `settings.default_review_agent_profile_id`, then to the
+   *  effective implementation profile. */
+  review_agent_profile_id: string | null;
   /** Ordered list of dependency-install steps the harness runs (sequentially,
    *  under a single `flock` on the shared cache mount) before the agent
    *  starts. Empty array = no install. Each entry is one of:
@@ -268,6 +279,12 @@ export interface Settings {
   /** Fallback agent profile when neither task nor repo specifies one.
    *  Set on first-run seed; operator can change via Global Settings. */
   default_agent_profile_id: string;
+  /** Fallback REVIEW-stage profile when neither the task nor its repo
+   *  specifies one. Unlike `default_agent_profile_id` this key is unset
+   *  by default — when absent, the review stage falls back to the
+   *  task's effective implementation profile (today's single-profile
+   *  behavior). */
+  default_review_agent_profile_id: string;
 }
 
 export type SettingsKey = keyof Settings;

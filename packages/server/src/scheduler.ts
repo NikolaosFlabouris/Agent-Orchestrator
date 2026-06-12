@@ -7,6 +7,7 @@ import type {
   Provider,
   Model,
   AgentProfile,
+  AttemptRole,
 } from '@orchestrator/shared';
 import {
   getTask,
@@ -23,12 +24,14 @@ import {
   getLatestAttempt,
   getActiveAttempt,
   getTasks,
+  resolveStageProfileId,
 } from './db.js';
 import {
   countActiveByProvider,
   canLaunchInPool,
   limitMapFromProviders,
   resolveProviderKey,
+  shouldDeferReviewLaunch,
 } from './scheduler-pools.js';
 import { ForgejoClient } from './forgejo.js';
 import {
@@ -455,6 +458,8 @@ export class Scheduler {
 
     // Resolve the timeout threshold. Same chain as alerts.checkAlerts:
     // snapshot first (H5a), then a live profile read for legacy rows.
+    // The live fallback resolves the chain for the attempt's stage —
+    // a review attempt reads the review profile's timeout.
     let timeoutMinutes: number | null = null;
     if (
       typeof latest.timeout_minutes_snapshot === 'number' &&
@@ -463,11 +468,9 @@ export class Scheduler {
       timeoutMinutes = latest.timeout_minutes_snapshot;
     } else {
       const repo = getRepo(task.repo_id);
-      const profileId =
-        task.agent_profile_id ??
-        repo?.agent_profile_id ??
-        getSetting('default_agent_profile_id');
-      const profile = profileId ? getAgentProfile(profileId) : undefined;
+      const profile = repo
+        ? this.profileForStage(task, repo, latest.role)
+        : undefined;
       if (profile) timeoutMinutes = profile.timeout_minutes;
     }
     if (!timeoutMinutes || timeoutMinutes <= 0) return;
@@ -858,7 +861,7 @@ export class Scheduler {
     const repo = getRepo(task.repo_id);
     if (!repo) throw new Error(`Repo not found for task ${task.id}`);
 
-    const ctx = this.resolveLaunchContext(task, repo);
+    const ctx = this.resolveLaunchContext(task, repo, 'develop');
     let issue: { title: string; body: string };
     try {
       issue = await this.forgejo.getIssue(repo, task.issue_id);
@@ -964,7 +967,7 @@ export class Scheduler {
     const repo = getRepo(task.repo_id);
     if (!repo) throw new Error(`Repo not found for task ${task.id}`);
 
-    const ctx = this.resolveLaunchContext(task, repo);
+    const ctx = this.resolveLaunchContext(task, repo, 'review');
     let issue: { title: string; body: string };
     try {
       issue = await this.forgejo.getIssue(repo, task.issue_id);
@@ -1096,8 +1099,54 @@ export class Scheduler {
         'Awaiting human review'
       );
     } else {
-      // Start review immediately in the same slot
       const freshTask = getTask(task.id)!;
+      // Provider-pool gate for the review stage — see
+      // shouldDeferReviewLaunch in scheduler-pools.ts for the rules
+      // (defer only when the review provider pool is saturated; the
+      // transitioning task's own dev slot doesn't count against it).
+      // Deferred tasks park as 'in-review' with no container:
+      // getCandidates() picks those up first (Priority 1) and fillSlots
+      // launches the review with full pool gating once a slot frees.
+      const repo2 = getRepo(freshTask.repo_id);
+      const reviewProviderId = repo2
+        ? this.providerIdForProfile(
+            this.profileForStage(freshTask, repo2, 'review')
+          )
+        : null;
+      if (
+        reviewProviderId !== null &&
+        shouldDeferReviewLaunch(
+          reviewProviderId,
+          freshTask.id,
+          [
+            ...getTasks({ status: 'preparing' }),
+            ...getTasks({ status: 'in-progress' }),
+            ...getTasks({ status: 'in-review' }),
+          ],
+          (t) => this.providerIdForTask(t),
+          limitMapFromProviders(getProviders())
+        )
+      ) {
+        updateTaskWithSync(freshTask.id, {
+          status: 'in-review',
+          container_id: null,
+        });
+        recordTaskEvent(
+          freshTask.id,
+          'review_deferred',
+          `Review queued: provider '${reviewProviderId}' is at its concurrency limit`
+        );
+        this.log.info(
+          {
+            event: 'review_deferred',
+            task_id: freshTask.id,
+            provider_id: reviewProviderId,
+          },
+          'Review provider pool saturated; deferring review to queue'
+        );
+        return;
+      }
+      // Start review immediately in the same slot
       await this.launchReviewContainer(freshTask);
     }
   }
@@ -1412,26 +1461,24 @@ export class Scheduler {
 
   // ---- Config resolution helpers ----
 
-  /** Resolve the agent profile for a task. Chain:
-   *    task.agent_profile_id → repo.agent_profile_id → settings.default_agent_profile_id
-   *  Throws with a clear message if every level is null/missing. */
-  private resolveProfile(task: Task, repo: Repo): AgentProfile {
-    const profileId =
-      task.agent_profile_id ??
-      repo.agent_profile_id ??
-      getSetting('default_agent_profile_id');
-    if (!profileId) {
+  /** Resolve the agent profile for a task launch at a given stage (see
+   *  db.ts resolveStageProfileId for the per-stage chains). Throws with
+   *  a clear message if every tier is null/missing or the resolved id
+   *  points at a deleted profile. */
+  private resolveProfile(task: Task, repo: Repo, stage: AttemptRole): AgentProfile {
+    const ref = resolveStageProfileId(task, repo, stage);
+    if (!ref) {
       throw new Error(
-        `Cannot launch task ${task.id}: no agent profile configured. ` +
+        `Cannot launch task ${task.id} (${stage} stage): no agent profile configured. ` +
         `Task, repo (${repo.owner}/${repo.name}), and settings.default_agent_profile_id are all unset.`
       );
     }
-    const profile = getAgentProfile(profileId);
+    const profile = getAgentProfile(ref.id);
     if (!profile) {
       throw new Error(
-        `Agent profile '${profileId}' not found (referenced by ` +
-        `${task.agent_profile_id ? `task ${task.id}` : repo.agent_profile_id ? `repo ${repo.owner}/${repo.name}` : 'settings.default_agent_profile_id'}). ` +
-        `The profile may have been deleted; reconfigure or restore.`
+        `Agent profile '${ref.id}' not found (referenced by ${ref.source} ` +
+        `for the ${stage} stage). The profile may have been deleted; ` +
+        `reconfigure or restore.`
       );
     }
     return profile;
@@ -1443,7 +1490,8 @@ export class Scheduler {
    *  doesn't include the resolved provider's kind). */
   private resolveLaunchContext(
     task: Task,
-    repo: Repo
+    repo: Repo,
+    stage: AttemptRole
   ): {
     profile: AgentProfile;
     harness: HarnessSpec;
@@ -1451,7 +1499,7 @@ export class Scheduler {
     provider: Provider;
     invocation: HarnessInvocation;
   } {
-    const profile = this.resolveProfile(task, repo);
+    const profile = this.resolveProfile(task, repo, stage);
     const model = getModel(profile.model_pk);
     if (!model) {
       throw new Error(
@@ -1476,30 +1524,47 @@ export class Scheduler {
     return { profile, harness, model, provider, invocation };
   }
 
-  /** Best-effort profile lookup for a task, for bookkeeping paths that
+  /** Best-effort stage-profile lookup, for bookkeeping paths that
    *  should not throw when a profile/repo is missing. Returns undefined
    *  if any link in the chain is broken. */
+  private profileForStage(
+    task: Task,
+    repo: Repo,
+    stage: AttemptRole
+  ): AgentProfile | undefined {
+    const ref = resolveStageProfileId(task, repo, stage);
+    if (!ref) return undefined;
+    return getAgentProfile(ref.id);
+  }
+
+  /** Best-effort profile lookup for a task. Stage-aware: a task in
+   *  'in-review' resolves the review profile (that's what its container
+   *  runs / would run); every other status resolves the develop profile.
+   *  This is the same status→stage mapping fillSlots uses to pick which
+   *  container to launch, so pool accounting and the launch branch can't
+   *  disagree. */
   private profileForTask(task: Task): AgentProfile | undefined {
     const repo = getRepo(task.repo_id);
     if (!repo) return undefined;
-    const profileId =
-      task.agent_profile_id ??
-      repo.agent_profile_id ??
-      getSetting('default_agent_profile_id');
-    if (!profileId) return undefined;
-    return getAgentProfile(profileId);
+    const stage: AttemptRole = task.status === 'in-review' ? 'review' : 'develop';
+    return this.profileForStage(task, repo, stage);
   }
 
-  /** Best-effort provider-id lookup for a task, used by the scheduler
-   *  pool gating. Walks task → profile → model → provider_id. Returns
-   *  null if any link is missing — the scheduler treats these as
-   *  unconstrained-by-provider (host pool still gates). */
-  private providerIdForTask(task: Task): string | null {
-    const profile = this.profileForTask(task);
+  /** Walk a resolved profile to its provider id. Returns null if the
+   *  model row is missing. */
+  private providerIdForProfile(profile: AgentProfile | undefined): string | null {
     if (!profile) return null;
     const model = getModel(profile.model_pk);
     if (!model) return null;
     return model.provider_id;
+  }
+
+  /** Best-effort provider-id lookup for a task, used by the scheduler
+   *  pool gating. Walks task → (stage) profile → model → provider_id.
+   *  Returns null if any link is missing — the scheduler treats these as
+   *  unconstrained-by-provider (host pool still gates). */
+  private providerIdForTask(task: Task): string | null {
+    return this.providerIdForProfile(this.profileForTask(task));
   }
 
   /** Build the env-var array for a Docker container launch. Combines the

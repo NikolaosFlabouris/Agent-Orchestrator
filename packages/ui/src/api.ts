@@ -148,6 +148,9 @@ export interface TaskResponse {
   attempt: number;
   max_attempts: number;
   agent_profile_id: string | null;
+  /** Per-task review-stage profile override. Null inherits (repo review
+   *  default → global review default → implementation profile). */
+  review_agent_profile_id: string | null;
   container_id: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -173,6 +176,22 @@ export interface TaskResponse {
   repo_agent_profile_id: string | null;
   /** Global default profile id (the third / fallback tier). */
   global_agent_profile_id: string | null;
+  /** Effective REVIEW-stage profile id, resolved task → repo → global
+   *  review default → the effective implementation profile. */
+  effective_review_agent_profile_id: string | null;
+  /** Tier the effective review profile came from. 'implementation' =
+   *  no review tier set; review runs with the implementation profile. */
+  review_agent_profile_source: 'task' | 'repo' | 'global' | 'implementation' | 'none';
+  /** Repo's configured review default (second tier of the review chain). */
+  repo_review_agent_profile_id: string | null;
+  /** Global review default (third tier of the review chain). */
+  global_review_agent_profile_id: string | null;
+  /** Live read of the Forgejo `human-review` driver label. true = the
+   *  automated review agent is skipped for this task, so the review
+   *  profile is unused. null = unknown (no Forgejo snapshot available).
+   *  Optional: only GET responses carry it (POST/PATCH omit it; the UI
+   *  re-fetches after mutations). */
+  has_human_review_label?: boolean | null;
 }
 
 export interface TaskEventResponse {
@@ -243,8 +262,11 @@ export interface CreateTaskRequest {
   repo_id: number;
   title: string;
   description: string;
-  /** Per-task agent profile override. Null inherits from repo / global default. */
+  /** Per-task implementation profile override. Null inherits from repo / global default. */
   agent_profile_id?: string | null;
+  /** Per-task review profile override. Null inherits (repo review default
+   *  → global review default → implementation profile). */
+  review_agent_profile_id?: string | null;
   max_attempts?: number;
   human_merge?: boolean;
   human_review?: boolean;
@@ -254,6 +276,7 @@ export interface QueueTaskRequest {
   issue_id: number;
   repo_id: number;
   agent_profile_id?: string | null;
+  review_agent_profile_id?: string | null;
   max_attempts?: number | null;
   human_merge?: boolean;
   human_review?: boolean;
@@ -268,6 +291,7 @@ export type TaskAction =
   | { action: 'requeue' }
   | { action: 'extend'; additional_attempts: number }
   | { agent_profile_id: string | null }
+  | { review_agent_profile_id: string | null }
   | { max_attempts: number };
 
 export interface RepoResponse {
@@ -275,9 +299,13 @@ export interface RepoResponse {
   owner: string;
   name: string;
   base_branch: string;
-  /** Repo-default agent profile. Null falls back to
+  /** Repo-default implementation profile. Null falls back to
    *  settings.default_agent_profile_id. */
   agent_profile_id: string | null;
+  /** Repo-default review profile. Null falls back to
+   *  settings.default_review_agent_profile_id, then the implementation
+   *  profile. */
+  review_agent_profile_id: string | null;
   install_steps: InstallStep[];
   allow_script_steps: boolean;
   container_memory_mb: number | null;

@@ -64,7 +64,8 @@ export function asPositiveInt(v: unknown): number | null {
   return null;
 }
 
-/** Validate the optional `agent_profile_id` override on a task-create body.
+/** Validate an optional agent-profile override on a task-create body
+ *  (`agent_profile_id` or `review_agent_profile_id`).
  *  - undefined / null / empty-string → no override, returns `null`
  *    (these are equivalent: the form posts '' meaning "inherit", the API
  *    accepts a literal null with the same meaning, and a missing key is
@@ -74,21 +75,24 @@ export function asPositiveInt(v: unknown): number | null {
  *
  *  The `lookupProfile` indirection lets unit tests substitute a stub
  *  rather than booting the DB for a pure validator check. Defaults to
- *  the real `getAgentProfile` so production callers pass two args. */
+ *  the real `getAgentProfile` so production callers pass two args.
+ *  `fieldName` only affects error messages — pass the request-body key
+ *  so a rejected review override names the right field. */
 export function validateAgentProfileOverride(
   raw: unknown,
-  lookupProfile: (id: string) => unknown = getAgentProfile
+  lookupProfile: (id: string) => unknown = getAgentProfile,
+  fieldName = 'agent_profile_id'
 ):
   | { ok: true; value: string | null }
   | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, value: null };
   if (typeof raw !== 'string') {
-    return { ok: false, error: 'agent_profile_id must be a string or null' };
+    return { ok: false, error: `${fieldName} must be a string or null` };
   }
   const trimmed = raw.trim();
   if (trimmed === '') return { ok: true, value: null };
   if (!lookupProfile(trimmed)) {
-    return { ok: false, error: `Unknown agent_profile_id: ${trimmed}` };
+    return { ok: false, error: `Unknown ${fieldName}: ${trimmed}` };
   }
   return { ok: true, value: trimmed };
 }
@@ -158,6 +162,7 @@ export interface CreateTaskInput {
   title?: unknown;
   description?: unknown;
   agent_profile_id?: unknown;
+  review_agent_profile_id?: unknown;
   max_attempts?: unknown;
   human_merge?: unknown;
   human_review?: unknown;
@@ -167,6 +172,7 @@ export interface QueueExistingIssueInput {
   repo_id?: unknown;
   issue_id?: unknown;
   agent_profile_id?: unknown;
+  review_agent_profile_id?: unknown;
   max_attempts?: unknown;
   human_merge?: unknown;
   human_review?: unknown;
@@ -229,6 +235,13 @@ export async function createTask(
   const profileCheck = validateAgentProfileOverride(input.agent_profile_id);
   if (!profileCheck.ok) return invalid(profileCheck.error);
 
+  const reviewProfileCheck = validateAgentProfileOverride(
+    input.review_agent_profile_id,
+    getAgentProfile,
+    'review_agent_profile_id'
+  );
+  if (!reviewProfileCheck.ok) return invalid(reviewProfileCheck.error);
+
   const maxAttemptsCheck = validateMaxAttemptsOverride(input.max_attempts);
   if (!maxAttemptsCheck.ok) return invalid(maxAttemptsCheck.error);
 
@@ -256,6 +269,7 @@ export async function createTask(
     { number: issue.number, title: issue.title },
     {
       agentProfileId: profileCheck.value,
+      reviewAgentProfileId: reviewProfileCheck.value,
       maxAttempts: maxAttemptsCheck.value,
       humanMerge: input.human_merge === true,
       humanReview: input.human_review === true,
@@ -307,6 +321,13 @@ export async function queueExistingIssue(
   const profileCheck = validateAgentProfileOverride(input.agent_profile_id);
   if (!profileCheck.ok) return invalid(profileCheck.error);
 
+  const reviewProfileCheck = validateAgentProfileOverride(
+    input.review_agent_profile_id,
+    getAgentProfile,
+    'review_agent_profile_id'
+  );
+  if (!reviewProfileCheck.ok) return invalid(reviewProfileCheck.error);
+
   const maxAttemptsCheck = validateMaxAttemptsOverride(input.max_attempts);
   if (!maxAttemptsCheck.ok) return invalid(maxAttemptsCheck.error);
 
@@ -328,6 +349,7 @@ export async function queueExistingIssue(
     { number: issueId, title: issueTitle },
     {
       agentProfileId: profileCheck.value,
+      reviewAgentProfileId: reviewProfileCheck.value,
       maxAttempts: maxAttemptsCheck.value,
       humanMerge: input.human_merge === true,
       humanReview: input.human_review === true,
@@ -343,6 +365,16 @@ export async function queueExistingIssue(
 // ---------------------------------------------------------------------------
 // listReposWithEffectiveProfile — for the future MCP `list_repos` tool
 // ---------------------------------------------------------------------------
+
+export interface EffectiveProfileInfo {
+  id: string;
+  display_name: string;
+  harness_id: string;
+  timeout_minutes: number;
+  model_id: string | null;
+  provider_id: string | null;
+  provider_display_name: string | null;
+}
 
 export interface RepoWithEffectiveProfile {
   id: number;
@@ -360,15 +392,16 @@ export interface RepoWithEffectiveProfile {
   agent_profile_source: 'repo' | 'global' | 'none';
   /** Joined-through profile info; null when no profile is resolvable
    *  (e.g. the global default points at a deleted profile). */
-  effective_profile: {
-    id: string;
-    display_name: string;
-    harness_id: string;
-    timeout_minutes: number;
-    model_id: string | null;
-    provider_id: string | null;
-    provider_display_name: string | null;
-  } | null;
+  effective_profile: EffectiveProfileInfo | null;
+  /** The repo's review-stage override, if any. */
+  repo_review_agent_profile_id: string | null;
+  /** The resolved review profile id — repo review override → global
+   *  review default → the effective implementation profile above. */
+  effective_review_agent_profile_id: string | null;
+  /** 'implementation' = no review tier set anywhere; review runs with
+   *  the implementation profile. */
+  review_agent_profile_source: 'repo' | 'global' | 'implementation' | 'none';
+  effective_review_profile: EffectiveProfileInfo | null;
 }
 
 /**
@@ -383,10 +416,29 @@ export interface RepoWithEffectiveProfile {
 export function listReposWithEffectiveProfile(): RepoWithEffectiveProfile[] {
   const repos = getRepos();
   const globalDefault = getSetting('default_agent_profile_id') ?? null;
+  const globalReviewDefault =
+    getSetting('default_review_agent_profile_id') ?? null;
 
   // Pre-fetch profiles once and index by id so the per-repo resolution
   // is O(1) lookups rather than N×getAgentProfile calls.
   const profilesById = new Map(getAgentProfiles().map((p) => [p.id, p]));
+
+  const joinProfile = (id: string | null): EffectiveProfileInfo | null => {
+    if (!id) return null;
+    const p = profilesById.get(id);
+    if (!p) return null;
+    const model = getModel(p.model_pk);
+    const provider = model ? getProvider(model.provider_id) : undefined;
+    return {
+      id: p.id,
+      display_name: p.display_name,
+      harness_id: p.harness_id,
+      timeout_minutes: p.timeout_minutes,
+      model_id: model?.model_id ?? null,
+      provider_id: model?.provider_id ?? null,
+      provider_display_name: provider?.display_name ?? null,
+    };
+  };
 
   return repos.map((repo) => {
     const repoProfileId = repo.agent_profile_id ?? null;
@@ -403,22 +455,23 @@ export function listReposWithEffectiveProfile(): RepoWithEffectiveProfile[] {
       source = 'none';
     }
 
-    let effectiveProfile: RepoWithEffectiveProfile['effective_profile'] = null;
-    if (effectiveId) {
-      const p = profilesById.get(effectiveId);
-      if (p) {
-        const model = getModel(p.model_pk);
-        const provider = model ? getProvider(model.provider_id) : undefined;
-        effectiveProfile = {
-          id: p.id,
-          display_name: p.display_name,
-          harness_id: p.harness_id,
-          timeout_minutes: p.timeout_minutes,
-          model_id: model?.model_id ?? null,
-          provider_id: model?.provider_id ?? null,
-          provider_display_name: provider?.display_name ?? null,
-        };
-      }
+    // Review chain (minus the task tier): repo review override → global
+    // review default → the effective implementation profile.
+    const repoReviewProfileId = repo.review_agent_profile_id ?? null;
+    let effectiveReviewId: string | null;
+    let reviewSource: 'repo' | 'global' | 'implementation' | 'none';
+    if (repoReviewProfileId) {
+      effectiveReviewId = repoReviewProfileId;
+      reviewSource = 'repo';
+    } else if (globalReviewDefault) {
+      effectiveReviewId = globalReviewDefault;
+      reviewSource = 'global';
+    } else if (effectiveId) {
+      effectiveReviewId = effectiveId;
+      reviewSource = 'implementation';
+    } else {
+      effectiveReviewId = null;
+      reviewSource = 'none';
     }
 
     return {
@@ -430,7 +483,11 @@ export function listReposWithEffectiveProfile(): RepoWithEffectiveProfile[] {
       global_default_agent_profile_id: globalDefault,
       effective_agent_profile_id: effectiveId,
       agent_profile_source: source,
-      effective_profile: effectiveProfile,
+      effective_profile: joinProfile(effectiveId),
+      repo_review_agent_profile_id: repoReviewProfileId,
+      effective_review_agent_profile_id: effectiveReviewId,
+      review_agent_profile_source: reviewSource,
+      effective_review_profile: joinProfile(effectiveReviewId),
     };
   });
 }
@@ -456,6 +513,7 @@ async function applyLabelsAndInsertTask(
   issue: { number: number; title: string | null },
   overrides: {
     agentProfileId: string | null;
+    reviewAgentProfileId: string | null;
     maxAttempts: number | undefined;
     humanMerge: boolean;
     humanReview: boolean;
@@ -488,6 +546,7 @@ async function applyLabelsAndInsertTask(
     status: 'queued',
     max_attempts: overrides.maxAttempts,
     agent_profile_id: overrides.agentProfileId,
+    review_agent_profile_id: overrides.reviewAgentProfileId,
   });
 
   notifyTaskCreated(task);

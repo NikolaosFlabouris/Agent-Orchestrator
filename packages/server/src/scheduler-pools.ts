@@ -72,3 +72,44 @@ export function limitMapFromProviders(
   for (const p of providers) m.set(p.id, p.concurrency_limit);
   return m;
 }
+
+/** Decide whether a dev→review same-slot handoff must be DEFERRED
+ *  because the review-stage provider pool is saturated.
+ *
+ *  The same-slot review launch was unconditionally safe when review
+ *  shared the dev profile — the task already held that provider's slot.
+ *  With per-stage profiles the review provider can differ from the dev
+ *  one and may be at its concurrency_limit; launching anyway would
+ *  oversubscribe it (a real problem for limit-1 self-hosted servers).
+ *  Deferred reviews park as 'in-review' with no container and are
+ *  launched by the scheduler's Priority-1 recovery path with full pool
+ *  gating once a slot frees.
+ *
+ *  Rules:
+ *   - `reviewProviderId === null` (broken profile chain): never defer —
+ *     matches the scheduler's unconstrained-by-provider treatment; the
+ *     launch-time resolution surfaces the real error if the chain is
+ *     truly broken.
+ *   - The transitioning task itself is EXCLUDED from the count: its dev
+ *     container has exited, so the slot it nominally holds is free for
+ *     its own review. Without this, a same-provider review on a
+ *     concurrency_limit=1 provider would defer every single time.
+ *   - Only tasks actually holding a container count; parked/queued
+ *     tasks (container_id null) don't occupy provider slots.
+ *
+ *  Pure — the caller supplies the active-task list, the task→provider
+ *  resolver, and the limit map. */
+export function shouldDeferReviewLaunch(
+  reviewProviderId: string | null,
+  transitioningTaskId: number,
+  activeTasks: Task[],
+  resolveProviderId: (task: Task) => string | null | undefined,
+  limitByProvider: Map<string, number>
+): boolean {
+  if (reviewProviderId === null) return false;
+  const holding = activeTasks.filter(
+    (t) => t.container_id !== null && t.id !== transitioningTaskId
+  );
+  const activeByProvider = countActiveByProvider(holding, resolveProviderId);
+  return !canLaunchInPool(reviewProviderId, activeByProvider, limitByProvider);
+}

@@ -30,17 +30,19 @@ function insertRepo(opts: {
   owner?: string;
   name?: string;
   agent_profile_id?: string | null;
+  review_agent_profile_id?: string | null;
 } = {}): number {
   const result = getDb()
     .prepare(
-      `INSERT INTO repos (owner, name, base_branch, agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO repos (owner, name, base_branch, agent_profile_id, review_agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       opts.owner ?? 'acme',
       opts.name ?? 'frontend',
       'main',
       opts.agent_profile_id ?? null,
+      opts.review_agent_profile_id ?? null,
       '[]',
       0,
       null,
@@ -135,6 +137,18 @@ describe('validateAgentProfileOverride', () => {
     expect(validateAgentProfileOverride(7)).toMatchObject({ ok: false });
     expect(validateAgentProfileOverride({})).toMatchObject({ ok: false });
     expect(validateAgentProfileOverride([])).toMatchObject({ ok: false });
+  });
+
+  it('names the supplied field in error messages (review override)', () => {
+    expect(
+      validateAgentProfileOverride('nope', () => undefined, 'review_agent_profile_id')
+    ).toEqual({ ok: false, error: 'Unknown review_agent_profile_id: nope' });
+    expect(
+      validateAgentProfileOverride(7, () => undefined, 'review_agent_profile_id')
+    ).toEqual({
+      ok: false,
+      error: 'review_agent_profile_id must be a string or null',
+    });
   });
 });
 
@@ -359,6 +373,55 @@ describe('createTask', () => {
     expect(persisted.agent_profile_id).toBe('default-claude-sdk');
     expect(persisted.max_attempts).toBe(3);
   });
+
+  it('persists the review_agent_profile_id override on the inserted row', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler } = makeMocks();
+
+    const r = await createTask(
+      {
+        repo_id: repoId,
+        title: 't',
+        description: 'd',
+        agent_profile_id: 'default-claude-sdk',
+        review_agent_profile_id: 'default-claude-code-subscription',
+      },
+      { forgejo, scheduler }
+    );
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const persisted = getTask(r.value.task.id)!;
+    expect(persisted.agent_profile_id).toBe('default-claude-sdk');
+    expect(persisted.review_agent_profile_id).toBe(
+      'default-claude-code-subscription'
+    );
+  });
+
+  it('rejects an unknown review_agent_profile_id naming the field', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler, mocks } = makeMocks();
+
+    const r = await createTask(
+      {
+        repo_id: repoId,
+        title: 't',
+        description: 'd',
+        review_agent_profile_id: 'no-such-profile',
+      },
+      { forgejo, scheduler }
+    );
+
+    expect(r).toMatchObject({
+      ok: false,
+      error: {
+        kind: 'invalid',
+        message: 'Unknown review_agent_profile_id: no-such-profile',
+      },
+    });
+    // Validation failure happens before the Forgejo issue is created.
+    expect(mocks.createIssue).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -513,5 +576,65 @@ describe('listReposWithEffectiveProfile', () => {
     expect(rows[0].effective_agent_profile_id).toBe('ghost-profile-id');
     expect(rows[0].agent_profile_source).toBe('global');
     expect(rows[0].effective_profile).toBeNull();
+  });
+
+  it("review: uses the repo's review override when set, source = 'repo'", () => {
+    insertRepo({
+      owner: 'acme',
+      name: 'e',
+      review_agent_profile_id: 'default-claude-code-subscription',
+    });
+
+    const rows = listReposWithEffectiveProfile();
+    expect(rows[0]).toMatchObject({
+      repo_review_agent_profile_id: 'default-claude-code-subscription',
+      effective_review_agent_profile_id: 'default-claude-code-subscription',
+      review_agent_profile_source: 'repo',
+    });
+    expect(rows[0].effective_review_profile?.harness_id).toBe('claude-code');
+  });
+
+  it("review: falls back to the global review default, source = 'global'", () => {
+    getDb()
+      .prepare(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('default_review_agent_profile_id', 'default-claude-code-subscription')"
+      )
+      .run();
+    insertRepo({ owner: 'acme', name: 'f' });
+
+    const rows = listReposWithEffectiveProfile();
+    expect(rows[0]).toMatchObject({
+      repo_review_agent_profile_id: null,
+      effective_review_agent_profile_id: 'default-claude-code-subscription',
+      review_agent_profile_source: 'global',
+    });
+  });
+
+  it("review: falls back to the implementation profile when no review tier is set, source = 'implementation'", () => {
+    insertRepo({ owner: 'acme', name: 'g' });
+
+    const rows = listReposWithEffectiveProfile();
+    // Implementation resolves to the seeded global default; review
+    // inherits it.
+    expect(rows[0]).toMatchObject({
+      effective_agent_profile_id: 'default-claude-sdk',
+      effective_review_agent_profile_id: 'default-claude-sdk',
+      review_agent_profile_source: 'implementation',
+    });
+    expect(rows[0].effective_review_profile?.id).toBe('default-claude-sdk');
+  });
+
+  it("review: source = 'none' when nothing resolves anywhere", () => {
+    getDb()
+      .prepare("DELETE FROM settings WHERE key = 'default_agent_profile_id'")
+      .run();
+    insertRepo({ owner: 'acme', name: 'h' });
+
+    const rows = listReposWithEffectiveProfile();
+    expect(rows[0]).toMatchObject({
+      effective_review_agent_profile_id: null,
+      review_agent_profile_source: 'none',
+      effective_review_profile: null,
+    });
   });
 });

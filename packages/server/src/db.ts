@@ -15,7 +15,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 24;
+const CURRENT_SCHEMA_VERSION = 25;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -80,10 +80,15 @@ function createTables(db: Database.Database): void {
       owner TEXT NOT NULL,
       name TEXT NOT NULL,
       base_branch TEXT DEFAULT 'main',
-      -- Per-repo default agent profile. NULL falls back to
-      -- settings.default_agent_profile_id at task-launch time. RESTRICT on
-      -- delete: operator must reassign or unset before deleting the profile.
+      -- Per-repo default agent profile for the implementation (develop)
+      -- stage. NULL falls back to settings.default_agent_profile_id at
+      -- task-launch time. RESTRICT on delete: operator must reassign or
+      -- unset before deleting the profile.
       agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+      -- Per-repo default agent profile for the review stage. NULL falls
+      -- back to settings.default_review_agent_profile_id, then to the
+      -- task's effective implementation profile.
+      review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
       -- Ordered JSON array of typed install steps the harness runs before
       -- the agent starts. Each entry is { kind, cwd? } for package-manager
       -- steps or { kind: 'script', path, cwd? } for the script escape hatch.
@@ -117,9 +122,13 @@ function createTables(db: Database.Database): void {
       attempt INTEGER DEFAULT 1,
       max_attempts INTEGER DEFAULT 7,
       prep_failure_count INTEGER DEFAULT 0,
-      -- Per-task profile override. NULL inherits from
+      -- Per-task implementation-stage profile override. NULL inherits from
       -- repos.agent_profile_id, which inherits from settings.default_*.
       agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+      -- Per-task review-stage profile override. NULL inherits from
+      -- repos.review_agent_profile_id → settings.default_review_agent_
+      -- profile_id → the task's effective implementation profile.
+      review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
       container_id TEXT,
       started_at TEXT,
       completed_at TEXT,
@@ -455,6 +464,38 @@ function runMigrations(db: Database.Database): void {
           CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_client ON mcp_oauth_refresh(client_id);
         `);
       }
+      if (version < 25) {
+        // v25: per-stage agent profiles. Adds a nullable review-stage
+        // profile pointer alongside the existing (implementation-stage)
+        // one on both tasks and repos. NULL everywhere = review inherits
+        // the implementation profile, so existing rows keep today's
+        // single-profile behavior bit-for-bit. The matching settings key
+        // (default_review_agent_profile_id) needs no migration — the
+        // settings table is key/value and the key simply starts absent.
+        // SQLite allows ADD COLUMN with a REFERENCES clause when the
+        // default is NULL; enforcement applies to new writes only.
+        // SQLite has no ADD COLUMN IF NOT EXISTS, so guard via
+        // pragma_table_info to keep the block idempotent (a table
+        // created fresh by createTables already has the column).
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        if (!hasColumn('tasks', 'review_agent_profile_id')) {
+          db.exec(
+            'ALTER TABLE tasks ADD COLUMN review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
+          );
+        }
+        if (!hasColumn('repos', 'review_agent_profile_id')) {
+          db.exec(
+            'ALTER TABLE repos ADD COLUMN review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
+          );
+        }
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -715,6 +756,7 @@ export function insertTask(task: {
   queue_position?: number;
   max_attempts?: number;
   agent_profile_id?: string | null;
+  review_agent_profile_id?: string | null;
 }): Task {
   const queuePos =
     task.queue_position ??
@@ -726,8 +768,8 @@ export function insertTask(task: {
 
   const result = getDb()
     .prepare(
-      `INSERT INTO tasks (issue_id, issue_title, repo_id, status, queue_position, max_attempts, agent_profile_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (issue_id, issue_title, repo_id, status, queue_position, max_attempts, agent_profile_id, review_agent_profile_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.issue_id,
@@ -736,7 +778,8 @@ export function insertTask(task: {
       task.status,
       queuePos,
       task.max_attempts ?? DEFAULT_MAX_ATTEMPTS,
-      task.agent_profile_id ?? null
+      task.agent_profile_id ?? null,
+      task.review_agent_profile_id ?? null
     );
 
   return getTask(result.lastInsertRowid as number)!;
@@ -755,6 +798,7 @@ export function updateTask(
       | 'max_attempts'
       | 'prep_failure_count'
       | 'agent_profile_id'
+      | 'review_agent_profile_id'
       | 'container_id'
       | 'started_at'
       | 'completed_at'
@@ -1132,6 +1176,62 @@ export function getAgentProfile(id: string): AgentProfile | undefined {
   return hydrateAgentProfile(row);
 }
 
+/** Walk the profile-id chain for a workflow stage, reporting which tier
+ *  supplied the id (for error attribution). Chains:
+ *    develop: task.agent_profile_id → repo.agent_profile_id
+ *             → settings.default_agent_profile_id
+ *    review:  task.review_agent_profile_id → repo.review_agent_profile_id
+ *             → settings.default_review_agent_profile_id
+ *             → <the develop chain>
+ *  The review chain's terminal fallback to the develop chain preserves
+ *  single-profile behavior for installs that never configure a review
+ *  profile. Shared by the scheduler (launch + pool gating) and alerts
+ *  (stuck-task threshold fallback). Returns null when every tier is
+ *  unset. */
+export function resolveStageProfileId(
+  task: Task,
+  repo: Repo | undefined,
+  stage: AttemptRole
+): { id: string; source: string } | null {
+  if (stage === 'review') {
+    if (task.review_agent_profile_id) {
+      return {
+        id: task.review_agent_profile_id,
+        source: `task ${task.id} (review override)`,
+      };
+    }
+    if (repo?.review_agent_profile_id) {
+      return {
+        id: repo.review_agent_profile_id,
+        source: `repo ${repo.owner}/${repo.name} (review default)`,
+      };
+    }
+    const reviewDefault = getSetting('default_review_agent_profile_id');
+    if (reviewDefault) {
+      return {
+        id: reviewDefault,
+        source: 'settings.default_review_agent_profile_id',
+      };
+    }
+    // No review-specific profile at any tier — fall through to the
+    // develop chain below.
+  }
+  if (task.agent_profile_id) {
+    return { id: task.agent_profile_id, source: `task ${task.id}` };
+  }
+  if (repo?.agent_profile_id) {
+    return {
+      id: repo.agent_profile_id,
+      source: `repo ${repo.owner}/${repo.name}`,
+    };
+  }
+  const globalDefault = getSetting('default_agent_profile_id');
+  if (globalDefault) {
+    return { id: globalDefault, source: 'settings.default_agent_profile_id' };
+  }
+  return null;
+}
+
 export function getAgentProfiles(): AgentProfile[] {
   const rows = getDb()
     .prepare('SELECT * FROM agent_profiles ORDER BY id')
@@ -1161,8 +1261,12 @@ const AGENT_PROFILE_WITH_STATS_SELECT = `
     ap.*,
     m.provider_id AS joined_provider_id,
     m.model_id    AS joined_model_id,
-    (SELECT COUNT(*) FROM repos r WHERE r.agent_profile_id = ap.id) AS repos_using,
-    (SELECT COUNT(*) FROM tasks t WHERE t.agent_profile_id = ap.id) AS tasks_using
+    (SELECT COUNT(*) FROM repos r
+       WHERE r.agent_profile_id = ap.id
+          OR r.review_agent_profile_id = ap.id) AS repos_using,
+    (SELECT COUNT(*) FROM tasks t
+       WHERE t.agent_profile_id = ap.id
+          OR t.review_agent_profile_id = ap.id) AS tasks_using
   FROM agent_profiles ap
   LEFT JOIN models m ON m.id = ap.model_pk`;
 
@@ -1201,10 +1305,14 @@ export function getAgentProfileWithStats(
 
 /** Single-pass per-provider active-slot tally for the dashboard.
  *
- *  Walks the chain `task → task.agent_profile_id → repo.agent_profile_id
- *  → settings.default_agent_profile_id`, then jumps the resolved profile
+ *  Stage-aware: a task in `in-review` resolves through the review chain
+ *  `task.review_agent_profile_id → repo.review_agent_profile_id →
+ *  settings.default_review_agent_profile_id → <implementation chain>`;
+ *  every other active status resolves through the implementation chain
+ *  `task.agent_profile_id → repo.agent_profile_id →
+ *  settings.default_agent_profile_id`. The resolved profile then jumps
  *  to its model's `provider_id`. Implemented as one SQL join rather
- *  than N tasks × 4 helper-fn calls in JS.
+ *  than N tasks × helper-fn calls in JS.
  *
  *  The returned Map's key is the resolved provider id, or '' (empty
  *  string) for tasks where no profile could be resolved.
@@ -1218,8 +1326,14 @@ export function getActivePerProviderCounts(): Map<string, number> {
        FROM tasks t
        LEFT JOIN repos r ON r.id = t.repo_id
        LEFT JOIN settings s ON s.key = 'default_agent_profile_id'
+       LEFT JOIN settings sr ON sr.key = 'default_review_agent_profile_id'
        LEFT JOIN agent_profiles ap
-         ON ap.id = COALESCE(t.agent_profile_id, r.agent_profile_id, s.value)
+         ON ap.id = CASE WHEN t.status = 'in-review'
+           THEN COALESCE(
+             t.review_agent_profile_id, r.review_agent_profile_id, sr.value,
+             t.agent_profile_id, r.agent_profile_id, s.value)
+           ELSE COALESCE(t.agent_profile_id, r.agent_profile_id, s.value)
+         END
        LEFT JOIN models m ON m.id = ap.model_pk
        WHERE t.status IN ('preparing','in-progress','in-review')
          AND t.container_id IS NOT NULL
@@ -1294,7 +1408,8 @@ export function deleteAgentProfile(id: string): void {
   db.transaction(() => {
     db.prepare(
       `DELETE FROM settings
-         WHERE key = 'default_agent_profile_id' AND value = ?`
+         WHERE key IN ('default_agent_profile_id', 'default_review_agent_profile_id')
+           AND value = ?`
     ).run(id);
     db.prepare('DELETE FROM agent_profiles WHERE id = ?').run(id);
   })();
@@ -1328,15 +1443,30 @@ export function deleteAgentProfileIfUnreferenced(id: string): string | null {
         `Set a different default before deleting.`
       );
     }
+    const reviewDefaultRow = db
+      .prepare(
+        "SELECT value FROM settings WHERE key = 'default_review_agent_profile_id'"
+      )
+      .get() as { value: string } | undefined;
+    if (reviewDefaultRow?.value === id) {
+      return (
+        `'${id}' is the global default review profile. ` +
+        `Set a different review default (or clear it) before deleting.`
+      );
+    }
     const reposUsing = (
       db
-        .prepare('SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ?')
-        .get(id) as { n: number }
+        .prepare(
+          'SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ? OR review_agent_profile_id = ?'
+        )
+        .get(id, id) as { n: number }
     ).n;
     const tasksUsing = (
       db
-        .prepare('SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ?')
-        .get(id) as { n: number }
+        .prepare(
+          'SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ? OR review_agent_profile_id = ?'
+        )
+        .get(id, id) as { n: number }
     ).n;
     if (reposUsing > 0 || tasksUsing > 0) {
       return (
@@ -1353,15 +1483,19 @@ export function deleteAgentProfileIfUnreferenced(id: string): string | null {
 
 export function countReposUsingProfile(profileId: string): number {
   const row = getDb()
-    .prepare('SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ?')
-    .get(profileId) as { n: number };
+    .prepare(
+      'SELECT COUNT(*) AS n FROM repos WHERE agent_profile_id = ? OR review_agent_profile_id = ?'
+    )
+    .get(profileId, profileId) as { n: number };
   return row.n;
 }
 
 export function countTasksUsingProfile(profileId: string): number {
   const row = getDb()
-    .prepare('SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ?')
-    .get(profileId) as { n: number };
+    .prepare(
+      'SELECT COUNT(*) AS n FROM tasks WHERE agent_profile_id = ? OR review_agent_profile_id = ?'
+    )
+    .get(profileId, profileId) as { n: number };
   return row.n;
 }
 

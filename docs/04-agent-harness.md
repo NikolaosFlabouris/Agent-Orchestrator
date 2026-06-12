@@ -236,13 +236,24 @@ rows because the launch surface differs per provider.
 
 ### Profile resolution
 
-A task launches the harness from the first profile in this chain that
-isn't null:
+Each workflow stage launches the harness from the first profile in its
+chain that isn't null. Implementation (develop):
 
 ```
 tasks.agent_profile_id
   ↳ repos.agent_profile_id
       ↳ settings.default_agent_profile_id
+```
+
+Review walks its own tiers first and falls back to the implementation
+chain, so an install with no review profiles reviews with the same
+profile that implemented:
+
+```
+tasks.review_agent_profile_id
+  ↳ repos.review_agent_profile_id
+      ↳ settings.default_review_agent_profile_id
+          ↳ <the implementation chain above>
 ```
 
 The scheduler walks `profile → models[model_pk] → providers[provider_id]`,

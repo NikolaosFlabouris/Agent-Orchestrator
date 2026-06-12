@@ -39,6 +39,7 @@ describe.skipIf(SKIP)("ForgejoClient integration", () => {
       name: testRepoName,
       base_branch: "main",
       agent_profile_id: null,
+      review_agent_profile_id: null,
       install_steps: [],
       allow_script_steps: false,
       container_memory_mb: null,

@@ -6,13 +6,15 @@
  * the create-task-forgejo plugin's skill, …) can invoke:
  *
  *   - `list_repos`           — registered repos + their effective agent
- *                              profile (repo override → global default).
+ *                              profiles for both workflow stages
+ *                              (implementation and review).
  *   - `list_agent_profiles`  — every configured agent profile with the
  *                              joined model/provider stats.
  *   - `create_task`          — create a Forgejo issue + queue an
  *                              orchestrator task, with optional
  *                              per-task overrides (agent_profile_id,
- *                              max_attempts, human_merge, human_review).
+ *                              review_agent_profile_id, max_attempts,
+ *                              human_merge, human_review).
  *
  * `create_task` is a thin wrapper over the shared task-intake service
  * (`../services/task-intake.ts`) — the same service `POST /api/tasks`
@@ -53,8 +55,25 @@ import {
  *  change in client-visible ways. */
 const MCP_SERVER_INFO = {
   name: 'agent-orchestrator',
-  version: '0.1.0',
+  // 0.2.0: per-stage agent profiles — create_task gained the optional
+  // review_agent_profile_id override; list_repos gained the effective
+  // review-profile fields. Both additive (old clients keep working).
+  version: '0.2.0',
 } as const;
+
+/** Joined-through profile info shape shared by the implementation and
+ *  review effective-profile fields on `list_repos`. */
+const EFFECTIVE_PROFILE_SCHEMA = z
+  .object({
+    id: z.string(),
+    display_name: z.string(),
+    harness_id: z.string(),
+    timeout_minutes: z.number().int(),
+    model_id: z.string().nullable(),
+    provider_id: z.string().nullable(),
+    provider_display_name: z.string().nullable(),
+  })
+  .nullable();
 
 /** Dependencies the `create_task` tool needs to act. Match
  *  `IntakeDeps` so callers can hand the same object to both. */
@@ -88,10 +107,12 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
       title: 'List registered repositories',
       description:
         'Returns every repository registered with the orchestrator, ' +
-        'along with the agent profile that will run a new task against ' +
-        "it by default (the repo's own override if set, else the global " +
-        'default). Use this to pick a `repo_id` for `create_task` and to ' +
-        'surface the effective profile/model/provider to the human.',
+        'along with the agent profiles that will run a new task against ' +
+        'it by default — one for the implementation (develop) stage and ' +
+        'one for the review stage (the review profile falls back to the ' +
+        'implementation profile when not configured). Use this to pick a ' +
+        '`repo_id` for `create_task` and to surface the effective ' +
+        'profile/model/provider per stage to the human.',
       // No input schema — the tool takes no arguments.
       outputSchema: {
         repos: z.array(
@@ -104,17 +125,16 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
             global_default_agent_profile_id: z.string().nullable(),
             effective_agent_profile_id: z.string().nullable(),
             agent_profile_source: z.enum(['repo', 'global', 'none']),
-            effective_profile: z
-              .object({
-                id: z.string(),
-                display_name: z.string(),
-                harness_id: z.string(),
-                timeout_minutes: z.number().int(),
-                model_id: z.string().nullable(),
-                provider_id: z.string().nullable(),
-                provider_display_name: z.string().nullable(),
-              })
-              .nullable(),
+            effective_profile: EFFECTIVE_PROFILE_SCHEMA,
+            repo_review_agent_profile_id: z.string().nullable(),
+            effective_review_agent_profile_id: z.string().nullable(),
+            review_agent_profile_source: z.enum([
+              'repo',
+              'global',
+              'implementation',
+              'none',
+            ]),
+            effective_review_profile: EFFECTIVE_PROFILE_SCHEMA,
           })
         ),
       },
@@ -148,7 +168,8 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
       description:
         'Returns every agent profile (harness + model + provider + timeout) ' +
         'configured in the orchestrator. Use this to surface valid values ' +
-        'for the `agent_profile_id` override on `create_task`.',
+        'for the `agent_profile_id` and `review_agent_profile_id` ' +
+        'overrides on `create_task`.',
       outputSchema: {
         profiles: z.array(
           z.object({
@@ -237,9 +258,20 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
           .nullable()
           .optional()
           .describe(
-            'Optional per-task profile override. null / omitted = inherit ' +
-              "from the repo's default, which itself inherits from the " +
-              'global default.'
+            'Optional per-task profile override for the implementation ' +
+              "(develop) stage. null / omitted = inherit from the repo's " +
+              'default, which itself inherits from the global default.'
+          ),
+        review_agent_profile_id: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            'Optional per-task profile override for the review stage. ' +
+              "null / omitted = inherit from the repo's review default, " +
+              'then the global review default, finally falling back to ' +
+              'the implementation profile (review and implementation run ' +
+              'with the same profile unless one of those is set).'
           ),
         max_attempts: z
           .number()
@@ -278,6 +310,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
           attempt: z.number().int(),
           max_attempts: z.number().int(),
           agent_profile_id: z.string().nullable(),
+          review_agent_profile_id: z.string().nullable(),
         }),
         issue: z.object({
           number: z.number().int(),
@@ -305,7 +338,8 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
         `("${issue.title}"). Status: queued, ` +
         `queue position: ${task.queue_position ?? '?'}, ` +
         `attempts allowed: ${task.max_attempts}, ` +
-        `agent profile: ${task.agent_profile_id ?? '(inherit)'}.`;
+        `agent profile: ${task.agent_profile_id ?? '(inherit)'}, ` +
+        `review profile: ${task.review_agent_profile_id ?? '(inherit)'}.`;
       return {
         content: [{ type: 'text', text: summary }],
         structuredContent: {
@@ -319,6 +353,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
             attempt: task.attempt,
             max_attempts: task.max_attempts,
             agent_profile_id: task.agent_profile_id,
+            review_agent_profile_id: task.review_agent_profile_id,
           },
           issue: { number: issue.number, title: issue.title },
         },
@@ -349,7 +384,17 @@ function formatRepoLine(
       : r.agent_profile_source === 'global'
         ? ' [global default]'
         : ' [none]';
-  return `#${r.id} ${r.owner}/${r.name} (base: ${r.base_branch}) → ${profile}${sourceTag}`;
+  // Only surface the review profile when it differs from the
+  // implementation one — the common single-profile case stays terse.
+  const reviewTag =
+    r.effective_review_agent_profile_id !== null &&
+    r.effective_review_agent_profile_id !== r.effective_agent_profile_id
+      ? `, review → ${
+          r.effective_review_profile?.display_name ??
+          r.effective_review_agent_profile_id
+        }`
+      : '';
+  return `#${r.id} ${r.owner}/${r.name} (base: ${r.base_branch}) → ${profile}${sourceTag}${reviewTag}`;
 }
 
 /** One-line agent-profile summary for the text content block. */

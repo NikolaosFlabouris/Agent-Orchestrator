@@ -23,17 +23,24 @@ import type { Scheduler } from '../../scheduler.js';
  * the structured-content shape clients consume.
  */
 
-function insertRepo(opts: { owner?: string; name?: string } = {}): number {
+function insertRepo(
+  opts: {
+    owner?: string;
+    name?: string;
+    review_agent_profile_id?: string | null;
+  } = {}
+): number {
   const result = getDb()
     .prepare(
-      `INSERT INTO repos (owner, name, base_branch, agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO repos (owner, name, base_branch, agent_profile_id, review_agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       opts.owner ?? 'acme',
       opts.name ?? 'frontend',
       'main',
       null,
+      opts.review_agent_profile_id ?? null,
       '[]',
       0,
       null,
@@ -180,7 +187,45 @@ describe('MCP tool list_repos', () => {
         // Bootstrap seeds default_agent_profile_id = 'default-claude-sdk'.
         effective_agent_profile_id: 'default-claude-sdk',
         agent_profile_source: 'global',
+        // No review tier set anywhere → review inherits the
+        // implementation profile.
+        effective_review_agent_profile_id: 'default-claude-sdk',
+        review_agent_profile_source: 'implementation',
       });
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it('surfaces a repo-level review override with its joined profile', async () => {
+    insertRepo({
+      owner: 'acme',
+      name: 'b',
+      review_agent_profile_id: 'default-claude-code-subscription',
+    });
+    const pair = await connectPair();
+    try {
+      const result = await pair.client.callTool({
+        name: 'list_repos',
+        arguments: {},
+      });
+      expect(result.isError).toBeFalsy();
+      const sc = result.structuredContent as {
+        repos: Array<{
+          repo_review_agent_profile_id: string | null;
+          effective_review_agent_profile_id: string | null;
+          review_agent_profile_source: string;
+          effective_review_profile: { harness_id: string } | null;
+        }>;
+      };
+      expect(sc.repos[0]).toMatchObject({
+        repo_review_agent_profile_id: 'default-claude-code-subscription',
+        effective_review_agent_profile_id: 'default-claude-code-subscription',
+        review_agent_profile_source: 'repo',
+      });
+      expect(sc.repos[0].effective_review_profile?.harness_id).toBe(
+        'claude-code'
+      );
     } finally {
       await pair.close();
     }
@@ -281,6 +326,67 @@ describe('MCP tool create_task', () => {
       };
       expect(sc.task.agent_profile_id).toBe('default-claude-sdk');
       expect(sc.task.max_attempts).toBe(3);
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it('persists the review_agent_profile_id override and echoes it in the result', async () => {
+    const repoId = insertRepo();
+    const pair = await connectPair();
+    try {
+      const result = await pair.client.callTool({
+        name: 'create_task',
+        arguments: {
+          repo_id: repoId,
+          title: 't',
+          description: 'd',
+          agent_profile_id: 'default-claude-sdk',
+          review_agent_profile_id: 'default-claude-code-subscription',
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      const sc = result.structuredContent as {
+        task: {
+          id: number;
+          agent_profile_id: string | null;
+          review_agent_profile_id: string | null;
+        };
+      };
+      expect(sc.task.agent_profile_id).toBe('default-claude-sdk');
+      expect(sc.task.review_agent_profile_id).toBe(
+        'default-claude-code-subscription'
+      );
+      // Persisted on the row, not just echoed.
+      const row = getDb()
+        .prepare('SELECT review_agent_profile_id FROM tasks WHERE id = ?')
+        .get(sc.task.id) as { review_agent_profile_id: string | null };
+      expect(row.review_agent_profile_id).toBe(
+        'default-claude-code-subscription'
+      );
+    } finally {
+      await pair.close();
+    }
+  });
+
+  it("invalid review_agent_profile_id maps to isError naming the field", async () => {
+    const repoId = insertRepo();
+    const pair = await connectPair();
+    try {
+      const result = await pair.client.callTool({
+        name: 'create_task',
+        arguments: {
+          repo_id: repoId,
+          title: 't',
+          description: 'd',
+          review_agent_profile_id: 'no-such-profile',
+        },
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ type: string; text: string }>)[0].text;
+      expect(text).toMatch(/^Invalid input:/);
+      expect(text).toMatch(/Unknown review_agent_profile_id/);
+      expect(pair.createIssue).not.toHaveBeenCalled();
     } finally {
       await pair.close();
     }

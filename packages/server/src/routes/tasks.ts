@@ -8,7 +8,7 @@ import {
   getAgentProfile,
   getSetting,
 } from '../db.js';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { TERMINAL_STATUSES, DRIVER_LABELS } from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
@@ -17,6 +17,7 @@ import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
 import { getSnapshot, warmRepoSnapshots } from '../forgejo-snapshot.js';
+import type { Snapshot } from '../forgejo-snapshot.js';
 import { deriveStatus } from '../status-derivation.js';
 import {
   computeTaskHealth,
@@ -241,16 +242,24 @@ export function createTaskRoutes(
 
         const body = request.body as Record<string, unknown>;
 
-        // Direct field update: agent_profile_id (no action required).
-        // null clears the override and reverts to the repo default
-        // (or, transitively, the global default).
-        if ('agent_profile_id' in body) {
-          const raw = body.agent_profile_id;
-          if (raw !== null && typeof raw !== 'string') {
-            return reply.status(400).send({
-              error: 'agent_profile_id must be a string or null',
-            });
-          }
+        // ---- Direct field updates (no `action` key) -------------------
+        // Every recognized field in the body is validated up front and
+        // applied in ONE update. Historically each field had its own
+        // block that returned after applying, so a body carrying e.g.
+        // both profile fields silently dropped the second — easy to hit
+        // now that the implementation/review pair is a natural thing to
+        // set together. Any validation failure rejects the whole request
+        // with nothing applied.
+        const hasFieldUpdate =
+          'agent_profile_id' in body ||
+          'review_agent_profile_id' in body ||
+          'max_attempts' in body;
+        if (hasFieldUpdate) {
+          const updates: Parameters<typeof updateTaskWithSync>[1] = {};
+          const events: Array<{ type: string; message: string }> = [];
+          const comments: string[] = [];
+
+          // Shared validation for the two profile-pointer fields.
           // PATCH semantics: null = clear override (inherit). Empty
           // string is rejected explicitly rather than silently
           // normalized to null — the caller is editing in-place and
@@ -258,79 +267,121 @@ export function createTaskRoutes(
           // "Unknown agent_profile_id: " dangling-colon error shape
           // that the underlying helper produces for empty strings
           // (H5). Use null to clear instead.
-          if (typeof raw === 'string' && raw.trim() === '') {
-            return reply.status(400).send({
-              error:
-                'agent_profile_id cannot be empty. Pass null to clear the per-task override.',
+          const parseProfileField = (
+            fieldName: 'agent_profile_id' | 'review_agent_profile_id'
+          ):
+            | { ok: true; value: string | null }
+            | { ok: false; error: string } => {
+            const raw = body[fieldName];
+            if (raw !== null && typeof raw !== 'string') {
+              return { ok: false, error: `${fieldName} must be a string or null` };
+            }
+            if (typeof raw === 'string' && raw.trim() === '') {
+              return {
+                ok: false,
+                error: `${fieldName} cannot be empty. Pass null to clear the per-task override.`,
+              };
+            }
+            const value = raw === null ? null : (raw as string).trim();
+            const validation = validateAgentProfile(
+              value,
+              getAgentProfile,
+              fieldName
+            );
+            if (!validation.valid) return { ok: false, error: validation.error };
+            return { ok: true, value };
+          };
+
+          // agent_profile_id — implementation-stage override. null
+          // clears it and reverts to the repo default (or, transitively,
+          // the global default).
+          if ('agent_profile_id' in body) {
+            const parsed = parseProfileField('agent_profile_id');
+            if (!parsed.ok) {
+              return reply.status(400).send({ error: parsed.error });
+            }
+            updates.agent_profile_id = parsed.value;
+            const fromLabel = task.agent_profile_id ?? '(inherit)';
+            const toLabel = parsed.value ?? '(inherit)';
+            events.push({
+              type: 'agent_profile_changed',
+              message: `Agent profile changed from ${fromLabel} to ${toLabel}`,
+            });
+            comments.push(
+              `Agent profile changed to \`${parsed.value ?? 'inherit'}\` — takes effect on next attempt.`
+            );
+          }
+
+          // review_agent_profile_id — review-stage override. null clears
+          // it and reverts to the repo review default (or, transitively,
+          // the global review default, or the implementation profile).
+          if ('review_agent_profile_id' in body) {
+            const parsed = parseProfileField('review_agent_profile_id');
+            if (!parsed.ok) {
+              return reply.status(400).send({ error: parsed.error });
+            }
+            updates.review_agent_profile_id = parsed.value;
+            const fromLabel = task.review_agent_profile_id ?? '(inherit)';
+            const toLabel = parsed.value ?? '(inherit)';
+            events.push({
+              type: 'review_agent_profile_changed',
+              message: `Review agent profile changed from ${fromLabel} to ${toLabel}`,
+            });
+            comments.push(
+              `Review agent profile changed to \`${parsed.value ?? 'inherit'}\` — takes effect on next review run.`
+            );
+          }
+
+          // max_attempts — forbidden in terminal states (use the
+          // `extend` action for `failed`, or `requeue` for
+          // `cancelled`/`reset`). Cannot drop below the current attempt
+          // count (use `force_fail` to terminate early).
+          if ('max_attempts' in body) {
+            if (TERMINAL_STATUSES.has(task.status)) {
+              return reply.status(409).send({
+                error: `Cannot edit max_attempts on a task in terminal state '${task.status}'. Use 'extend' on failed tasks or 'requeue' on cancelled/reset tasks.`,
+              });
+            }
+            const raw = body.max_attempts;
+            if (
+              typeof raw !== 'number' ||
+              !Number.isInteger(raw) ||
+              raw < 1
+            ) {
+              return reply
+                .status(400)
+                .send({ error: 'max_attempts must be a positive integer' });
+            }
+            if (raw < task.attempt) {
+              return reply.status(400).send({
+                error: `Cannot set max_attempts below current attempt count of ${task.attempt}`,
+              });
+            }
+            updates.max_attempts = raw;
+            events.push({
+              type: 'max_attempts_changed',
+              message: `Max attempts changed from ${task.max_attempts} to ${raw}`,
             });
           }
-          const newProfile = (raw === null ? null : (raw as string).trim());
 
-          const validation = validateAgentProfile(newProfile, getAgentProfile);
-          if (!validation.valid) {
-            return reply.status(400).send({ error: validation.error });
+          // Everything validated — apply in one update (one DB write,
+          // one dashboard broadcast), then the per-field audit events
+          // and best-effort issue comments.
+          updateTaskWithSync(task.id, updates);
+          for (const event of events) {
+            recordTaskEvent(task.id, event.type, event.message);
           }
-
-          const oldProfile = task.agent_profile_id;
-          updateTaskWithSync(task.id, { agent_profile_id: newProfile });
-
-          const fromLabel = oldProfile ?? '(inherit)';
-          const toLabel = newProfile ?? '(inherit)';
-          recordTaskEvent(
-            task.id,
-            'agent_profile_changed',
-            `Agent profile changed from ${fromLabel} to ${toLabel}`
-          );
-
           const repo = getRepo(task.repo_id);
           if (repo) {
-            try {
-              await forgejo.commentOnIssue(
-                repo,
-                task.issue_id,
-                `Agent profile changed to \`${newProfile ?? 'inherit'}\` — takes effect on next attempt.`
-              );
-            } catch {
-              // Best effort
+            for (const comment of comments) {
+              try {
+                await forgejo.commentOnIssue(repo, task.issue_id, comment);
+              } catch {
+                // Best effort
+              }
             }
           }
 
-          const updated = getTask(id)!;
-          return enrichTask(updated);
-        }
-
-        // Direct field update: max_attempts (no action required).
-        // Forbidden in terminal states — use the `extend` action for `failed`,
-        // or `requeue` for `cancelled`/`reset`. Cannot drop below the current
-        // attempt count (use `force_fail` if you want to terminate early).
-        if ('max_attempts' in body) {
-          if (TERMINAL_STATUSES.has(task.status)) {
-            return reply.status(409).send({
-              error: `Cannot edit max_attempts on a task in terminal state '${task.status}'. Use 'extend' on failed tasks or 'requeue' on cancelled/reset tasks.`,
-            });
-          }
-          const raw = body.max_attempts;
-          if (
-            typeof raw !== 'number' ||
-            !Number.isInteger(raw) ||
-            raw < 1
-          ) {
-            return reply
-              .status(400)
-              .send({ error: 'max_attempts must be a positive integer' });
-          }
-          if (raw < task.attempt) {
-            return reply.status(400).send({
-              error: `Cannot set max_attempts below current attempt count of ${task.attempt}`,
-            });
-          }
-          const oldMax = task.max_attempts;
-          updateTaskWithSync(task.id, { max_attempts: raw });
-          recordTaskEvent(
-            task.id,
-            'max_attempts_changed',
-            `Max attempts changed from ${oldMax} to ${raw}`
-          );
           const updated = getTask(id)!;
           return enrichTask(updated);
         }
@@ -504,19 +555,22 @@ interface EnrichContext {
 }
 
 /**
- * Validate an agent_profile_id value for the PATCH handler.
+ * Validate an agent-profile pointer value for the PATCH handler
+ * (`agent_profile_id` or `review_agent_profile_id` — pass `fieldName`
+ * so the error names the right body key).
  * null is always valid (clears the override). A string must exist in the
  * agent_profiles table. Exported so the unit tests exercise the same logic
  * as the route handler.
  */
 export function validateAgentProfile(
   profileId: string | null,
-  getAgentProfileFn: (id: string) => { id: string } | undefined
+  getAgentProfileFn: (id: string) => { id: string } | undefined,
+  fieldName = 'agent_profile_id'
 ): { valid: true } | { valid: false; error: string } {
   if (profileId === null) return { valid: true };
   const profile = getAgentProfileFn(profileId);
   if (!profile) {
-    return { valid: false, error: `Unknown agent_profile_id: ${profileId}` };
+    return { valid: false, error: `Unknown ${fieldName}: ${profileId}` };
   }
   return { valid: true };
 }
@@ -556,6 +610,54 @@ export function resolveEffectiveAgentProfile(
   return { effective_agent_profile_id: null, agent_profile_source: 'none' };
 }
 
+/**
+ * Resolve the effective REVIEW profile id and its source for a task.
+ * Chain: task.review_agent_profile_id → repo.review_agent_profile_id →
+ * settings.default_review_agent_profile_id → the task's effective
+ * implementation profile ('implementation' source — review runs with the
+ * same profile as the implementation when no review tier is set).
+ * Exported for unit tests; the authoritative launch-time resolution lives
+ * in scheduler.resolveProfile() via db.resolveStageProfileId().
+ */
+export function resolveEffectiveReviewAgentProfile(
+  taskReviewProfile: string | null,
+  repoReviewProfile: string | null,
+  globalReviewDefault: string | null,
+  effectiveImplementationProfile: string | null
+): {
+  effective_review_agent_profile_id: string | null;
+  review_agent_profile_source: 'task' | 'repo' | 'global' | 'implementation' | 'none';
+} {
+  if (taskReviewProfile !== null) {
+    return {
+      effective_review_agent_profile_id: taskReviewProfile,
+      review_agent_profile_source: 'task',
+    };
+  }
+  if (repoReviewProfile !== null) {
+    return {
+      effective_review_agent_profile_id: repoReviewProfile,
+      review_agent_profile_source: 'repo',
+    };
+  }
+  if (globalReviewDefault !== null) {
+    return {
+      effective_review_agent_profile_id: globalReviewDefault,
+      review_agent_profile_source: 'global',
+    };
+  }
+  if (effectiveImplementationProfile !== null) {
+    return {
+      effective_review_agent_profile_id: effectiveImplementationProfile,
+      review_agent_profile_source: 'implementation',
+    };
+  }
+  return {
+    effective_review_agent_profile_id: null,
+    review_agent_profile_source: 'none',
+  };
+}
+
 function enrichTask(task: Task, ctx: EnrichContext = {}) {
   const repo = getRepo(task.repo_id);
   const attempts = getAttempts(task.id);
@@ -565,9 +667,11 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
     : deriveHealthWithoutDocker(task, runningAttempt);
 
-  // Surface the effective profile id and which tier it came from so the UI
-  // can render the override / inherit chain without a second round-trip.
-  // Task-level override wins, then repo default, then the global default.
+  // Surface the effective profile ids (per stage) and which tier each came
+  // from so the UI can render the override / inherit chains without a
+  // second round-trip. Task-level override wins, then repo default, then
+  // the global default; the review chain additionally falls back to the
+  // effective implementation profile.
   const repoProfileId = repo?.agent_profile_id ?? null;
   const globalDefault = getSetting('default_agent_profile_id') ?? null;
   const { effective_agent_profile_id, agent_profile_source } =
@@ -575,6 +679,17 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
       task.agent_profile_id,
       repoProfileId,
       globalDefault
+    );
+
+  const repoReviewProfileId = repo?.review_agent_profile_id ?? null;
+  const globalReviewDefault =
+    getSetting('default_review_agent_profile_id') ?? null;
+  const { effective_review_agent_profile_id, review_agent_profile_source } =
+    resolveEffectiveReviewAgentProfile(
+      task.review_agent_profile_id,
+      repoReviewProfileId,
+      globalReviewDefault,
+      effective_agent_profile_id
     );
 
   return {
@@ -589,7 +704,24 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
     agent_profile_source,
     repo_agent_profile_id: repoProfileId,
     global_agent_profile_id: globalDefault,
+    effective_review_agent_profile_id,
+    review_agent_profile_source,
+    repo_review_agent_profile_id: repoReviewProfileId,
+    global_review_agent_profile_id: globalReviewDefault,
   };
+}
+
+/**
+ * Read the human-review driver label off a Forgejo snapshot. The label —
+ * not a task column — is what makes the orchestrator skip the automated
+ * review agent, so this is the live answer to "will a review agent run
+ * for this task?". Returns null when no snapshot is available (Forgejo
+ * unreachable / not yet fetched): "unknown", which the UI treats as
+ * not-enabled. Exported for unit tests.
+ */
+export function hasHumanReviewLabel(snapshot: Snapshot | null): boolean | null {
+  if (!snapshot) return null;
+  return snapshot.issue.labels.includes(DRIVER_LABELS.HUMAN_REVIEW);
 }
 
 /**
@@ -599,12 +731,18 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
  * show); `runtime_status` preserves the stored orchestrator state for
  * debugging. Snapshot fetch failures fall back to the stored status — the
  * API stays responsive if Forgejo is briefly unreachable.
+ *
+ * Also surfaces `has_human_review_label` from the same snapshot so the
+ * UI can grey out the review-profile selector (the review agent never
+ * runs while the label is present). Only the derivation paths carry the
+ * field — POST/PATCH responses (plain `enrichTask`) omit it, and the UI
+ * re-fetches via GET after mutations anyway.
  */
 async function enrichTaskWithDerivation(
   task: Task,
   forgejo: ForgejoClient,
   ctx: EnrichContext = {}
-): Promise<ReturnType<typeof enrichTask>> {
+): Promise<ReturnType<typeof enrichTask> & { has_human_review_label: boolean | null }> {
   const base = enrichTask(task, ctx);
 
   let snapshot = null;
@@ -614,7 +752,11 @@ async function enrichTaskWithDerivation(
     // Best effort — derivation falls back to stored status.
   }
   const derived = deriveStatus(task, snapshot);
-  return { ...base, status: derived.status };
+  return {
+    ...base,
+    status: derived.status,
+    has_human_review_label: hasHumanReviewLabel(snapshot),
+  };
 }
 
 function findRunningAttempt(attempts: Attempt[]): Attempt | undefined {

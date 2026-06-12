@@ -28,6 +28,7 @@ export function CreateTask() {
 
   // Shared overrides
   const [agentProfile, setAgentProfile] = useState<string>('');
+  const [reviewAgentProfile, setReviewAgentProfile] = useState<string>('');
   const [maxAttempts, setMaxAttempts] = useState<string>('');
   const [humanMerge, setHumanMerge] = useState(false);
   const [humanReview, setHumanReview] = useState(false);
@@ -77,6 +78,7 @@ export function CreateTask() {
           title: title.trim(),
           description: description.trim(),
           agent_profile_id: agentProfile || null,
+          review_agent_profile_id: reviewAgentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : undefined,
           human_merge: humanMerge,
           human_review: humanReview,
@@ -91,6 +93,7 @@ export function CreateTask() {
           issue_id: selectedIssueId,
           repo_id: repoId,
           agent_profile_id: agentProfile || null,
+          review_agent_profile_id: reviewAgentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : null,
           human_merge: humanMerge,
           human_review: humanReview,
@@ -238,7 +241,7 @@ export function CreateTask() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">
-                Agent profile
+                Implementation profile
               </label>
               <select
                 value={agentProfile}
@@ -246,6 +249,31 @@ export function CreateTask() {
                 className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               >
                 <option value="">Inherit (repo / global default)</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Review profile
+              </label>
+              <select
+                value={reviewAgentProfile}
+                onChange={(e) => setReviewAgentProfile(e.target.value)}
+                disabled={humanReview}
+                title={
+                  humanReview
+                    ? 'Human review is enabled — the automated review agent does not run.'
+                    : undefined
+                }
+                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm disabled:opacity-50"
+              >
+                <option value="">
+                  Inherit (review default, else implementation profile)
+                </option>
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.display_name}

@@ -12,10 +12,12 @@ import { validateInstallSteps } from '../install-steps.js';
 import type { MergeStrategy } from '@orchestrator/shared';
 import { MERGE_STRATEGIES } from '@orchestrator/shared';
 
-/** Normalise + validate a body's `agent_profile_id` field. Returns
+/** Normalise + validate a body's agent-profile pointer field
+ *  (`agent_profile_id` or `review_agent_profile_id` — pass `fieldName`
+ *  so errors name the right body key). Returns
  *  - ok=true, value=null when the field is absent/null/empty string
- *    (all three mean "inherit from settings.default_agent_profile_id"
- *    at task-launch time)
+ *    (all three mean "inherit from the next tier in the resolution
+ *    chain" at task-launch time)
  *  - ok=true, value=string when the id references an existing profile
  *  - ok=false, error when the field is the wrong type or points at a
  *    non-existent profile
@@ -28,20 +30,21 @@ import { MERGE_STRATEGIES } from '@orchestrator/shared';
  *  without spinning a Fastify app + ForgejoClient stub (R3). */
 export function validateRepoAgentProfile(
   raw: unknown,
-  lookupProfile: (id: string) => unknown = getAgentProfile
+  lookupProfile: (id: string) => unknown = getAgentProfile,
+  fieldName = 'agent_profile_id'
 ):
   | { ok: true; value: string | null }
   | { ok: false; error: string } {
   if (raw === undefined || raw === null) return { ok: true, value: null };
   if (typeof raw !== 'string') {
-    return { ok: false, error: 'agent_profile_id must be a string or null' };
+    return { ok: false, error: `${fieldName} must be a string or null` };
   }
   const trimmed = raw.trim();
   if (trimmed === '') return { ok: true, value: null };
   if (!lookupProfile(trimmed)) {
     return {
       ok: false,
-      error: `agent_profile_id '${trimmed}' does not reference an existing agent profile`,
+      error: `${fieldName} '${trimmed}' does not reference an existing agent profile`,
     };
   }
   return { ok: true, value: trimmed };
@@ -156,6 +159,18 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
       }
       const agentProfileId = profileCheck.value;
 
+      // review_agent_profile_id: same shape; null/absent/empty → inherit
+      // (global review default, then the implementation profile).
+      const reviewProfileCheck = validateRepoAgentProfile(
+        body.review_agent_profile_id,
+        getAgentProfile,
+        'review_agent_profile_id'
+      );
+      if (!reviewProfileCheck.ok) {
+        return reply.status(400).send({ error: reviewProfileCheck.error });
+      }
+      const reviewAgentProfileId = reviewProfileCheck.value;
+
       // Strategy + per-repo container resource overrides (R1, R2). All
       // three accept null/absent for "use the default", but a present
       // value must parse as the right shape — otherwise we'd persist
@@ -182,14 +197,15 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
 
       const result = getDb()
         .prepare(
-          `INSERT INTO repos (owner, name, base_branch, agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO repos (owner, name, base_branch, agent_profile_id, review_agent_profile_id, install_steps, allow_script_steps, container_memory_mb, container_cpu_cores, merge_strategy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           body.owner,
           body.name,
           body.base_branch ?? 'main',
           agentProfileId,
+          reviewAgentProfileId,
           JSON.stringify(installSteps),
           allowScriptSteps ? 1 : 0,
           memoryCheck.value,
@@ -232,6 +248,18 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
             return reply.status(400).send({ error: profileCheck.error });
           }
           agentProfileUpdate = profileCheck.value;
+        }
+        let reviewProfileUpdate: string | null | undefined = undefined;
+        if ('review_agent_profile_id' in body) {
+          const reviewProfileCheck = validateRepoAgentProfile(
+            body.review_agent_profile_id,
+            getAgentProfile,
+            'review_agent_profile_id'
+          );
+          if (!reviewProfileCheck.ok) {
+            return reply.status(400).send({ error: reviewProfileCheck.error });
+          }
+          reviewProfileUpdate = reviewProfileCheck.value;
         }
         let strategyUpdate: string | undefined = undefined;
         if ('merge_strategy' in body) {
@@ -278,6 +306,10 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
         if (agentProfileUpdate !== undefined) {
           sets.push('agent_profile_id = ?');
           params.push(agentProfileUpdate);
+        }
+        if (reviewProfileUpdate !== undefined) {
+          sets.push('review_agent_profile_id = ?');
+          params.push(reviewProfileUpdate);
         }
         if (strategyUpdate !== undefined) {
           sets.push('merge_strategy = ?');

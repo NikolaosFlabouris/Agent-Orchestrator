@@ -75,6 +75,7 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Trigger: dev agent container exits successfully, orchestrator verifies push / creates PR
 - Action: relabel, start review container immediately in the same slot, post comment "Implementation complete. PR #N opened."
 - The task holds its slot — the review is not separately queued
+- Exception: the review stage resolves its own agent profile, which may target a different provider than the dev run. If that provider's `concurrency_limit` is saturated, the task parks as `in-review` with no container and the scheduler launches the review once a slot frees (same Priority-1 pickup the restart-recovery path uses)
 
 **in-review → approved → merged** (or → awaiting-human-merge)
 - Trigger: review agent returns verdict "approved"

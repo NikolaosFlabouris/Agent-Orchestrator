@@ -74,6 +74,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     max_attempts: 3,
     prep_failure_count: 0,
     agent_profile_id: null,
+    review_agent_profile_id: null,
     container_id: null,
     started_at: null,
     completed_at: null,

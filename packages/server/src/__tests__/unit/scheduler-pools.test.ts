@@ -5,6 +5,7 @@ import {
   countActiveByProvider,
   limitMapFromProviders,
   resolveProviderKey,
+  shouldDeferReviewLaunch,
 } from '../../scheduler-pools.js';
 import type { Task, Provider } from '@orchestrator/shared';
 
@@ -13,8 +14,8 @@ import type { Task, Provider } from '@orchestrator/shared';
 // in fields that these pure helpers don't touch.
 // ---------------------------------------------------------------------------
 
-function mkTask(id: number): Task {
-  return { id } as unknown as Task;
+function mkTask(id: number, container_id: string | null = 'c'): Task {
+  return { id, container_id } as unknown as Task;
 }
 function mkProvider(id: string, limit: number): Provider {
   return {
@@ -90,5 +91,92 @@ describe('canLaunchInPool', () => {
     // resolution mid-migration is still possible. Don't block it; the
     // missing limit row defaults to "unconstrained from this layer".
     expect(canLaunchInPool('gone', new Map(), limits)).toBe(true);
+  });
+});
+
+describe('shouldDeferReviewLaunch', () => {
+  const limits = limitMapFromProviders([
+    mkProvider('anthropic', 3),
+    mkProvider('ollama-a', 1),
+    mkProvider('ollama-b', 0), // paused
+  ]);
+
+  // Resolver stub: task → provider id. The real resolver is the
+  // scheduler's stage-aware providerIdForTask; here it's just a lookup.
+  function resolverFor(providerByTask: Record<number, string | null>) {
+    return (t: Task) => providerByTask[t.id];
+  }
+
+  it('defers when the (foreign) review provider is at its limit', () => {
+    // Task 1 finished dev on anthropic; its review targets ollama-a
+    // (limit 1), which task 2 is already occupying.
+    const active = [mkTask(1), mkTask(2)];
+    const resolve = resolverFor({ 1: 'anthropic', 2: 'ollama-a' });
+    expect(shouldDeferReviewLaunch('ollama-a', 1, active, resolve, limits)).toBe(
+      true
+    );
+  });
+
+  it('launches when the same limit-1 provider is held only by the transitioning task itself (self-exclusion)', () => {
+    // The single-profile case on a concurrency_limit=1 provider: the
+    // task's exited dev container nominally holds the only slot. The
+    // task hands that slot to its own review — counting it would defer
+    // every review on this provider, regressing pre-split behavior.
+    const active = [mkTask(1)];
+    const resolve = resolverFor({ 1: 'ollama-a' });
+    expect(shouldDeferReviewLaunch('ollama-a', 1, active, resolve, limits)).toBe(
+      false
+    );
+  });
+
+  it('defers when a limit-1 provider is held by a DIFFERENT task', () => {
+    const active = [mkTask(1), mkTask(2)];
+    const resolve = resolverFor({ 1: 'anthropic', 2: 'ollama-a' });
+    // Task 1's review targets ollama-a; task 2 (not the transitioning
+    // task) holds the only slot.
+    expect(shouldDeferReviewLaunch('ollama-a', 1, active, resolve, limits)).toBe(
+      true
+    );
+  });
+
+  it('never defers a broken profile chain (null review provider)', () => {
+    // Unconstrained-by-provider treatment, matching fillSlots. If the
+    // chain is truly broken, the launch-time resolution throws the
+    // operator-facing error instead.
+    expect(shouldDeferReviewLaunch(null, 1, [mkTask(2)], () => 'x', limits)).toBe(
+      false
+    );
+  });
+
+  it('launches when the review provider has headroom', () => {
+    const active = [mkTask(1), mkTask(2)];
+    const resolve = resolverFor({ 1: 'anthropic', 2: 'anthropic' });
+    // anthropic limit 3; one foreign holder (task 2) after excluding
+    // the transitioning task → 1 < 3.
+    expect(
+      shouldDeferReviewLaunch('anthropic', 1, active, resolve, limits)
+    ).toBe(false);
+  });
+
+  it('defers onto a paused provider (limit 0) even with no active tasks', () => {
+    expect(shouldDeferReviewLaunch('ollama-b', 1, [], () => null, limits)).toBe(
+      true
+    );
+  });
+
+  it('treats an unknown review provider (row deleted) as unconstrained', () => {
+    expect(shouldDeferReviewLaunch('gone', 1, [mkTask(2)], () => 'gone', limits)).toBe(
+      false
+    );
+  });
+
+  it('ignores tasks without a container (parked or queued) in the count', () => {
+    // Task 2 is parked in-review with no container on ollama-a — it
+    // holds no slot, so task 1's review can launch there.
+    const active = [mkTask(1), mkTask(2, null)];
+    const resolve = resolverFor({ 1: 'anthropic', 2: 'ollama-a' });
+    expect(shouldDeferReviewLaunch('ollama-a', 1, active, resolve, limits)).toBe(
+      false
+    );
   });
 });

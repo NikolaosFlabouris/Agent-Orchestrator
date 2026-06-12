@@ -327,14 +327,45 @@ function ToolChip({ task }: { task: TaskResponse }) {
           ? 'global default'
           : 'unset';
 
+  // Second chip only when the review stage resolves to a different
+  // profile — the common single-profile setup stays visually unchanged.
+  const reviewId = task.effective_review_agent_profile_id;
+  const reviewDiffers = reviewId !== null && reviewId !== profileId;
+  const reviewFound = reviewDiffers
+    ? profiles.find((p) => p.id === reviewId)
+    : undefined;
+  const reviewName = reviewFound?.display_name ?? reviewId ?? '';
+  const reviewTruncated =
+    reviewName.length > 25 ? reviewName.slice(0, 24) + '…' : reviewName;
+  const reviewSource = task.review_agent_profile_source;
+  const reviewIsOverride = reviewSource === 'task';
+  const reviewSourceLabel =
+    reviewSource === 'task'
+      ? 'task override'
+      : reviewSource === 'repo'
+        ? 'repo review default'
+        : reviewSource === 'global'
+          ? 'global review default'
+          : 'implementation profile';
+
   return (
-    <span
-      className={`text-xs font-mono truncate ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
-      title={`${name} (${sourceLabel})`}
-    >
-      {isOverride && <span className="mr-0.5">•</span>}
-      {truncated}
-    </span>
+    <>
+      <span
+        className={`text-xs font-mono truncate ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
+        title={`${name} (${sourceLabel})`}
+      >
+        {isOverride && <span className="mr-0.5">•</span>}
+        {truncated}
+      </span>
+      {reviewDiffers && (
+        <span
+          className={`text-xs font-mono truncate ${reviewIsOverride ? 'text-blue-400' : 'text-gray-500'}`}
+          title={`Review: ${reviewName} (${reviewSourceLabel})`}
+        >
+          ⮑ {reviewTruncated}
+        </span>
+      )}
+    </>
   );
 }
 

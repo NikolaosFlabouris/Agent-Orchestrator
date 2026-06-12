@@ -55,9 +55,9 @@ The orchestrator only acts on issues that have the `status/queued` label. Issues
 
 Two modes:
 
-**Queue existing issue:** select repository, browse open issues that don't have any `status/*` label (i.e., not already queued or in progress). Selecting an issue adds the `status/queued` label and any configured override labels (`human-merge`, `human-review`). Options: max attempts override, agent profile override (dropdown defaulting to "Repo default", listing all configured profiles).
+**Queue existing issue:** select repository, browse open issues that don't have any `status/*` label (i.e., not already queued or in progress). Selecting an issue adds the `status/queued` label and any configured override labels (`human-merge`, `human-review`). Options: max attempts override, implementation profile override and review profile override (dropdowns defaulting to "Inherit", listing all configured profiles; the review select is disabled while human review is enabled, since the automated review agent doesn't run).
 
-**Create and queue new task:** repository selector, title, description (markdown editor with dependency checklist support), same override options including agent profile. Creates the Forgejo issue with `status/queued` label and queues it in one action.
+**Create and queue new task:** repository selector, title, description (markdown editor with dependency checklist support), same override options including both profile overrides. Creates the Forgejo issue with `status/queued` label and queues it in one action.
 
 Both modes result in the same outcome: a Forgejo issue with `status/queued` that the orchestrator will pick up on its next tick. Users who want to create issues without immediately queuing them should use Forgejo directly — the orchestrator UI is specifically for dispatching work to agents.
 
@@ -65,9 +65,9 @@ Both modes result in the same outcome: a Forgejo issue with `status/queued` that
 
 The Settings page has five tabs:
 
-**Global Settings.** Host resource pool (`max_agent_memory_mb`, `max_agent_cpu_cores`) and the fallback `default_agent_profile_id`. The UI exposes a profile picker for the default; deletion is gated on it not being the global default.
+**Global Settings.** Host resource pool (`max_agent_memory_mb`, `max_agent_cpu_cores`), the fallback `default_agent_profile_id` (implementation stage), and the optional `default_review_agent_profile_id` (review stage; unset = reviews use the implementation profile). The UI exposes profile pickers for both; deletion is gated on a profile not being either global default.
 
-**Repositories.** List of configured repos. Per-repo fields: base branch, default agent profile (`agent_profile_id`, nullable — blank means inherit the global default), `install_steps` (typed entries: kind from a fixed dropdown plus optional `cwd`, plus an `allow_script_steps` toggle for the script escape hatch), per-repo container memory/CPU overrides (blank = compile-time defaults), preferred merge strategy (squash / merge / rebase).
+**Repositories.** List of configured repos. Per-repo fields: base branch, default implementation profile (`agent_profile_id`, nullable — blank means inherit the global default), default review profile (`review_agent_profile_id`, nullable — blank means inherit the global review default, then the implementation profile), `install_steps` (typed entries: kind from a fixed dropdown plus optional `cwd`, plus an `allow_script_steps` toggle for the script escape hatch), per-repo container memory/CPU overrides (blank = compile-time defaults), preferred merge strategy (squash / merge / rebase).
 
 **Providers & Models.** Nested layout: the providers list is the outer view, and selecting a provider expands its model list. Provider fields: `id`, `display_name`, `kind` (anthropic / claude-subscription / openai / gemini / mistral / deepseek / openrouter / ollama), `concurrency_limit`, `base_url` (required for ollama, hidden for cloud kinds), and exactly one of `api_key_env_var` (env-var pointer) or `auth_token` (inline plaintext). Per-kind form components render only the fields that kind supports. Model fields are just `model_id` and `display_name` under a fixed `provider_id`.
 
@@ -124,7 +124,9 @@ Returns all active and queued tasks, plus the most recent completed tasks (limit
 Field notes:
 - `issue_title` is fetched from Forgejo, not stored in the DB
 - `repo` is joined from the `repos` table
-- `agent_profile_id` is the per-task override; `null` means inherit from `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`
+- `agent_profile_id` is the per-task implementation-stage override; `null` means inherit from `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`
+- `review_agent_profile_id` is the per-task review-stage override; `null` means inherit from `repos.review_agent_profile_id` → `settings.default_review_agent_profile_id` → the effective implementation profile. Responses also carry the resolved `effective_agent_profile_id` / `agent_profile_source` and `effective_review_agent_profile_id` / `review_agent_profile_source` (`task` / `repo` / `global` / `implementation` / `none`) so the UI can render the inherit chains without re-deriving them
+- `has_human_review_label` is a live read of the Forgejo `human-review` driver label from the same snapshot the status derivation uses: `true` = the automated review agent is skipped (so the review profile is unused; the UI greys out its selector), `false` = it will run, `null` = unknown (no Forgejo snapshot available). GET responses only — POST/PATCH responses omit it
 - `blocked_by` is computed from dependency parsing (array of issue IDs that are still open)
 - Active and queued tasks are always returned in full; completed tasks are limited by `limit`
 
@@ -201,7 +203,17 @@ The `attempts` array contains every attempt row for this task, ordered chronolog
 
 #### PATCH /api/tasks/:id Request Schema
 
-The request body contains an `action` field that determines the operation. Each action has its own optional fields:
+Two request shapes. **Direct field updates** carry one or more editable fields and no `action` key; every recognized field is validated up front and applied atomically (a validation failure on any field rejects the whole request with nothing applied):
+
+```json
+{ "agent_profile_id": "opencode-ollama-qwen", "review_agent_profile_id": "default-claude-sdk" }
+{ "review_agent_profile_id": null }
+{ "max_attempts": 5 }
+```
+
+`agent_profile_id` / `review_agent_profile_id` accept a profile id or `null` to clear the per-task override (empty string is rejected). `max_attempts` must be a positive integer ≥ the current attempt count and is not editable in terminal states (use `extend`/`requeue`).
+
+**Actions** carry an `action` field that determines the operation. Each action has its own optional fields:
 
 ```json
 { "action": "reorder", "queue_position": 3 }
@@ -268,6 +280,7 @@ POST   /webhooks/forgejo                   → Forgejo webhook receiver
       "name": "frontend",
       "base_branch": "main",
       "agent_profile_id": null,
+      "review_agent_profile_id": null,
       "install_steps": [{ "kind": "npm-ci" }],
       "allow_script_steps": false,
       "container_memory_mb": null,
@@ -278,7 +291,7 @@ POST   /webhooks/forgejo                   → Forgejo webhook receiver
 }
 ```
 
-`POST /api/repos` request — required: `owner`, `name`. `agent_profile_id` is optional; `null` means inherit `settings.default_agent_profile_id` at task launch time. Other defaults: `base_branch` = `"main"`, `install_steps` = `[]`, `allow_script_steps` = `false`, nullable resource fields = `null`.
+`POST /api/repos` request — required: `owner`, `name`. `agent_profile_id` is optional; `null` means inherit `settings.default_agent_profile_id` at task launch time. `review_agent_profile_id` is optional with the same shape; `null` means inherit the global review default, then the implementation profile. Other defaults: `base_branch` = `"main"`, `install_steps` = `[]`, `allow_script_steps` = `false`, nullable resource fields = `null`.
 
 ```json
 {
@@ -383,7 +396,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 
 `POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h). The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is intentionally not validated at save — mismatches surface at task launch with a clear "harness X doesn't support kind Y" message.
 
-`DELETE /api/agent-profiles/:id` returns 409 when the profile is the global default (`settings.default_agent_profile_id`) or when any repo or task references it.
+`DELETE /api/agent-profiles/:id` returns 409 when the profile is either global default (`settings.default_agent_profile_id` or `settings.default_review_agent_profile_id`) or when any repo or task references it in either profile column (implementation or review).
 
 `GET /api/harnesses` returns the code-defined harness registry — read-only, used by the Agent Profiles form to populate the harness dropdown and scope the model picker:
 
@@ -419,13 +432,14 @@ Returns open Forgejo issues for the specified repo that don't have any `status/*
   "title": "Add login validation",
   "description": "Implement email format validation on the login form...",
   "agent_profile_id": "default-claude-sdk",
+  "review_agent_profile_id": null,
   "max_attempts": 7,
   "human_merge": false,
   "human_review": false
 }
 ```
 
-Required: `repo_id`, `title`, `description`. All other fields are optional. `agent_profile_id` overrides the repo's default; omit (or pass `null`) to inherit `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`.
+Required: `repo_id`, `title`, `description`. All other fields are optional. `agent_profile_id` overrides the repo's default for the implementation stage; omit (or pass `null`) to inherit `repos.agent_profile_id`, which falls back to `settings.default_agent_profile_id`. `review_agent_profile_id` is the review-stage counterpart; omit/`null` inherits `repos.review_agent_profile_id` → `settings.default_review_agent_profile_id` → the implementation profile.
 
 #### POST /api/tasks/queue Request Schema
 
@@ -434,6 +448,7 @@ Required: `repo_id`, `title`, `description`. All other fields are optional. `age
   "issue_id": 42,
   "repo_id": 1,
   "agent_profile_id": null,
+  "review_agent_profile_id": null,
   "max_attempts": null,
   "human_merge": false,
   "human_review": false
@@ -450,9 +465,14 @@ Required: `issue_id`, `repo_id`. All other fields are optional.
 {
   "max_agent_memory_mb": 20480,
   "max_agent_cpu_cores": 10,
-  "default_agent_profile_id": "default-claude-sdk"
+  "default_agent_profile_id": "default-claude-sdk",
+  "default_review_agent_profile_id": "default-claude-code-subscription"
 }
 ```
+
+`default_review_agent_profile_id` is absent from the GET response when
+unset (the default) — reviews then run with the implementation profile.
+PATCH with `null` clears it back to that state.
 
 Note: `poll_interval_seconds` (60s), `default_max_attempts` (7), and
 `workspace_retention_days` (7) are compile-time constants in

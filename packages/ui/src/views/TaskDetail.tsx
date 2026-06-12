@@ -30,6 +30,7 @@ export function TaskDetail() {
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
+  const [reviewProfileError, setReviewProfileError] = useState<string | null>(null);
   const [extendModalOpen, setExtendModalOpen] = useState(false);
   const [extendAmount, setExtendAmount] = useState(1);
   const [extendError, setExtendError] = useState<string | null>(null);
@@ -176,6 +177,57 @@ export function TaskDetail() {
     }
   }
 
+  async function handleReviewProfileChange(newProfileId: string) {
+    if (!task) return;
+    const newProfile = newProfileId || null; // empty string → null (inherit)
+
+    // Same optimistic-update + exact-snapshot-rollback pattern as
+    // handleAgentProfileChange, over the review chain (which has the
+    // extra terminal fallback to the effective implementation profile).
+    const prevSnapshot = {
+      review_agent_profile_id: task.review_agent_profile_id,
+      effective_review_agent_profile_id: task.effective_review_agent_profile_id,
+      review_agent_profile_source: task.review_agent_profile_source,
+    };
+
+    setTask((prev) => {
+      if (!prev) return prev;
+      const inherited =
+        prev.repo_review_agent_profile_id ??
+        prev.global_review_agent_profile_id ??
+        prev.effective_agent_profile_id;
+      return {
+        ...prev,
+        review_agent_profile_id: newProfile,
+        effective_review_agent_profile_id: newProfile ?? inherited,
+        review_agent_profile_source: newProfile !== null
+          ? 'task'
+          : prev.repo_review_agent_profile_id !== null
+            ? 'repo'
+            : prev.global_review_agent_profile_id !== null
+              ? 'global'
+              : prev.effective_agent_profile_id !== null
+                ? 'implementation'
+                : 'none',
+      };
+    });
+    setReviewProfileError(null);
+
+    try {
+      await api.patchTask(task.id, { review_agent_profile_id: newProfile });
+    } catch (err) {
+      setTask((prev) => (prev ? { ...prev, ...prevSnapshot } : prev));
+      setReviewProfileError(err instanceof Error ? err.message : 'Failed to update review profile');
+      return;
+    }
+    try {
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+    } catch {
+      // PATCH was confirmed; leave optimistic state — WS push will correct it.
+    }
+  }
+
   function startEditMaxAttempts() {
     if (!task) return;
     setMaxAttemptsDraft(task.max_attempts);
@@ -311,7 +363,7 @@ export function TaskDetail() {
               </div>
             )}
             <div className="mt-2 flex items-center gap-2 flex-wrap">
-              <label className="text-xs text-gray-500">Agent profile:</label>
+              <label className="text-xs text-gray-500">Implementation profile:</label>
               <select
                 value={task.agent_profile_id ?? ''}
                 onChange={(e) => handleAgentProfileChange(e.target.value)}
@@ -340,6 +392,56 @@ export function TaskDetail() {
               )}
               {agentProfileError && (
                 <span className="text-xs text-red-400">{agentProfileError}</span>
+              )}
+            </div>
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <label className="text-xs text-gray-500">Review profile:</label>
+              <select
+                value={task.review_agent_profile_id ?? ''}
+                onChange={(e) => handleReviewProfileChange(e.target.value)}
+                disabled={task.has_human_review_label === true}
+                title={
+                  task.has_human_review_label === true
+                    ? 'Human review is enabled — the automated review agent does not run for this task.'
+                    : undefined
+                }
+                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs disabled:opacity-50"
+              >
+                <option value="">
+                  Inherit
+                  {(() => {
+                    const inheritedId =
+                      task.repo_review_agent_profile_id ??
+                      task.global_review_agent_profile_id ??
+                      task.effective_agent_profile_id;
+                    if (!inheritedId) return ' (no default — set one in Global Settings)';
+                    const found = profiles.find((p) => p.id === inheritedId);
+                    const label = found?.display_name ?? inheritedId;
+                    const source = task.repo_review_agent_profile_id
+                      ? 'repo review default'
+                      : task.global_review_agent_profile_id
+                        ? 'global review default'
+                        : 'implementation profile';
+                    return ` (${source}: ${label})`;
+                  })()}
+                </option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.display_name}
+                  </option>
+                ))}
+              </select>
+              {task.has_human_review_label === true ? (
+                <span className="text-xs text-gray-500 italic">
+                  Human review is enabled — the automated review agent doesn't run
+                </span>
+              ) : (
+                ACTIVE_STATUSES.has(task.status) && (
+                  <span className="text-xs text-gray-500 italic">Takes effect on next review run</span>
+                )
+              )}
+              {reviewProfileError && (
+                <span className="text-xs text-red-400">{reviewProfileError}</span>
               )}
             </div>
           </>
