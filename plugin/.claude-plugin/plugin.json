@@ -1,6 +1,6 @@
 {
   "name": "agent-orchestrator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Create and queue Agent Orchestrator tasks from any project via the orchestrator's MCP endpoint. Claude Code handles OAuth (DCR + PKCE) automatically on first use — no static credentials live in this plugin.",
   "author": {
     "name": "Agent Orchestrator"

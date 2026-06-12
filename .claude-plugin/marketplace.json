@@ -11,7 +11,7 @@
       "name": "agent-orchestrator",
       "source": "./plugin",
       "description": "Create and queue Agent Orchestrator tasks from any project. Communicates with a running orchestrator over MCP (Model Context Protocol) with OAuth-delegated authentication — no credentials or repo access required on the developer's machine.",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
