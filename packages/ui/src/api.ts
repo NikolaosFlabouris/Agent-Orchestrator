@@ -36,6 +36,11 @@ export const api = {
   },
   getTask: (id: number) =>
     request<TaskDetailResponse>('GET', `/api/tasks/${id}`),
+  recheckDependencies: (id: number) =>
+    request<{ dependencies: TaskDependencyResponse[]; blocked: boolean }>(
+      'POST',
+      `/api/tasks/${id}/dependencies/recheck`
+    ),
   createTask: (data: CreateTaskRequest) =>
     request<TaskResponse>('POST', '/api/tasks', data),
   queueTask: (data: QueueTaskRequest) =>
@@ -66,8 +71,11 @@ export const api = {
     request<RepoResponse>('POST', '/api/repos', data),
   updateRepo: (id: number, data: Partial<RepoResponse>) =>
     request<RepoResponse>('PATCH', `/api/repos/${id}`, data),
-  getRepoIssues: (id: number) =>
-    request<{ issues: IssueResponse[] }>('GET', `/api/repos/${id}/issues`),
+  getRepoIssues: (id: number, opts?: { all?: boolean }) =>
+    request<{ issues: IssueResponse[] }>(
+      'GET',
+      `/api/repos/${id}/issues${opts?.all ? '?all=true' : ''}`
+    ),
 
   // -- Credentials --
   getCredentials: () =>
@@ -155,7 +163,13 @@ export interface TaskResponse {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  /** Synced projection of the issue body's `## Dependencies` checklist. */
+  dependencies: TaskDependencyResponse[];
+  /** Unsatisfied dependency issue numbers (empty when none gate launch). */
   blocked_by: number[];
+  /** True when the task is queued and unsatisfied dependencies prevent it
+   *  from launching. Presentation-only — the status stays `queued`. */
+  blocked: boolean;
   /** Runtime health derived from container state. 'orphaned' means the
    *  task looks active but its container has vanished; the orchestrator
    *  will attempt recovery on the next sweep. Optional: POST/PATCH
@@ -192,6 +206,30 @@ export interface TaskResponse {
    *  Optional: only GET responses carry it (POST/PATCH omit it; the UI
    *  re-fetches after mutations). */
   has_human_review_label?: boolean | null;
+}
+
+export type DependencyState =
+  | 'satisfied'
+  | 'manually-satisfied'
+  | 'open'
+  | 'in-progress'
+  | 'failed'
+  | 'missing'
+  | 'error'
+  | 'cycle';
+
+export interface TaskDependencyResponse {
+  id: number;
+  task_id: number;
+  /** Issue (or PR) number in the task's repo. */
+  dep_issue_number: number;
+  state: DependencyState;
+  /** Evidence/reason, e.g. "merged via task #12 / PR #52". */
+  detail: string | null;
+  /** Raw checkbox state from the issue body (`- [x]` = manual override). */
+  checked: boolean;
+  first_seen_at: string;
+  last_evaluated_at: string | null;
 }
 
 export interface TaskEventResponse {
@@ -262,6 +300,9 @@ export interface CreateTaskRequest {
   repo_id: number;
   title: string;
   description: string;
+  /** Issue numbers this task waits for — written into the issue body as
+   *  the canonical `## Dependencies` checklist. */
+  dependencies?: number[];
   /** Per-task implementation profile override. Null inherits from repo / global default. */
   agent_profile_id?: string | null;
   /** Per-task review profile override. Null inherits (repo review default
@@ -275,6 +316,8 @@ export interface CreateTaskRequest {
 export interface QueueTaskRequest {
   issue_id: number;
   repo_id: number;
+  /** Issue numbers to ADD to the issue's `## Dependencies` section. */
+  dependencies?: number[];
   agent_profile_id?: string | null;
   review_agent_profile_id?: string | null;
   max_attempts?: number | null;

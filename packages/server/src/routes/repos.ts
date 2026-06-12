@@ -370,8 +370,11 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
       }
     );
 
-    // GET /api/repos/:id/issues — open Forgejo issues available for queuing
-    app.get<{ Params: { id: string } }>(
+    // GET /api/repos/:id/issues — open Forgejo issues available for queuing.
+    // With ?all=true, returns EVERY open issue (tracked or status-labelled
+    // ones included) — used by the dependency picker, where depending on
+    // an issue that is already a task is the typical case.
+    app.get<{ Params: { id: string }; Querystring: { all?: string } }>(
       '/api/repos/:id/issues',
       async (request, reply) => {
         const id = parseInt(request.params.id, 10);
@@ -379,6 +382,7 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
         if (!repo) {
           return reply.status(404).send({ error: 'Repo not found' });
         }
+        const includeAll = request.query.all === 'true';
 
         try {
           // Fetch open issues from Forgejo
@@ -388,6 +392,7 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
           // and issues already tracked as tasks
           const available = forgejoIssues
             .filter((issue) => {
+              if (includeAll) return true;
               const hasStatusLabel = issue.labels.some((l) =>
                 l.name.startsWith('status/')
               );

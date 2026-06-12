@@ -33,6 +33,13 @@ export function CreateTask() {
   const [humanMerge, setHumanMerge] = useState(false);
   const [humanReview, setHumanReview] = useState(false);
 
+  // Dependencies: issue numbers this task waits for. Candidates are ALL
+  // open issues of the repo (tracked ones included — depending on an issue
+  // that is already a task is the typical case). The server writes the
+  // canonical `## Dependencies` checklist into the issue body.
+  const [dependencies, setDependencies] = useState<number[]>([]);
+  const [depCandidates, setDepCandidates] = useState<IssueResponse[]>([]);
+
   // Bumped by the Dashboard WS handler whenever an agent profile is
   // created/edited/deleted on the server. Drives a refetch so this
   // form's dropdown stays in sync with the Agent Profiles tab.
@@ -56,6 +63,28 @@ export function CreateTask() {
     }
   }, [mode, repoId]);
 
+  // Dependency candidates follow the repo (both modes); selections reset
+  // when the repo changes since the numbers are repo-scoped.
+  useEffect(() => {
+    setDependencies([]);
+    if (!repoId) {
+      setDepCandidates([]);
+      return;
+    }
+    api
+      .getRepoIssues(repoId, { all: true })
+      .then((r) => setDepCandidates(r.issues))
+      .catch(() => setDepCandidates([]));
+  }, [repoId]);
+
+  function toggleDependency(issueNumber: number) {
+    setDependencies((prev) =>
+      prev.includes(issueNumber)
+        ? prev.filter((n) => n !== issueNumber)
+        : [...prev, issueNumber]
+    );
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!repoId) {
@@ -77,6 +106,7 @@ export function CreateTask() {
           repo_id: repoId,
           title: title.trim(),
           description: description.trim(),
+          dependencies: dependencies.length > 0 ? dependencies : undefined,
           agent_profile_id: agentProfile || null,
           review_agent_profile_id: reviewAgentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : undefined,
@@ -92,6 +122,10 @@ export function CreateTask() {
         await api.queueTask({
           issue_id: selectedIssueId,
           repo_id: repoId,
+          dependencies:
+            dependencies.length > 0
+              ? dependencies.filter((n) => n !== selectedIssueId)
+              : undefined,
           agent_profile_id: agentProfile || null,
           review_agent_profile_id: reviewAgentProfile || null,
           max_attempts: maxAttempts ? parseInt(maxAttempts, 10) : null,
@@ -294,6 +328,41 @@ export function CreateTask() {
                 className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
+          </div>
+
+          {/* Dependencies */}
+          <div>
+            <label className="block text-sm font-medium mb-1">
+              Dependencies
+              <span className="ml-2 text-xs font-normal text-gray-500">
+                the task stays queued until each selected issue is closed
+              </span>
+            </label>
+            {!repoId ? (
+              <p className="text-gray-500 text-sm">Select a repository first</p>
+            ) : depCandidates.filter((i) => mode !== 'queue' || i.id !== selectedIssueId).length === 0 ? (
+              <p className="text-gray-500 text-sm">No open issues to depend on</p>
+            ) : (
+              <div className="space-y-1 max-h-40 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-2">
+                {depCandidates
+                  .filter((i) => mode !== 'queue' || i.id !== selectedIssueId)
+                  .map((issue) => (
+                    <label
+                      key={issue.id}
+                      className="flex items-center gap-2 text-sm cursor-pointer rounded px-1 py-0.5 hover:bg-gray-800"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={dependencies.includes(issue.id)}
+                        onChange={() => toggleDependency(issue.id)}
+                        className="accent-blue-500"
+                      />
+                      <span className="text-blue-400 font-mono">#{issue.id}</span>
+                      <span className="truncate">{issue.title}</span>
+                    </label>
+                  ))}
+              </div>
+            )}
           </div>
 
           <div className="flex gap-6">

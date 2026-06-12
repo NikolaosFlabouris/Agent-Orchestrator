@@ -233,7 +233,11 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
         'insert the matching task row with any overrides applied ' +
         'atomically, broadcast on the dashboard websocket, and trigger ' +
         'the scheduler. The issue description IS the agent prompt — ' +
-        'make it specific, with clear acceptance criteria.',
+        'make it specific, with clear acceptance criteria. Use the ' +
+        'dependencies parameter to declare issues this task must wait ' +
+        'for: the task stays queued until each listed issue is closed ' +
+        '(the orchestrator writes them into the issue body as a ' +
+        '"## Dependencies" checklist, which humans can edit on Forgejo).',
       inputSchema: {
         repo_id: z
           .number()
@@ -252,6 +256,17 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
               'sees as its task prompt — include description, ' +
               'requirements, relevant files, and testable acceptance ' +
               'criteria.'
+          ),
+        dependencies: z
+          .array(z.number().int().positive())
+          .optional()
+          .describe(
+            'Issue numbers (same repo) this task depends on. The task is ' +
+              'not scheduled until every listed issue is closed. Each ' +
+              'number is validated to exist; already-closed issues are ' +
+              'allowed (immediately satisfied). Written into the issue ' +
+              'body as a "## Dependencies" checklist — a human can later ' +
+              'remove a line or tick its box on Forgejo to override.'
           ),
         agent_profile_id: z
           .string()

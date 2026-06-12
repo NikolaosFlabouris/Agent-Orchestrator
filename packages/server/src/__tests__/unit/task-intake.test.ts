@@ -4,10 +4,12 @@ import {
   asPositiveInt,
   validateAgentProfileOverride,
   validateMaxAttemptsOverride,
+  validateDependenciesInput,
   createTask,
   queueExistingIssue,
   listReposWithEffectiveProfile,
 } from '../../services/task-intake.js';
+import { ForgejoApiError } from '../../forgejo.js';
 import type { ForgejoClient } from '../../forgejo.js';
 import type { Scheduler } from '../../scheduler.js';
 
@@ -501,6 +503,211 @@ describe('queueExistingIssue', () => {
     // The service still reports a synthetic title in the returned issue
     // shape so callers can render something useful straight away.
     expect(r.value.issue.title).toBe('Issue #11');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dependencies through intake
+// ---------------------------------------------------------------------------
+
+describe('validateDependenciesInput', () => {
+  it('treats missing/null as empty', () => {
+    expect(validateDependenciesInput(undefined)).toEqual({ ok: true, value: [] });
+    expect(validateDependenciesInput(null)).toEqual({ ok: true, value: [] });
+  });
+
+  it('accepts arrays of positive integers (and numeric strings)', () => {
+    expect(validateDependenciesInput([5, '6'])).toEqual({
+      ok: true,
+      value: [5, 6],
+    });
+  });
+
+  it('rejects non-arrays and bad members', () => {
+    expect(validateDependenciesInput(5).ok).toBe(false);
+    expect(validateDependenciesInput(['x']).ok).toBe(false);
+    expect(validateDependenciesInput([0]).ok).toBe(false);
+    expect(validateDependenciesInput([1.5]).ok).toBe(false);
+  });
+});
+
+describe('createTask with dependencies', () => {
+  it('writes the canonical section into the created issue body', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler, mocks } = makeMocks({
+      getIssue: vi.fn().mockResolvedValue({ state: 'open' }),
+    });
+
+    const result = await createTask(
+      {
+        repo_id: repoId,
+        title: 'T',
+        description: 'Do the thing.',
+        dependencies: [5, 6],
+      },
+      { forgejo, scheduler }
+    );
+
+    expect(result.ok).toBe(true);
+    const body = mocks.createIssue.mock.calls[0][1].body as string;
+    expect(body).toContain('Do the thing.');
+    expect(body).toContain('## Dependencies');
+    expect(body).toContain('- [ ] #5');
+    expect(body).toContain('- [ ] #6');
+  });
+
+  it('leaves the body untouched when no dependencies are given', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler, mocks } = makeMocks();
+
+    await createTask(
+      { repo_id: repoId, title: 'T', description: 'Plain.' },
+      { forgejo, scheduler }
+    );
+    expect(mocks.createIssue.mock.calls[0][1].body).toBe('Plain.');
+    expect(mocks.getIssue).not.toHaveBeenCalled();
+  });
+
+  it('accepts already-closed dependencies (satisfied from the start)', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler } = makeMocks({
+      getIssue: vi.fn().mockResolvedValue({ state: 'closed' }),
+    });
+
+    const result = await createTask(
+      { repo_id: repoId, title: 'T', description: 'D', dependencies: [5] },
+      { forgejo, scheduler }
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects nonexistent dependency issues, fail-closed on fetch errors', async () => {
+    const repoId = insertRepo();
+    const notFound = makeMocks({
+      getIssue: vi.fn().mockRejectedValue(new ForgejoApiError('nf', 404, '')),
+    });
+
+    let result = await createTask(
+      { repo_id: repoId, title: 'T', description: 'D', dependencies: [99] },
+      { forgejo: notFound.forgejo, scheduler: notFound.scheduler }
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'invalid' },
+    });
+    expect(notFound.mocks.createIssue).not.toHaveBeenCalled();
+
+    const flaky = makeMocks({
+      getIssue: vi.fn().mockRejectedValue(new ForgejoApiError('boom', 500, '')),
+    });
+    result = await createTask(
+      { repo_id: repoId, title: 'T', description: 'D', dependencies: [5] },
+      { forgejo: flaky.forgejo, scheduler: flaky.scheduler }
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects malformed dependency input', async () => {
+    const repoId = insertRepo();
+    const { forgejo, scheduler } = makeMocks();
+    const result = await createTask(
+      {
+        repo_id: repoId,
+        title: 'T',
+        description: 'D',
+        dependencies: 'nope',
+      },
+      { forgejo, scheduler }
+    );
+    expect(result).toMatchObject({ ok: false, error: { kind: 'invalid' } });
+  });
+});
+
+describe('queueExistingIssue with dependencies', () => {
+  function queueMocks(opts: { issueBody?: string; depState?: string } = {}) {
+    const updateIssueBody = vi.fn().mockResolvedValue(undefined);
+    const getIssue = vi.fn(async (_repo: unknown, n: number) => {
+      if (n === 101) {
+        return { number: 101, title: 'existing title', body: opts.issueBody ?? 'Original body.' };
+      }
+      return { number: n, title: `dep ${n}`, state: opts.depState ?? 'open' };
+    });
+    const base = makeMocks({ getIssue });
+    (base.forgejo as unknown as Record<string, unknown>).updateIssueBody =
+      updateIssueBody;
+    return { ...base, updateIssueBody };
+  }
+
+  it('unions the section into the existing issue body on Forgejo', async () => {
+    const repoId = insertRepo();
+    const m = queueMocks({ issueBody: 'Original body.' });
+
+    const result = await queueExistingIssue(
+      { repo_id: repoId, issue_id: 101, dependencies: [5] },
+      { forgejo: m.forgejo, scheduler: m.scheduler }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(m.updateIssueBody).toHaveBeenCalledTimes(1);
+    const written = m.updateIssueBody.mock.calls[0][2] as string;
+    expect(written).toContain('Original body.');
+    expect(written).toContain('## Dependencies');
+    expect(written).toContain('- [ ] #5');
+  });
+
+  it('does not rewrite the body when the deps are already listed', async () => {
+    const repoId = insertRepo();
+    const m = queueMocks({
+      issueBody: 'Body\n\n## Dependencies\n- [ ] #5\n',
+    });
+
+    const result = await queueExistingIssue(
+      { repo_id: repoId, issue_id: 101, dependencies: [5] },
+      { forgejo: m.forgejo, scheduler: m.scheduler }
+    );
+    expect(result.ok).toBe(true);
+    expect(m.updateIssueBody).not.toHaveBeenCalled();
+  });
+
+  it('rejects a self-dependency', async () => {
+    const repoId = insertRepo();
+    const m = queueMocks();
+    const result = await queueExistingIssue(
+      { repo_id: repoId, issue_id: 101, dependencies: [101] },
+      { forgejo: m.forgejo, scheduler: m.scheduler }
+    );
+    expect(result).toMatchObject({ ok: false, error: { kind: 'invalid' } });
+    expect(m.updateIssueBody).not.toHaveBeenCalled();
+  });
+
+  it('fails when dependencies are requested but the issue cannot be fetched', async () => {
+    const repoId = insertRepo();
+    const m = makeMocks({
+      getIssue: vi.fn().mockRejectedValue(new Error('down')),
+    });
+    const result = await queueExistingIssue(
+      { repo_id: repoId, issue_id: 101, dependencies: [5] },
+      { forgejo: m.forgejo, scheduler: m.scheduler }
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'forgejo_failure' },
+    });
+  });
+
+  it('fails when the body write fails', async () => {
+    const repoId = insertRepo();
+    const m = queueMocks();
+    m.updateIssueBody.mockRejectedValue(new Error('write failed'));
+    const result = await queueExistingIssue(
+      { repo_id: repoId, issue_id: 101, dependencies: [5] },
+      { forgejo: m.forgejo, scheduler: m.scheduler }
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { kind: 'forgejo_failure' },
+    });
+    expect(getTask(1)).toBeUndefined();
   });
 });
 

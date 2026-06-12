@@ -21,13 +21,22 @@ on TICK (triggered by: webhook event, container exit callback, or 60-second fall
        (Slot freeing is handled within the post-agent flow, not here — the flow
        decides whether to free the slot or start the next phase in the same slot.)
 
+  1.5 Evaluate queued tasks' dependencies (dependencies.ts)
+     For every status/queued task (independent of pause state and pool
+     capacity), re-derive `task_dependencies` rows from the issue body's
+     "## Dependencies" checklist and the live state of each referenced
+     issue. Full passes are floored to one per 15s (webhook-burst guard);
+     never-evaluated tasks bypass the floor. See 13-task-dependencies.md.
+
   2. Fill empty slots (synchronous — runs within the tick)
      While host pool has spare memory AND CPU AND candidates remain:
        - Take next item from priority order:
          a. Tasks in 'in-review' with no container (recovery: need review container started)
          b. Orphaned rework (status/changes-needed with no active slot)
          c. FIFO queue (status/queued by queue_position)
-       - For queued tasks: check dependency gate; skip if deps not met
+       - For queued tasks: dependency gate — synchronous read of the rows
+         step 1.5 persisted; skip the candidate unless every dependency is
+         satisfied (fail closed: never-evaluated tasks are skipped too)
        - For each candidate: check it fits in the remaining host pool
          (sum of repo's container_memory_mb / container_cpu_cores ≤ remaining)
        - Resolve task → agent_profile → model → provider, then also check

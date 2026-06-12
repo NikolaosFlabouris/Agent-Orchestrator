@@ -38,6 +38,10 @@ import {
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { notifyTaskCreated } from '../state-sync.js';
+import {
+  upsertDependencySection,
+  validateDependencies,
+} from '../dependencies.js';
 
 // ---------------------------------------------------------------------------
 // Shared field validators
@@ -95,6 +99,34 @@ export function validateAgentProfileOverride(
     return { ok: false, error: `Unknown ${fieldName}: ${trimmed}` };
   }
   return { ok: true, value: trimmed };
+}
+
+/** Validate the shape of the optional `dependencies` input: an array of
+ *  positive integers (issue numbers in the task's repo). Missing/null →
+ *  empty list. Semantic validation (issues exist, no self-reference, no
+ *  cycle) happens against Forgejo/DB in `validateDependencies` — this is
+ *  just the type gate. */
+export function validateDependenciesInput(
+  raw: unknown
+):
+  | { ok: true; value: number[] }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: 'dependencies must be an array of issue numbers' };
+  }
+  const out: number[] = [];
+  for (const item of raw) {
+    const n = asPositiveInt(item);
+    if (n === null) {
+      return {
+        ok: false,
+        error: 'dependencies must contain only positive integers',
+      };
+    }
+    out.push(n);
+  }
+  return { ok: true, value: out };
 }
 
 /** Validate the optional `max_attempts` override.
@@ -161,6 +193,9 @@ export interface CreateTaskInput {
   repo_id?: unknown;
   title?: unknown;
   description?: unknown;
+  /** Optional issue numbers this task must wait for. Written into the
+   *  issue body as the canonical `## Dependencies` checklist. */
+  dependencies?: unknown;
   agent_profile_id?: unknown;
   review_agent_profile_id?: unknown;
   max_attempts?: unknown;
@@ -171,6 +206,9 @@ export interface CreateTaskInput {
 export interface QueueExistingIssueInput {
   repo_id?: unknown;
   issue_id?: unknown;
+  /** Optional issue numbers to ADD to the existing issue's
+   *  `## Dependencies` section (union — existing entries are kept). */
+  dependencies?: unknown;
   agent_profile_id?: unknown;
   review_agent_profile_id?: unknown;
   max_attempts?: unknown;
@@ -245,6 +283,28 @@ export async function createTask(
   const maxAttemptsCheck = validateMaxAttemptsOverride(input.max_attempts);
   if (!maxAttemptsCheck.ok) return invalid(maxAttemptsCheck.error);
 
+  const depsCheck = validateDependenciesInput(input.dependencies);
+  if (!depsCheck.ok) return invalid(depsCheck.error);
+
+  // Semantic dependency validation, fail-closed: every referenced issue
+  // must exist in the repo. (No self/cycle checks here — the new issue's
+  // number doesn't exist yet, so neither can occur.) Already-closed deps
+  // are fine: they are simply satisfied from the start.
+  let body = input.description;
+  if (depsCheck.value.length > 0) {
+    const depValidation = await validateDependencies(
+      repo,
+      depsCheck.value,
+      forgejo
+    );
+    if (!depValidation.ok) {
+      return invalid(depValidation.errors.join('; '));
+    }
+    // Canonical section writer — unions with any section the author
+    // already typed into the description by hand.
+    body = upsertDependencySection(input.description, depsCheck.value);
+  }
+
   // -- Forgejo issue creation --------------------------------------------
   // Issue creation is the only step that can fail in a way the caller
   // needs to distinguish from a validation error — the upstream may be
@@ -254,7 +314,7 @@ export async function createTask(
   try {
     issue = await forgejo.createIssue(repo, {
       title: input.title,
-      body: input.description,
+      body,
     });
   } catch (err) {
     return forgejoFailure(
@@ -331,16 +391,55 @@ export async function queueExistingIssue(
   const maxAttemptsCheck = validateMaxAttemptsOverride(input.max_attempts);
   if (!maxAttemptsCheck.ok) return invalid(maxAttemptsCheck.error);
 
+  const depsCheck = validateDependenciesInput(input.dependencies);
+  if (!depsCheck.ok) return invalid(depsCheck.error);
+
   // -- Best-effort title fetch -------------------------------------------
+  // (Mandatory when dependencies were supplied: we must read the current
+  // body to union the section into it — writing blind would clobber.)
   let issueTitle: string | null = null;
+  let issueBody: string | null = null;
   try {
     const fullIssue = await forgejo.getIssue(repo, issueId);
     issueTitle = fullIssue.title;
+    issueBody = fullIssue.body ?? '';
   } catch (err) {
+    if (depsCheck.value.length > 0) {
+      return forgejoFailure(
+        `Cannot add dependencies: failed to fetch issue #${issueId} from Forgejo`
+      );
+    }
     log?.warn(
       { event: 'task_intake_title_fetch_failed', issue_id: issueId, err },
       'Failed to fetch Forgejo issue title — falling back to "Issue #N"'
     );
+  }
+
+  // -- Dependency section write ------------------------------------------
+  // Semantic validation includes self-reference and cycle checks here —
+  // the issue already exists, so both are possible. The body update is
+  // last-writer-wins (Forgejo has no conditional PATCH); the fetch above
+  // happened moments ago, which keeps the race window small.
+  if (depsCheck.value.length > 0) {
+    const depValidation = await validateDependencies(
+      repo,
+      depsCheck.value,
+      forgejo,
+      { selfIssueNumber: issueId }
+    );
+    if (!depValidation.ok) {
+      return invalid(depValidation.errors.join('; '));
+    }
+    const updated = upsertDependencySection(issueBody ?? '', depsCheck.value);
+    if (updated !== issueBody) {
+      try {
+        await forgejo.updateIssueBody(repo, issueId, updated);
+      } catch (err) {
+        return forgejoFailure(
+          `Failed to write dependencies onto issue #${issueId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
   }
 
   const task = await applyLabelsAndInsertTask(

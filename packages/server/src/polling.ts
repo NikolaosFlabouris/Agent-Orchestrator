@@ -24,6 +24,7 @@ import { checkAlerts } from './alerts.js';
 import { cleanupOldWorkspaces } from './cleanup.js';
 import { POLL_INTERVAL_SECONDS } from './constants.js';
 import { notifyTaskCreated } from './state-sync.js';
+import { syncTaskDependencies } from './dependencies.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -286,6 +287,27 @@ export class Poller {
             { event: 'poll_external_cancel', task_id: task.id },
             'Task cancelled — external label change (detected by poll)'
           );
+        }
+
+        // Dependency piggyback: this loop already fetched the issue, so
+        // re-deriving the dependency rows from its body costs no extra
+        // Forgejo call. This is the lost-`edited`-webhook fallback — body
+        // edits made directly on Forgejo converge within one poll
+        // interval. Re-read the task first: the branches above may have
+        // just cancelled it, and terminal tasks keep their rows as
+        // history.
+        const fresh = getTask(task.id);
+        if (fresh && !TERMINAL_STATUSES.has(fresh.status)) {
+          try {
+            await syncTaskDependencies(
+              fresh,
+              issue.body ?? '',
+              this.forgejo,
+              this.log
+            );
+          } catch {
+            // Best effort — the scheduler's dependency pass retries.
+          }
         }
       } catch {
         // Issue may have been deleted or API unreachable

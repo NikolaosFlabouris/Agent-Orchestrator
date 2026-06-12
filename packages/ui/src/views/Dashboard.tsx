@@ -273,6 +273,11 @@ export function Dashboard() {
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-medium">
               Queue ({queuedTasks.length})
+              {queuedTasks.some((t) => t.blocked) && (
+                <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-amber-900 text-amber-300 align-middle">
+                  {queuedTasks.filter((t) => t.blocked).length} blocked
+                </span>
+              )}
             </h2>
             <Link
               to="/tasks/new"

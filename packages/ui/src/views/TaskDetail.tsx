@@ -1,7 +1,12 @@
 import { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
-import type { TaskDetailResponse, AttemptResponse, TaskAction } from '../api.js';
+import type {
+  TaskDetailResponse,
+  TaskDependencyResponse,
+  AttemptResponse,
+  TaskAction,
+} from '../api.js';
 import { connectDashboardWs, connectOutputWs } from '../ws.js';
 import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { AppHeader } from '../components/AppHeader.js';
@@ -450,6 +455,16 @@ export function TaskDetail() {
         <div className="text-right">
           <div className="flex items-center gap-2 justify-end">
             <StatusBadge status={task.status} />
+            {task.blocked && (
+              <span
+                className="px-2 py-1 rounded text-sm font-medium bg-amber-900 text-amber-300"
+                title={`Waiting on ${(task.blocked_by ?? [])
+                  .map((n) => `#${n}`)
+                  .join(', ')}`}
+              >
+                blocked
+              </span>
+            )}
             {task.health === 'orphaned' && <HealthBadge health={task.health} />}
           </div>
           <div className="text-sm text-gray-400 mt-1 flex items-center gap-2 justify-end">
@@ -648,6 +663,9 @@ export function TaskDetail() {
             timeline history as a record of what happened. */}
         <StructuralFailureBanner task={task} />
 
+        {/* Dependencies */}
+        <DependencySection task={task} onChanged={setTask} />
+
         {/* Timeline */}
         {task.events && task.events.length > 0 && (
           <section>
@@ -718,6 +736,132 @@ const STRUCTURAL_FAILURE_EVENT_TYPES = new Set([
   'agent_image_missing',
   'harness_entrypoint_exec_failed',
 ]);
+
+/** What the user can do about each non-satisfied dependency state. The
+ *  repair always happens on Forgejo (edit the issue body / close the dep
+ *  issue) — the orchestrator only reflects it. */
+const DEP_STATE_HINTS: Record<string, string> = {
+  open: 'Waits until the issue is closed.',
+  'in-progress': 'An agent is working on it — clears when its issue closes.',
+  failed:
+    'Its task gave up while the issue is still open. Requeue that task, close the issue, or tick the box in the issue body to override.',
+  missing:
+    'Issue not found. Fix or remove the line in the issue body, or tick the box to override.',
+  error: 'Could not check the issue — retried automatically.',
+  cycle:
+    'Circular dependency. Remove one side on Forgejo, or tick a box to override.',
+};
+
+function DependencyStateBadge({ state }: { state: string }) {
+  const colors: Record<string, string> = {
+    satisfied: 'bg-green-900 text-green-300',
+    'manually-satisfied': 'bg-teal-900 text-teal-300',
+    open: 'bg-gray-700 text-gray-300',
+    'in-progress': 'bg-blue-900 text-blue-300',
+    failed: 'bg-red-900 text-red-300',
+    missing: 'bg-red-900 text-red-300',
+    error: 'bg-yellow-900 text-yellow-300',
+    cycle: 'bg-red-900 text-red-300',
+  };
+  return (
+    <span
+      className={`px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${colors[state] ?? 'bg-gray-700 text-gray-300'}`}
+    >
+      {state}
+    </span>
+  );
+}
+
+function DependencySection({
+  task,
+  onChanged,
+}: {
+  task: TaskDetailResponse;
+  onChanged: (task: TaskDetailResponse) => void;
+}) {
+  const [recheckPending, setRecheckPending] = useState(false);
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+  const deps = task.dependencies ?? [];
+  if (deps.length === 0) return null;
+
+  const depHref = (n: number) =>
+    forgejoBaseUrl && task.repo
+      ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${n}`
+      : null;
+
+  async function handleRecheck() {
+    if (recheckPending) return;
+    setRecheckPending(true);
+    try {
+      await api.recheckDependencies(task.id);
+      onChanged(await api.getTask(task.id));
+    } catch {
+      // Best effort — the scheduler re-checks on its own cadence.
+    } finally {
+      setRecheckPending(false);
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-lg font-medium">Dependencies</h2>
+        <button
+          onClick={handleRecheck}
+          disabled={recheckPending}
+          className="text-xs px-2 py-1 rounded border border-gray-700 text-gray-400 hover:border-gray-600 hover:text-gray-300 disabled:opacity-50"
+        >
+          {recheckPending ? 'Checking…' : 'Re-check now'}
+        </button>
+      </div>
+      {task.blocked && (
+        <p className="text-sm text-amber-400 mb-3">
+          This task stays queued until every dependency below is satisfied.
+          Dependencies live in the issue body on Forgejo — remove a line to
+          drop one, or tick its box to override.
+        </p>
+      )}
+      <div className="space-y-2">
+        {deps.map((dep) => (
+          <DependencyRow key={dep.id} dep={dep} href={depHref(dep.dep_issue_number)} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DependencyRow({
+  dep,
+  href,
+}: {
+  dep: TaskDependencyResponse;
+  href: string | null;
+}) {
+  const hint = DEP_STATE_HINTS[dep.state];
+  return (
+    <div className="flex items-start gap-3 bg-gray-900 border border-gray-800 rounded p-3">
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-400 font-mono text-sm hover:underline"
+        >
+          #{dep.dep_issue_number}
+        </a>
+      ) : (
+        <span className="text-blue-400 font-mono text-sm">
+          #{dep.dep_issue_number}
+        </span>
+      )}
+      <DependencyStateBadge state={dep.state} />
+      <div className="text-sm min-w-0">
+        {dep.detail && <span className="text-gray-300">{dep.detail}</span>}
+        {hint && <p className="text-xs text-gray-500 mt-0.5">{hint}</p>}
+      </div>
+    </div>
+  );
+}
 
 function StructuralFailureBanner({ task }: { task: TaskDetailResponse }) {
   // Only show the banner when the underlying problem is still likely

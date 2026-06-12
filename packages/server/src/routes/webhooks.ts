@@ -26,6 +26,10 @@ import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { invalidateSnapshot } from '../forgejo-snapshot.js';
 import { notifyTaskCreated } from '../state-sync.js';
+import {
+  syncTaskDependencies,
+  reevaluateDependentsOfIssue,
+} from '../dependencies.js';
 
 const WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET ?? '';
 
@@ -254,6 +258,53 @@ async function handleIssueEvent(
     }
   }
 
+  // Body edited on Forgejo → re-derive the dependency rows immediately.
+  // The webhook payload carries the fresh body, so this costs no extra
+  // Forgejo fetch for the task's own issue. (The polling piggyback is the
+  // fallback when this event is lost.) Non-terminal only — terminal tasks
+  // keep their rows as history.
+  if (payload.action === 'edited') {
+    const tracked = getTaskByIssue(issue.number);
+    if (
+      tracked &&
+      !TERMINAL_STATUSES.has(tracked.status) &&
+      typeof issue.body === 'string'
+    ) {
+      try {
+        await syncTaskDependencies(tracked, issue.body, forgejo, log);
+      } catch (err) {
+        log.warn(
+          { event: 'webhook_dep_sync_failed', task_id: tracked.id, err },
+          'Dependency sync from edited webhook failed'
+        );
+      }
+      // A removed/ticked dependency may have made the task eligible.
+      scheduler.triggerTick();
+    }
+  }
+
+  if (payload.action === 'closed' || payload.action === 'reopened') {
+    // The state flip may unblock (closed) or re-block (reopened) queued
+    // tasks that list this issue as a dependency — whether or not the
+    // issue itself is tracked as a task.
+    try {
+      const touched = await reevaluateDependentsOfIssue(
+        repo.id,
+        issue.number,
+        forgejo,
+        log
+      );
+      if (touched > 0 && payload.action === 'closed') {
+        scheduler.triggerTick();
+      }
+    } catch (err) {
+      log.warn(
+        { event: 'webhook_dependents_reeval_failed', issue_id: issue.number, err },
+        'Dependent re-evaluation failed'
+      );
+    }
+  }
+
   if (payload.action === 'closed') {
     const tracked = getTaskByIssue(issue.number);
     if (!tracked) return;
@@ -375,6 +426,8 @@ interface WebhookPayload {
     number: number;
     title: string;
     state: string;
+    /** Present on `opened`/`edited` payloads — the full markdown body. */
+    body?: string;
     labels?: Array<{ name: string }>;
   };
   pull_request?: {

@@ -167,7 +167,31 @@ Task dependencies are tracked via checklist items in the issue body:
 - [ ] #39
 ```
 
-The orchestrator parses these from the issue body, extracts referenced issue numbers, and checks whether those issues are closed before allowing a task to be picked up from the queue. If any dependency is still open, the task is skipped and remains queued.
+The orchestrator parses checklist items **inside a `## Dependencies` (or
+`### Dependencies`) section only** — checkbox lists elsewhere in the body
+(acceptance criteria etc.) never gate scheduling. A dependency is satisfied
+when its issue is **closed**; until then the task stays queued and shows as
+*blocked* in the orchestrator UI (blocked is display-only — never a status
+label on Forgejo or a stored task state).
+
+Details:
+
+- The issue body is the source of truth. Edits made directly on Forgejo
+  (adding, removing, or ticking items) sync to the orchestrator instantly
+  via webhook and within one poll cycle (60s) without webhooks.
+- A **checked** box (`- [x] #38`) is a manual override — the dependency
+  counts as satisfied regardless of the issue's state. Use it when the work
+  happened outside the listed issue, or to neutralise a bad reference.
+- Issue numbers resolve within the task's own repo. Cross-repo references
+  (`owner/repo#38`) and URLs are ignored.
+- A reference to an issue that doesn't exist, or a circular dependency,
+  keeps the task blocked; the Task Detail page lists each dependency with
+  its state and how to repair it.
+- Programmatic intake (the UI's create-task form and the MCP `create_task`
+  tool's `dependencies` parameter) writes this section through one
+  canonical formatter, so the syntax never drifts.
+
+See `13-task-dependencies.md` for the full design.
 
 ## OAuth2 Provider Configuration
 

@@ -48,9 +48,15 @@ import {
   getAvailableResources,
   getTaskResources,
   fitsInPool,
-  checkDependenciesMet,
   type TaskResources,
 } from './queue.js';
+import {
+  createDependencyPassState,
+  runQueuedDependencyPass,
+  dependencyGateAllows,
+  stripDependencySection,
+  type DependencyPassState,
+} from './dependencies.js';
 import {
   prepareWorkspace,
   verifyWorkspaceState,
@@ -251,6 +257,10 @@ export class Scheduler {
   // and double-write the same result.json. Same flag-serialisation
   // pattern as `orphanSweepInFlight`.
   private timeoutSweepInFlight = false;
+  // Dependency pass: same flag-serialisation pattern, plus the pass keeps
+  // its own floor/markers in depPassState (see dependencies.ts).
+  private depPassInFlight = false;
+  private depPassState: DependencyPassState = createDependencyPassState();
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -365,8 +375,31 @@ export class Scheduler {
     // Step 1: Check for completed containers
     await this.checkCompletedContainers();
 
+    // Step 1.5: Re-derive queued tasks' dependency rows from their issue
+    // bodies. Runs after completed-container processing (a dep task that
+    // just merged is visible immediately) and before fillSlots (launches
+    // act on fresh rows). Deliberately NOT behind `paused` — it's
+    // reconciliation, not a launch — and not behind pool capacity, so
+    // blocked-state stays current even when nothing can launch.
+    await this.evaluateQueuedDependencies();
+
     // Step 2: Fill empty slots
     await this.fillSlots();
+  }
+
+  private async evaluateQueuedDependencies(): Promise<void> {
+    if (this.depPassInFlight) return;
+    this.depPassInFlight = true;
+    try {
+      await runQueuedDependencyPass(this.forgejo, this.log, this.depPassState);
+    } catch (err) {
+      this.log.error(
+        { event: 'dependency_pass_error', err },
+        'Dependency evaluation pass failed'
+      );
+    } finally {
+      this.depPassInFlight = false;
+    }
   }
 
   private async reconcileOrphans(): Promise<void> {
@@ -781,14 +814,15 @@ export class Scheduler {
         continue;
       }
 
-      // For queued tasks: check dependency gate
-      if (task.status === 'queued') {
-        const depsMet = await checkDependenciesMet(
-          this.forgejo,
-          task,
-          this.log
-        );
-        if (!depsMet) continue;
+      // For queued tasks: dependency gate. Reads the rows persisted by the
+      // tick's dependency pass — synchronous, fail-closed (a task that has
+      // never been successfully evaluated stays queued; later candidates
+      // can still launch).
+      if (
+        task.status === 'queued' &&
+        !dependencyGateAllows(task, this.depPassState)
+      ) {
+        continue;
       }
 
       // Respect Forgejo-side closure: if the human closed the issue since
@@ -1700,9 +1734,12 @@ export function buildDevPrompt(
     ? `\n   - Also re-check your diff against the "Review Feedback" section below and confirm every feedback item is fully addressed.`
     : '';
 
+  // The "## Dependencies" checklist is scheduling metadata — the gate has
+  // already cleared it by launch time. Strip it so the agent doesn't
+  // misread `- [ ] #38` items as subtasks.
   let prompt = `## Task
 
-${issue.body}
+${stripDependencySection(issue.body)}
 
 ## Context
 
@@ -1766,7 +1803,7 @@ Review the changes on the current branch against the base branch (${repo.base_br
 
 ## Original Task Description
 
-${issue.body}
+${stripDependencySection(issue.body)}
 
 ## Instructions
 

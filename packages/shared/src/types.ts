@@ -297,6 +297,50 @@ export interface TaskEvent {
   created_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Task dependencies
+// ---------------------------------------------------------------------------
+//
+// A queued task can declare dependencies on other issues in its repo via
+// checklist items under a `## Dependencies` heading in the issue body
+// (`- [ ] #38`). The issue body is the source of truth; the orchestrator
+// keeps `task_dependencies` rows as a synced projection (re-derived from
+// the body on every evaluation) for the scheduler gate and the UI.
+//
+// A dependency is complete when its issue is closed. "Blocked" is never a
+// TaskStatus — it is computed at read time from these records and only
+// rendered in the orchestrator UI.
+
+export type DependencyState =
+  | 'satisfied'            // dep issue closed (or its orchestrator task merged)
+  | 'manually-satisfied'   // checked box override (`- [x] #N`) in the issue body
+  | 'open'                 // dep issue open
+  | 'in-progress'          // dep issue open + its orchestrator task actively running
+  | 'failed'               // dep issue open + its orchestrator task failed/cancelled/reset
+  | 'missing'              // dep issue does not exist (404)          → blocks
+  | 'error'                // fetch failure, no prior satisfied state → blocks
+  | 'cycle';               // dependency cycle among queued tasks     → blocks
+
+/** Dependency states that allow the dependent task to launch. */
+export const SATISFIED_DEP_STATES: ReadonlySet<DependencyState> = new Set([
+  'satisfied',
+  'manually-satisfied',
+] as DependencyState[]);
+
+export interface TaskDependency {
+  id: number;
+  task_id: number;
+  /** Issue (or PR — Forgejo shares numbering) number in the task's repo. */
+  dep_issue_number: number;
+  state: DependencyState;
+  /** Human-readable evidence/reason, e.g. "merged via task #12 / PR #52". */
+  detail: string | null;
+  /** Raw checkbox state from the last body parse. */
+  checked: boolean;
+  first_seen_at: string;
+  last_evaluated_at: string | null;
+}
+
 export interface TaskStep {
   id: number;
   task_id: number;

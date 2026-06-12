@@ -11,11 +11,13 @@ import type {
   AgentProfile,
   HarnessId,
   TaskEvent,
+  TaskDependency,
+  DependencyState,
   SettingsKey,
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 25;
+const CURRENT_SCHEMA_VERSION = 26;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -252,6 +254,29 @@ function createTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_task_steps_task_attempt
       ON task_steps(task_id, attempt_number);
+
+    -- Synced projection of the checklist under the issue body's
+    -- "## Dependencies" heading. The body is the source of truth; the
+    -- evaluator in dependencies.ts is the only writer of these rows
+    -- (re-derived on every evaluation pass). The scheduler gate and the
+    -- UI read them. CASCADE: rows are history that lives and dies with
+    -- the task row.
+    CREATE TABLE IF NOT EXISTS task_dependencies (
+      id INTEGER PRIMARY KEY,
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      dep_issue_number INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'open',
+      detail TEXT,
+      checked INTEGER NOT NULL DEFAULT 0,
+      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_evaluated_at TEXT,
+      UNIQUE(task_id, dep_issue_number)
+    );
+
+    -- Reverse lookup: "issue #N just closed — which tasks were waiting
+    -- on it?" (joined against tasks to scope by repo and status).
+    CREATE INDEX IF NOT EXISTS idx_task_deps_reverse
+      ON task_dependencies(dep_issue_number);
 
     -- ---- MCP OAuth (Phase 3 Workstream C) -------------------------------
     --
@@ -495,6 +520,29 @@ function runMigrations(db: Database.Database): void {
             'ALTER TABLE repos ADD COLUMN review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT'
           );
         }
+      }
+      if (version < 26) {
+        // v26: task_dependencies — synced projection of the issue body's
+        // "## Dependencies" checklist, read by the scheduler's dependency
+        // gate and the UI. createTables holds the canonical shape with
+        // IF NOT EXISTS; re-run the same DDL idempotently for existing
+        // installs. (Developed in parallel with v25 — renumbered at merge
+        // so both upgrades apply in sequence.)
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS task_dependencies (
+            id INTEGER PRIMARY KEY,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            dep_issue_number INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'open',
+            detail TEXT,
+            checked INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_evaluated_at TEXT,
+            UNIQUE(task_id, dep_issue_number)
+          );
+          CREATE INDEX IF NOT EXISTS idx_task_deps_reverse
+            ON task_dependencies(dep_issue_number);
+        `);
       }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
@@ -1530,6 +1578,105 @@ export function getTaskEvents(taskId: number): TaskEvent[] {
       'SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at ASC, id ASC'
     )
     .all(taskId) as TaskEvent[];
+}
+
+// -- Task dependencies --
+//
+// Rows are a synced projection of the issue body's "## Dependencies"
+// checklist. dependencies.ts owns all writes (the evaluator re-derives
+// rows from the body); everything else reads.
+
+/** SQLite stores `checked` as 0/1 — convert to the TaskDependency shape. */
+function rowToTaskDependency(row: Record<string, unknown>): TaskDependency {
+  return { ...row, checked: Boolean(row.checked) } as TaskDependency;
+}
+
+export function getTaskDependencies(taskId: number): TaskDependency[] {
+  return (
+    getDb()
+      .prepare(
+        'SELECT * FROM task_dependencies WHERE task_id = ? ORDER BY id ASC'
+      )
+      .all(taskId) as Record<string, unknown>[]
+  ).map(rowToTaskDependency);
+}
+
+/** Tasks in `repoId` with a dependency row on `depIssueNumber`. Used by the
+ *  issue-closed webhook to re-evaluate just the affected dependents. */
+export function getDependentTasks(
+  repoId: number,
+  depIssueNumber: number
+): Task[] {
+  return getDb()
+    .prepare(
+      `SELECT t.* FROM tasks t
+       JOIN task_dependencies d ON d.task_id = t.id
+       WHERE t.repo_id = ? AND d.dep_issue_number = ?
+       ORDER BY t.queue_position ASC, t.id ASC`
+    )
+    .all(repoId, depIssueNumber) as Task[];
+}
+
+/** Repo-scoped issue lookup. Forgejo issue numbers are per-repo;
+ *  dependency resolution must never match a same-numbered issue from
+ *  another repo. */
+export function getTaskByRepoIssue(
+  repoId: number,
+  issueNumber: number
+): Task | undefined {
+  return getDb()
+    .prepare('SELECT * FROM tasks WHERE repo_id = ? AND issue_id = ?')
+    .get(repoId, issueNumber) as Task | undefined;
+}
+
+export function upsertTaskDependency(dep: {
+  task_id: number;
+  dep_issue_number: number;
+  state: DependencyState;
+  detail: string | null;
+  checked: boolean;
+  last_evaluated_at: string;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO task_dependencies
+         (task_id, dep_issue_number, state, detail, checked, first_seen_at, last_evaluated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(task_id, dep_issue_number) DO UPDATE SET
+         state = excluded.state,
+         detail = excluded.detail,
+         checked = excluded.checked,
+         last_evaluated_at = excluded.last_evaluated_at`
+    )
+    .run(
+      dep.task_id,
+      dep.dep_issue_number,
+      dep.state,
+      dep.detail,
+      dep.checked ? 1 : 0,
+      new Date().toISOString(),
+      dep.last_evaluated_at
+    );
+}
+
+/** Delete rows for deps no longer present in the body. `keep` is the set of
+ *  issue numbers the latest parse produced; an empty set clears all rows. */
+export function deleteTaskDependenciesExcept(
+  taskId: number,
+  keep: ReadonlySet<number>
+): number {
+  if (keep.size === 0) {
+    return getDb()
+      .prepare('DELETE FROM task_dependencies WHERE task_id = ?')
+      .run(taskId).changes;
+  }
+  const placeholders = [...keep].map(() => '?').join(', ');
+  return getDb()
+    .prepare(
+      `DELETE FROM task_dependencies
+       WHERE task_id = ? AND dep_issue_number NOT IN (${placeholders})`
+    )
+    .run(taskId, ...keep).changes;
 }
 
 // -- Settings --

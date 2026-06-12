@@ -5,10 +5,16 @@ import {
   getRepo,
   getAttempts,
   getTaskEvents,
+  getTaskDependencies,
   getAgentProfile,
   getSetting,
 } from '../db.js';
-import { TERMINAL_STATUSES, DRIVER_LABELS } from '@orchestrator/shared';
+import { isBlocked, syncTaskDependencies } from '../dependencies.js';
+import {
+  TERMINAL_STATUSES,
+  SATISFIED_DEP_STATES,
+  DRIVER_LABELS,
+} from '@orchestrator/shared';
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
@@ -173,6 +179,41 @@ export function createTaskRoutes(
         const task = getTask(id);
         if (!task) return reply.status(404).send({ error: 'Task not found' });
         return { events: getTaskEvents(task.id) };
+      }
+    );
+
+    // POST /api/tasks/:id/dependencies/recheck — re-derive dependency rows
+    // from the live issue body on demand ("Re-check now" in the dep panel).
+    // Terminal tasks keep their rows as history and are not re-evaluated.
+    app.post<{ Params: { id: string } }>(
+      '/api/tasks/:id/dependencies/recheck',
+      async (request, reply) => {
+        const id = parseInt(request.params.id, 10);
+        const task = getTask(id);
+        if (!task) return reply.status(404).send({ error: 'Task not found' });
+
+        if (!TERMINAL_STATUSES.has(task.status)) {
+          const repo = getRepo(task.repo_id);
+          if (!repo) {
+            return reply.status(500).send({ error: 'Repo not found' });
+          }
+          try {
+            const issue = await forgejo.getIssue(repo, task.issue_id);
+            await syncTaskDependencies(task, issue.body ?? '', forgejo, log);
+          } catch {
+            return reply
+              .status(502)
+              .send({ error: 'Could not fetch issue from Forgejo' });
+          }
+          // A satisfied dependency may have made the task launchable.
+          scheduler.triggerTick();
+        }
+
+        const dependencies = getTaskDependencies(task.id);
+        return {
+          dependencies,
+          blocked: task.status === 'queued' && isBlocked(dependencies),
+        };
       }
     );
 
@@ -692,11 +733,19 @@ function enrichTask(task: Task, ctx: EnrichContext = {}) {
       effective_agent_profile_id
     );
 
+  // Blocked is presentation-only: computed at read time from the synced
+  // dependency rows, never stored, never a TaskStatus.
+  const dependencies = getTaskDependencies(task.id);
+
   return {
     ...task,
     issue_title: task.issue_title ?? `Issue #${task.issue_id}`,
     repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name } : null,
-    blocked_by: [] as number[],
+    dependencies,
+    blocked_by: dependencies
+      .filter((d) => !SATISFIED_DEP_STATES.has(d.state))
+      .map((d) => d.dep_issue_number),
+    blocked: task.status === 'queued' && isBlocked(dependencies),
     runtime_status: task.status as TaskStatus,
     health,
     container_name: ctx.containerName ?? null,
@@ -755,6 +804,10 @@ async function enrichTaskWithDerivation(
   return {
     ...base,
     status: derived.status,
+    // Re-key blocked on the DERIVED status: a queued task whose issue was
+    // closed externally reads as cancelled, not blocked. (derived ===
+    // 'queued' implies stored === 'queued', so base.blocked is reusable.)
+    blocked: derived.status === 'queued' && base.blocked,
     has_human_review_label: hasHumanReviewLabel(snapshot),
   };
 }

@@ -245,6 +245,23 @@ export class ForgejoClient {
     );
   }
 
+  /** Replace an issue's markdown body. Used by task intake to write the
+   *  canonical `## Dependencies` section onto an existing issue. Plain
+   *  last-writer-wins — Forgejo has no conditional update, so callers
+   *  should fetch immediately before writing to keep the race window
+   *  small. */
+  async updateIssueBody(
+    repo: Repo,
+    issueNumber: number,
+    body: string
+  ): Promise<void> {
+    await this.request(
+      'PATCH',
+      `${this.repoPath(repo)}/issues/${issueNumber}`,
+      { body }
+    );
+  }
+
   // ---- Labels ----
 
   async getLabels(repo: Repo): Promise<ForgejoLabel[]> {

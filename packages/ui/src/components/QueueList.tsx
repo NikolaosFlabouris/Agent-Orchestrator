@@ -163,8 +163,18 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
             </span>
           )}
         </div>
-        <div className="text-sm text-gray-400">
-          Position {task.queue_position}
+        <div className="text-sm text-gray-400 flex items-center gap-2">
+          {task.blocked && (
+            <span
+              className="px-2 py-0.5 rounded text-xs font-medium bg-amber-900 text-amber-300"
+              title={`Waiting on ${(task.blocked_by ?? [])
+                .map((n) => `#${n}`)
+                .join(', ')}`}
+            >
+              blocked
+            </span>
+          )}
+          <span>Position {task.queue_position}</span>
         </div>
       </div>
     </div>

@@ -39,7 +39,7 @@ This is the most important part — the description becomes the agent's task pro
 3. **Acceptance criteria** — how to know the task is done (tests to pass, behaviour to verify). This is the load-bearing section; the automated review verdict turns on whether these are met.
 4. **Constraints** — anything task-specific the agent should avoid doing, plus any context about prerequisites.
 
-Note on dependencies: the orchestrator does **not** enforce task ordering. There is no `depends_on` relationship in the data model; the scheduler dequeues purely by queue position and capacity. If this task has prerequisites, the developer should either (a) wait to create it until the prerequisite PR merges, or (b) document the dependency in the description as agent-readable context, with no ordering guarantee.
+Note on dependencies: the orchestrator **does** enforce task ordering when asked. Pass the prerequisite issue numbers via the `dependencies` parameter of `create_task` (Step 5) — the scheduler will not launch the task until every listed issue is **closed**. The orchestrator writes them into the issue body as a `## Dependencies` checklist (`- [ ] #38`), which remains the source of truth: a human can later remove a line on Forgejo to drop a dependency, or tick its box (`- [x]`) to override it manually. Issue numbers must exist in the same repo (cross-repo references are not supported); listing an already-closed issue is fine — it is satisfied from the start. Don't hand-write the checklist into the description — use the parameter so the formatting is canonical.
 
 Then assemble the inputs into a well-structured Markdown description using this format:
 
@@ -76,6 +76,8 @@ Show the developer a preview of the full description and ask if they want to adj
 
 Ask about each option, explaining what it does. Use defaults unless the developer wants to change something:
 
+- **Dependencies** — Should this task wait for other issues to finish first? Collect the prerequisite issue numbers (same repo). The task stays queued — shown as "blocked" in the orchestrator UI — until every listed issue is closed. Default: none.
+
 - **Implementation profile override** — Use a different profile than the repo default for the implementation (develop) stage? List available profiles by calling the `list_agent_profiles` MCP tool. Show each profile as `<id>: <display_name> (<harness_id> / <provider_id>/<model_id>, timeout=<timeout_minutes>m)`. Default: leave blank → inherit from the repo's `agent_profile_id`, which itself inherits from the global default.
 
 - **Review profile override** — Use a different profile for the automated review stage? Useful when a cheaper/local model implements and a stronger model reviews (e.g. a local Ollama profile implements, Claude Opus reviews). Reuse the `list_agent_profiles` output from the previous question — don't call the tool twice. Default: leave blank → inherit from the repo's review default, then the global review default, finally falling back to the implementation profile. Skip this question entirely when the developer enabled **Human review** below — the automated review agent doesn't run, so the review profile is unused.
@@ -93,6 +95,7 @@ Show a final summary of everything:
 - Repository: `owner/name`
 - Title: the issue title
 - Description: the full Markdown body (preview)
+- Dependencies: prerequisite issue numbers, if any
 - Options: implementation profile override, review profile override, max attempts, human review, human merge
 
 Ask the developer to confirm. On confirmation, invoke the `create_task` MCP tool with:
@@ -100,6 +103,7 @@ Ask the developer to confirm. On confirmation, invoke the `create_task` MCP tool
 - `repo_id`: the integer id from Step 1
 - `title`: the title from Step 2
 - `description`: the assembled Markdown body from Step 3
+- `dependencies`: array of prerequisite issue numbers, or omit when none
 - `agent_profile_id`: the chosen implementation override, or omit when inheriting
 - `review_agent_profile_id`: the chosen review override, or omit when inheriting
 - `max_attempts`: the chosen number, or omit for the default

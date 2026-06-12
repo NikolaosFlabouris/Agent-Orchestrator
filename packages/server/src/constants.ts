@@ -17,6 +17,15 @@ export const POLL_INTERVAL_SECONDS = 60;
  *  Task Detail page (within `attempt..∞`). */
 export const DEFAULT_MAX_ATTEMPTS = 7;
 
+/** Floor between full dependency-evaluation passes over the queue. Every
+ *  scheduler tick wants to re-derive queued tasks' dependencies from their
+ *  issue bodies, but ticks also fire on every webhook — without a floor, a
+ *  webhook burst (bulk label edits, batch issue updates) would multiply
+ *  into a Forgejo fetch storm of queue-length × burst-size. Tasks that have
+ *  never been evaluated bypass the floor so a freshly-queued task is never
+ *  gated on stale (absent) rows. */
+export const DEP_EVAL_MIN_INTERVAL_SECONDS = 15;
+
 /** How long workspaces stick around after a task hits a terminal state
  *  (`merged`, `failed`, `cancelled`, `reset`, `awaiting-human-*`,
  *  `needs-human-review`). After expiry, the per-task workspace at

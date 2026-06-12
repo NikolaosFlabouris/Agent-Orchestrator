@@ -1,18 +1,9 @@
 import type { Task } from '@orchestrator/shared';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
-import {
-  getTasks,
-  getQueuedTasks,
-  getRepo,
-  getSettingInt,
-  updateTask,
-} from './db.js';
+import { getTasks, getQueuedTasks, getRepo, getSettingInt } from './db.js';
 import {
   DEFAULT_CONTAINER_MEMORY_MB,
   DEFAULT_CONTAINER_CPU_CORES,
 } from './constants.js';
-import type { ForgejoClient } from './forgejo.js';
-import type { FastifyBaseLogger } from 'fastify';
 
 /**
  * Determines the candidates for slot filling, in priority order:
@@ -44,68 +35,6 @@ export function getCandidates(): Task[] {
   candidates.push(...queued);
 
   return candidates;
-}
-
-/**
- * Parse dependency issue numbers from checklist items in the issue body.
- * Matches lines like: - [ ] #38
- */
-export function parseDependencies(issueBody: string): number[] {
-  const deps: number[] = [];
-  const regex = /^-\s*\[\s*\]\s*#(\d+)/gm;
-  let match;
-  while ((match = regex.exec(issueBody)) !== null) {
-    deps.push(parseInt(match[1], 10));
-  }
-  return deps;
-}
-
-/**
- * Check if all dependency issues are closed via Forgejo API.
- */
-export async function checkDependenciesMet(
-  forgejo: ForgejoClient,
-  task: Task,
-  log: FastifyBaseLogger
-): Promise<boolean> {
-  const repo = getRepo(task.repo_id);
-  if (!repo) return false;
-
-  let issueBody: string;
-  try {
-    const issue = await forgejo.getIssue(repo, task.issue_id);
-    issueBody = issue.body;
-  } catch {
-    log.warn(
-      { event: 'dependency_check_failed', task_id: task.id },
-      'Could not fetch issue to check dependencies'
-    );
-    return false;
-  }
-
-  const deps = parseDependencies(issueBody);
-  if (deps.length === 0) return true;
-
-  for (const depIssueId of deps) {
-    try {
-      const depIssue = await forgejo.getIssue(repo, depIssueId);
-      if (depIssue.state !== 'closed') {
-        log.debug(
-          { event: 'dependency_not_met', task_id: task.id, dep_issue: depIssueId },
-          'Dependency issue not closed'
-        );
-        return false;
-      }
-    } catch {
-      log.warn(
-        { event: 'dependency_check_error', task_id: task.id, dep_issue: depIssueId },
-        'Could not check dependency issue status'
-      );
-      return false;
-    }
-  }
-
-  return true;
 }
 
 /** Per-task host-resource footprint. */

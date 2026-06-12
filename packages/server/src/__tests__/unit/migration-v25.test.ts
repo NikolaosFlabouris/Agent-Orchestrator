@@ -48,7 +48,7 @@ describe('v25 review_agent_profile_id migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('25');
+    expect(v.value).toBe('26');
 
     db.close();
   });
@@ -95,7 +95,7 @@ describe('v25 review_agent_profile_id migration', () => {
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('25');
+    expect(versionRow.value).toBe('26');
 
     db.close();
   });

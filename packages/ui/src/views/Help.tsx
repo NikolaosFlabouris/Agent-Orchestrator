@@ -618,6 +618,44 @@ function RunningTasks() {
         </li>
       </ul>
 
+      <SubHeading>Task dependencies</SubHeading>
+      <p className="text-sm text-gray-300">
+        A task can declare that it must wait for other issues by listing them
+        as checklist items under a <Code>## Dependencies</Code> heading in its
+        issue body:
+      </p>
+      <CodeBlock>{`## Dependencies
+- [ ] #38
+- [ ] #39`}</CodeBlock>
+      <ul className="list-disc list-inside text-sm text-gray-300 space-y-2 mt-2">
+        <li>
+          A dependency is <strong>satisfied when its issue is closed</strong>{' '}
+          (a dependency tracked by a merged orchestrator task counts
+          immediately). Until every listed issue is satisfied the task stays
+          queued and shows a <Code>blocked</Code> badge — blocked is
+          display-only, never a status on Forgejo or in the database.
+        </li>
+        <li>
+          <strong>Tick the box</strong> (<Code>- [x] #38</Code>) to manually
+          override a dependency — useful when the work happened outside the
+          listed issue, or to neutralise a bad reference without deleting the
+          line.
+        </li>
+        <li>
+          Checklist items <em>outside</em> the <Code>## Dependencies</Code>{' '}
+          section are ignored, so acceptance-criteria checklists never gate
+          scheduling. References to other repos (<Code>owner/repo#5</Code>)
+          and URLs are not supported.
+        </li>
+        <li>
+          The issue body on Forgejo is the source of truth: edits sync
+          instantly via webhook and within one poll cycle (60s) without.
+          Unsatisfiable references (a deleted issue, a circular dependency)
+          keep the task blocked and are explained on the Task Detail page,
+          which also has a <em>Re-check now</em> button.
+        </li>
+      </ul>
+
       <SubHeading>Tracking progress</SubHeading>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-2 mt-2">
         <li>
