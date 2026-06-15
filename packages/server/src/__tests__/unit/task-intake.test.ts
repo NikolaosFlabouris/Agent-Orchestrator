@@ -58,6 +58,7 @@ interface MockForgejo {
   createIssue: ReturnType<typeof vi.fn>;
   replaceLabelByNames: ReturnType<typeof vi.fn>;
   getIssue: ReturnType<typeof vi.fn>;
+  closeIssue: ReturnType<typeof vi.fn>;
 }
 
 function makeMocks(overrides: Partial<MockForgejo> = {}): {
@@ -73,16 +74,19 @@ function makeMocks(overrides: Partial<MockForgejo> = {}): {
   const getIssue =
     overrides.getIssue ??
     vi.fn().mockResolvedValue({ number: 101, title: 'existing title' });
+  const closeIssue =
+    overrides.closeIssue ?? vi.fn().mockResolvedValue(undefined);
   const triggerTick = vi.fn();
   const forgejoStub = {
     createIssue,
     replaceLabelByNames,
     getIssue,
+    closeIssue,
   } as unknown as ForgejoClient;
   return {
     forgejo: forgejoStub,
     scheduler: { triggerTick },
-    mocks: { createIssue, replaceLabelByNames, getIssue, triggerTick },
+    mocks: { createIssue, replaceLabelByNames, getIssue, closeIssue, triggerTick },
   };
 }
 
@@ -272,6 +276,75 @@ describe('createTask', () => {
       ok: false,
       error: { kind: 'forgejo_failure', message: /upstream down/ },
     });
+  });
+
+  it('closes the orphaned Forgejo issue when the task-row insert fails', async () => {
+    const repoId = insertRepo();
+    // Pre-occupy (repoId, issue 77) so the intake's insert on the same
+    // (repo_id, issue_id) pair trips the UNIQUE constraint — simulating any
+    // post-issue-creation DB failure.
+    getDb()
+      .prepare(
+        `INSERT INTO tasks (issue_id, repo_id, status) VALUES (77, ?, 'queued')`
+      )
+      .run(repoId);
+    const { forgejo, scheduler, mocks } = makeMocks({
+      createIssue: vi.fn().mockResolvedValue({ number: 77, title: 'dup' }),
+    });
+
+    const r = await createTask(
+      { repo_id: repoId, title: 'dup', description: 'd' },
+      { forgejo, scheduler }
+    );
+
+    // Surfaced as a failure rather than a phantom success.
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe('forgejo_failure');
+
+    // The just-created Forgejo issue was closed so it can't orphan.
+    expect(mocks.closeIssue).toHaveBeenCalledTimes(1);
+    expect(mocks.closeIssue.mock.calls[0][1]).toBe(77);
+
+    // No second task row leaked from the failed insert.
+    const count = getDb()
+      .prepare(
+        'SELECT COUNT(*) AS n FROM tasks WHERE issue_id = 77 AND repo_id = ?'
+      )
+      .get(repoId) as { n: number };
+    expect(count.n).toBe(1);
+
+    // The failed insert didn't kick the scheduler.
+    expect(mocks.triggerTick).not.toHaveBeenCalled();
+  });
+
+  it('two repos can hold a task for the same issue number without colliding', async () => {
+    const repoA = insertRepo({ owner: 'a', name: 'repo-a' });
+    const repoB = insertRepo({ owner: 'b', name: 'repo-b' });
+    const { forgejo: forgejoA, scheduler: schedulerA } = makeMocks({
+      createIssue: vi.fn().mockResolvedValue({ number: 5, title: 'shared #5' }),
+    });
+    const { forgejo: forgejoB, scheduler: schedulerB } = makeMocks({
+      createIssue: vi.fn().mockResolvedValue({ number: 5, title: 'shared #5' }),
+    });
+
+    const ra = await createTask(
+      { repo_id: repoA, title: 'shared #5', description: 'd' },
+      { forgejo: forgejoA, scheduler: schedulerA }
+    );
+    const rb = await createTask(
+      { repo_id: repoB, title: 'shared #5', description: 'd' },
+      { forgejo: forgejoB, scheduler: schedulerB }
+    );
+
+    expect(ra.ok).toBe(true);
+    expect(rb.ok).toBe(true);
+    if (!ra.ok || !rb.ok) return;
+    expect(ra.value.task.issue_id).toBe(5);
+    expect(rb.value.task.issue_id).toBe(5);
+    expect(ra.value.task.repo_id).toBe(repoA);
+    expect(rb.value.task.repo_id).toBe(repoB);
+    expect(ra.value.task.id).not.toBe(rb.value.task.id);
   });
 
   it('happy path: creates issue, applies status/queued, inserts the task, kicks scheduler, returns issue + task', async () => {

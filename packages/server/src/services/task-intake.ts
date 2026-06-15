@@ -323,18 +323,48 @@ export async function createTask(
   }
 
   // -- Apply labels + insert the task row + broadcast + tick -------------
-  const task = await applyLabelsAndInsertTask(
-    { forgejo, scheduler, log },
-    repo,
-    { number: issue.number, title: issue.title },
-    {
-      agentProfileId: profileCheck.value,
-      reviewAgentProfileId: reviewProfileCheck.value,
-      maxAttempts: maxAttemptsCheck.value,
-      humanMerge: input.human_merge === true,
-      humanReview: input.human_review === true,
+  // The Forgejo issue already exists (external, non-transactional). If the
+  // task-row insert throws — e.g. the (repo_id, issue_id) pair collides, or
+  // any other DB error — the issue would otherwise orphan in Forgejo with a
+  // status/queued label and no backing task. Compensate by closing it so it
+  // can't be picked up again, then surface the failure to the caller.
+  let task;
+  try {
+    task = await applyLabelsAndInsertTask(
+      { forgejo, scheduler, log },
+      repo,
+      { number: issue.number, title: issue.title },
+      {
+        agentProfileId: profileCheck.value,
+        reviewAgentProfileId: reviewProfileCheck.value,
+        maxAttempts: maxAttemptsCheck.value,
+        humanMerge: input.human_merge === true,
+        humanReview: input.human_review === true,
+      }
+    );
+  } catch (err) {
+    try {
+      await forgejo.closeIssue(repo, issue.number);
+      log?.warn(
+        { event: 'task_intake_insert_rollback', issue_id: issue.number, err },
+        'Task insert failed after issue creation — closed the orphaned Forgejo issue'
+      );
+    } catch (closeErr) {
+      // Best effort. A still-open orphan is bad but unrecoverable here; log
+      // loudly so an operator can close it by hand.
+      log?.error(
+        {
+          event: 'task_intake_orphan_cleanup_failed',
+          issue_id: issue.number,
+          err: closeErr,
+        },
+        'Failed to close orphaned Forgejo issue after a task-insert failure'
+      );
     }
-  );
+    return forgejoFailure(
+      `Failed to record task after creating Forgejo issue #${issue.number}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 
   return {
     ok: true,

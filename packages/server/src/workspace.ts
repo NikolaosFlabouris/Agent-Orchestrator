@@ -56,8 +56,48 @@ async function chownRecursive(dir: string): Promise<void> {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/** Per-task workspace directory. Repo-scoped (`<repo_id>-issue-<n>`)
+ *  because Forgejo issue numbers are per-repo: two different repos can both
+ *  have issue #5, and keying the directory on the issue number alone would
+ *  collide them onto one checkout. Pre-v27 workspaces used the bare
+ *  `issue-<n>` name; `migrateLegacyWorkdir` renames them in place on the
+ *  next prepare so the existing clone is reused rather than re-cloned. */
 export function getWorkdir(task: Task): string {
+  return path.join(WORKSPACES_ROOT, `${task.repo_id}-issue-${task.issue_id}`);
+}
+
+/** Legacy (pre-v27) workspace path, keyed on the issue number alone. Used
+ *  only to migrate an existing checkout to the repo-scoped name. */
+function getLegacyWorkdir(task: Task): string {
   return path.join(WORKSPACES_ROOT, `issue-${task.issue_id}`);
+}
+
+/** One-time rename of a pre-v27 `issue-<n>` workspace to the repo-scoped
+ *  `<repo_id>-issue-<n>` name. No-op unless the legacy path exists and the
+ *  new one doesn't. The old global UNIQUE(issue_id) guaranteed at most one
+ *  legacy directory per issue number, so the rename is unambiguous. */
+async function migrateLegacyWorkdir(
+  task: Task,
+  log: FastifyBaseLogger
+): Promise<void> {
+  const workdir = getWorkdir(task);
+  const legacy = getLegacyWorkdir(task);
+  if (legacy === workdir) return;
+  if (fs.existsSync(workdir) || !fs.existsSync(legacy)) return;
+  try {
+    await fsp.rename(legacy, workdir);
+    log.info(
+      { event: 'workspace_migrated', task_id: task.id, from: legacy, to: workdir },
+      'Migrated legacy issue-scoped workspace to repo-scoped path'
+    );
+  } catch (err) {
+    // Best effort — a failed rename just means prepareWorkspace re-clones
+    // into the new path; the stale legacy dir is later swept as an orphan.
+    log.warn(
+      { event: 'workspace_migrate_failed', task_id: task.id, err },
+      'Failed to migrate legacy workspace path; will re-clone'
+    );
+  }
 }
 
 export function getTaskDir(task: Task): string {
@@ -231,6 +271,10 @@ export async function prepareWorkspace(
   if (!repo) {
     throw new Error(`Repo not found for task ${task.id}`);
   }
+
+  // Carry forward any pre-v27 `issue-<n>` checkout to the repo-scoped path
+  // before we decide whether to clone.
+  await migrateLegacyWorkdir(task, log);
 
   const workdir = getWorkdir(task);
   const authUrl = getAgentAuthUrl(repo.owner, repo.name);

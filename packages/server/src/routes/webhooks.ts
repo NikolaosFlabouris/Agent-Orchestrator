@@ -146,7 +146,7 @@ async function handleIssueEvent(
 
   // Any issue event may have changed state or labels that derivation reads.
   // Invalidate any cached snapshot so the next read pulls fresh data.
-  const trackedForInvalidate = getTaskByIssue(issue.number);
+  const trackedForInvalidate = getTaskByIssue(repo.id, issue.number);
   if (trackedForInvalidate) invalidateSnapshot(trackedForInvalidate.id);
 
   if (payload.action === 'opened' || payload.action === 'label_updated') {
@@ -156,7 +156,7 @@ async function handleIssueEvent(
     );
 
     if (hasQueued) {
-      const existing = getTaskByIssue(issue.number);
+      const existing = getTaskByIssue(repo.id, issue.number);
       if (existing) {
         // Already tracked. Re-queue only if the task is in a re-queueable
         // terminal state — the user re-labeled to request another attempt.
@@ -234,7 +234,7 @@ async function handleIssueEvent(
 
     // Handle external label changes on tracked tasks
     if (payload.action === 'label_updated') {
-      const tracked = getTaskByIssue(issue.number);
+      const tracked = getTaskByIssue(repo.id, issue.number);
       if (!tracked) return;
 
       // If the issue now has a status/cancelled label applied externally
@@ -264,7 +264,7 @@ async function handleIssueEvent(
   // fallback when this event is lost.) Non-terminal only — terminal tasks
   // keep their rows as history.
   if (payload.action === 'edited') {
-    const tracked = getTaskByIssue(issue.number);
+    const tracked = getTaskByIssue(repo.id, issue.number);
     if (
       tracked &&
       !TERMINAL_STATUSES.has(tracked.status) &&
@@ -306,7 +306,7 @@ async function handleIssueEvent(
   }
 
   if (payload.action === 'closed') {
-    const tracked = getTaskByIssue(issue.number);
+    const tracked = getTaskByIssue(repo.id, issue.number);
     if (!tracked) return;
 
     // If still active, mark as cancelled

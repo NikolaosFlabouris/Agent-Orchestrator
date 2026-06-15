@@ -1,6 +1,7 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { getTasks } from './db.js';
+import { getWorkdir } from './workspace.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { WORKSPACE_RETENTION_DAYS, WORKSPACES_ROOT } from './constants.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -40,7 +41,7 @@ export async function cleanupOldWorkspaces(log: FastifyBaseLogger): Promise<void
     const completedAt = new Date(task.completed_at).getTime();
     if (now - completedAt < cutoffMs) continue;
 
-    const workdir = path.join(WORKSPACES_ROOT, `issue-${task.issue_id}`);
+    const workdir = getWorkdir(task);
 
     // Skip if already gone — avoids logging a spurious "cleaned" message on
     // every poll cycle for tasks whose workspace was deleted long ago.
@@ -74,8 +75,13 @@ export async function cleanupOldWorkspaces(log: FastifyBaseLogger): Promise<void
   // Defence in depth — catches workspaces that no task row points at. Strict
   // regex on the directory name; anything else (stray files, oddly-named
   // subdirs) is ignored. mtime + retention buffer prevents racing fresh
-  // workspaces during launch.
-  const taskIssueIds = new Set(tasks.map((t) => t.issue_id));
+  // workspaces during launch. Recognises both the current repo-scoped name
+  // (`<repo_id>-issue-<n>`) and the legacy pre-v27 name (`issue-<n>`); a dir
+  // is orphaned when no live task maps to it.
+  const liveScoped = new Set(
+    tasks.map((t) => `${t.repo_id}-issue-${t.issue_id}`)
+  );
+  const liveIssueIds = new Set(tasks.map((t) => t.issue_id));
   let entries: Array<{ name: string; isDirectory(): boolean }>;
   try {
     entries = await fsp.readdir(WORKSPACES_ROOT, { withFileTypes: true });
@@ -85,10 +91,15 @@ export async function cleanupOldWorkspaces(log: FastifyBaseLogger): Promise<void
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const match = entry.name.match(/^issue-(\d+)$/);
-    if (!match) continue;
-    const issueId = parseInt(match[1], 10);
-    if (taskIssueIds.has(issueId)) continue; // not orphaned
+    const scoped = entry.name.match(/^(\d+)-issue-(\d+)$/);
+    const legacy = entry.name.match(/^issue-(\d+)$/);
+    if (!scoped && !legacy) continue;
+    // Repo-scoped dir: orphaned unless an exact (repo, issue) task exists.
+    if (scoped && liveScoped.has(entry.name)) continue;
+    // Legacy dir: at most one existed per issue number (the old global
+    // UNIQUE(issue_id)), so an issue_id match across any repo keeps it.
+    if (legacy && liveIssueIds.has(parseInt(legacy[1], 10))) continue;
+    const issueId = scoped ? parseInt(scoped[2], 10) : parseInt(legacy![1], 10);
 
     const fullPath = path.join(WORKSPACES_ROOT, entry.name);
     let mtimeMs: number;
