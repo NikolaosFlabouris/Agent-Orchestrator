@@ -144,7 +144,7 @@ export class Poller {
     }
 
     for (const issue of issues) {
-      const existing = getTaskByIssue(issue.number);
+      const existing = getTaskByIssue(repo.id, issue.number);
 
       if (existing) {
         // Issue is already tracked. Re-queue only if the task is in a

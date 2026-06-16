@@ -398,7 +398,7 @@ export function createRepoRoutes(forgejo: ForgejoClient) {
               );
               if (hasStatusLabel) return false;
 
-              const tracked = getTaskByIssue(issue.number);
+              const tracked = getTaskByIssue(repo.id, issue.number);
               if (tracked) return false;
 
               return true;

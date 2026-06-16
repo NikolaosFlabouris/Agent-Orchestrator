@@ -17,7 +17,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 26;
+const CURRENT_SCHEMA_VERSION = 27;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -135,7 +135,10 @@ function createTables(db: Database.Database): void {
       started_at TEXT,
       completed_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(issue_id)
+      -- Forgejo numbers issues per-repo (each repo starts at #1), so the
+      -- same issue_id recurs across repos. Uniqueness is therefore scoped
+      -- to (repo_id, issue_id), not issue_id alone — see the v27 migration.
+      UNIQUE(repo_id, issue_id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -425,6 +428,18 @@ function runMigrations(db: Database.Database): void {
   // if any ALTER throws the version stays at its previous value and
   // the next boot retries.
   if (version < CURRENT_SCHEMA_VERSION) {
+    // v27 rebuilds the `tasks` table to swap UNIQUE(issue_id) for
+    // UNIQUE(repo_id, issue_id). That requires DROP TABLE tasks, which —
+    // with foreign_keys ON — would cascade-delete every attempt / event /
+    // step / dependency row that references tasks(id). SQLite ignores
+    // `PRAGMA foreign_keys` inside a transaction, so the rebuild must run
+    // OUTSIDE the shared migration transaction with FK enforcement toggled
+    // off. It is idempotent and does NOT bump schema_version itself: if it
+    // succeeds but the transaction below fails, the version stays put and
+    // the (no-op-on-already-migrated) rebuild simply re-runs next boot.
+    if (version < 27) {
+      rebuildTasksWithRepoScopedUnique(db);
+    }
     db.transaction(() => {
       if (version < 22) {
         // H5a: snapshot profile.timeout_minutes onto the attempt row so
@@ -544,10 +559,106 @@ function runMigrations(db: Database.Database): void {
             ON task_dependencies(dep_issue_number);
         `);
       }
+      // v27's data work (the tasks-table rebuild) runs above, outside this
+      // transaction, because it must toggle PRAGMA foreign_keys. Nothing to
+      // do here — the schema_version bump below records the upgrade.
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
     })();
+  }
+}
+
+/** v27: rebuild `tasks` so uniqueness is scoped to (repo_id, issue_id)
+ *  instead of the global issue_id. Forgejo issue numbers are per-repo, so
+ *  the old global UNIQUE(issue_id) made two repos' identically-numbered
+ *  issues collide on insert (and orphaned the just-created Forgejo issue).
+ *
+ *  SQLite can't alter a constraint in place, so this follows the standard
+ *  rebuild dance: create a correctly-shaped table, copy every row
+ *  (preserving ids, defaults, and timestamps), drop the old table, rename
+ *  the new one into place, and recreate the indexes.
+ *
+ *  Runs with foreign_keys OFF: `DROP TABLE tasks` under FK enforcement
+ *  would cascade-delete the child attempts/events/steps/dependencies. The
+ *  caller guarantees no transaction is open (PRAGMA foreign_keys is a
+ *  no-op inside one). Idempotent — a no-op once the table already carries
+ *  the repo-scoped constraint, so it's safe to re-run after a partial
+ *  migration. */
+function rebuildTasksWithRepoScopedUnique(db: Database.Database): void {
+  const existing = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+    )
+    .get() as { sql: string } | undefined;
+  if (!existing) return; // no tasks table yet — fresh createTables shape applies
+  if (/UNIQUE\s*\(\s*repo_id\s*,\s*issue_id\s*\)/i.test(existing.sql)) {
+    return; // already repo-scoped
+  }
+
+  // This block runs BEFORE the column-adding migrations (v22–v26) in the
+  // shared transaction, so an old source table may be missing later columns
+  // (e.g. review_agent_profile_id, added in v25). Copy only the columns the
+  // source actually has — the rest take the new table's defaults (NULL), and
+  // the v25 block's hasColumn guard then sees the column already present and
+  // skips its ALTER. No tasks column was ever dropped in the migratable
+  // range, so the source∩target intersection loses no data.
+  const canonicalCols = [
+    'id', 'issue_id', 'issue_title', 'repo_id', 'branch_name', 'pr_number',
+    'status', 'queue_position', 'attempt', 'max_attempts', 'prep_failure_count',
+    'agent_profile_id', 'review_agent_profile_id', 'container_id',
+    'started_at', 'completed_at', 'created_at',
+  ];
+  const sourceCols = new Set(
+    (
+      db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>
+    ).map((c) => c.name)
+  );
+  const copyCols = canonicalCols.filter((c) => sourceCols.has(c)).join(', ');
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE tasks_v27 (
+          id INTEGER PRIMARY KEY,
+          issue_id INTEGER NOT NULL,
+          issue_title TEXT,
+          repo_id INTEGER NOT NULL REFERENCES repos(id),
+          branch_name TEXT,
+          pr_number INTEGER,
+          status TEXT NOT NULL,
+          queue_position INTEGER,
+          attempt INTEGER DEFAULT 1,
+          max_attempts INTEGER DEFAULT 7,
+          prep_failure_count INTEGER DEFAULT 0,
+          agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+          review_agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
+          container_id TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(repo_id, issue_id)
+        );
+        INSERT INTO tasks_v27 (${copyCols})
+          SELECT ${copyCols} FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v27 RENAME TO tasks;
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
+      `);
+      // Guard against the rebuild having broken any child reference (it
+      // shouldn't — ids are preserved verbatim — but cheap to verify while
+      // FK enforcement is off and the swap is still inside the transaction).
+      const violations = db.pragma('foreign_key_check') as unknown[];
+      if (violations.length > 0) {
+        throw new Error(
+          `v27 tasks rebuild left dangling foreign keys: ${JSON.stringify(violations)}`
+        );
+      }
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
   }
 }
 
@@ -760,10 +871,15 @@ export function getTask(id: number): Task | undefined {
     .get(id) as Task | undefined;
 }
 
-export function getTaskByIssue(issueId: number): Task | undefined {
-  return getDb()
-    .prepare('SELECT * FROM tasks WHERE issue_id = ?')
-    .get(issueId) as Task | undefined;
+/** Repo-scoped issue lookup. Forgejo issue numbers are per-repo, so a bare
+ *  `issue_id` is ambiguous across repos — always pair it with `repo_id`.
+ *  Alias of {@link getTaskByRepoIssue}, kept for call sites that read more
+ *  naturally as "the task tracking this issue". */
+export function getTaskByIssue(
+  repoId: number,
+  issueId: number
+): Task | undefined {
+  return getTaskByRepoIssue(repoId, issueId);
 }
 
 export function getTasks(filter?: { status?: TaskStatus; repo_id?: number }): Task[] {
