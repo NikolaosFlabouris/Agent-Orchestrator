@@ -11,8 +11,10 @@ import {
   initDocker,
   listContainers,
   ensureAgentNetwork,
+  connectBundledForgejoToAgentNetwork,
   initHostPathMap,
 } from "./docker.js";
+import { resolveCookieSecret } from "./cookie-secret.js";
 import { Scheduler } from "./scheduler.js";
 import { gracefulShutdown } from "./shutdown.js";
 import { onStartup } from "./recovery.js";
@@ -53,46 +55,34 @@ const FORGEJO_ORCHESTRATOR_TOKEN = process.env.FORGEJO_ORCHESTRATOR_TOKEN ?? "";
 const DB_PATH = process.env.DB_PATH ?? "/data/orchestrator.db";
 const PORT = 8080;
 
-/** Cookie-secret resolution (C2). The signed-cookie value is the entire
- *  auth surface, so a missing / too-short secret is a hard fail in
- *  production and requires an explicit dev-flag opt-in elsewhere.
- *
- *  - production: refuse to start without a strong secret (≥32 chars).
- *  - non-production with a strong secret: use it.
- *  - non-production without one: refuse unless
- *    ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET=1, in which case use the
- *    dev placeholder AND force the loopback bind (see resolveBindHost).
- *
- *  Length floor is 32 chars because `openssl rand -hex 32` is the
- *  documented recipe and any shorter value is almost certainly a typo
- *  or a placeholder the operator forgot to replace. */
-const DEV_COOKIE_SECRET = "orchestrator-dev-secret-change-in-production";
-function resolveCookieSecret(): { secret: string; isDevFallback: boolean } {
-  const raw = process.env.COOKIE_SECRET;
-  const strong = typeof raw === "string" && raw.length >= 32;
-  if (strong) return { secret: raw!, isDevFallback: false };
-
-  if (process.env.NODE_ENV === "production") {
-    console.error(
-      "COOKIE_SECRET is required in production and must be at least 32 " +
-        "characters. Generate one with: openssl rand -hex 32"
-    );
-    process.exit(1);
-  }
-  if (process.env.ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET !== "1") {
-    console.error(
-      "COOKIE_SECRET is missing or too short (<32 chars). Set it to a " +
-        "strong random value (openssl rand -hex 32), or set " +
-        "ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET=1 for local dev — the " +
-        "orchestrator will then bind to 127.0.0.1 only."
-    );
-    process.exit(1);
-  }
-  return { secret: DEV_COOKIE_SECRET, isDevFallback: true };
+// Cookie-secret resolution (C2). The signed-cookie value is the entire
+// auth surface — see resolveCookieSecret() in cookie-secret.ts for the
+// full policy. In production a missing secret is auto-generated and
+// persisted to the /data volume on first boot (zero-touch), reused on
+// later boots; an explicit COOKIE_SECRET always takes precedence.
+const {
+  secret: COOKIE_SECRET,
+  isDevFallback: COOKIE_SECRET_IS_DEV,
+  generated: COOKIE_SECRET_GENERATED,
+} = resolveCookieSecret();
+// Propagate the effective secret back into the environment so downstream
+// consumers that read process.env.COOKIE_SECRET directly observe the
+// resolved value — most importantly the MCP OAuth signing key, which is
+// HKDF-derived from COOKIE_SECRET (see mcp/oauth/config.ts resolveSigningKey).
+// Without this, the zero-touch production path (COOKIE_SECRET unset →
+// auto-generated, MCP_OAUTH_SIGNING_SECRET unset) would throw at the first
+// MCP token issuance and break the create-task plugin. It also keeps the
+// Credentials UI (ORCHESTRATOR_ENV_VARS) from reporting COOKIE_SECRET as
+// "not set". An explicit COOKIE_SECRET is simply written back unchanged.
+process.env.COOKIE_SECRET = COOKIE_SECRET;
+if (COOKIE_SECRET_GENERATED) {
+  // Logger isn't up yet at module-load time, so emit on console.
+  console.warn(
+    "COOKIE_SECRET was not provided; generated a strong random secret and " +
+      "persisted it to /data/cookie-secret. It will be reused on subsequent " +
+      "boots. Set COOKIE_SECRET explicitly to override.",
+  );
 }
-
-const { secret: COOKIE_SECRET, isDevFallback: COOKIE_SECRET_IS_DEV } =
-  resolveCookieSecret();
 
 /** Bind host (C2). 0.0.0.0 is the production default — the container's
  *  internal port is mapped to a host port by docker-compose, which is
@@ -161,10 +151,15 @@ async function main() {
   try {
     initDocker();
     await ensureAgentNetwork();
+    const forgejoNetwork = await connectBundledForgejoToAgentNetwork();
     await initHostPathMap();
     const containers = await listContainers();
     log.info(
-      { event: "docker_connected", managedContainers: containers.length },
+      {
+        event: "docker_connected",
+        managedContainers: containers.length,
+        bundledForgejoNetwork: forgejoNetwork,
+      },
       "Docker connection verified, agent-network ready",
     );
   } catch (err) {

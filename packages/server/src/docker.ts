@@ -327,6 +327,48 @@ export async function ensureAgentNetwork(): Promise<void> {
   }
 }
 
+/** Service name (and default DNS alias) of the bundled Forgejo container
+ *  in docker-compose.yml. */
+const BUNDLED_FORGEJO_CONTAINER = 'forgejo';
+
+/**
+ * Attach the bundled `forgejo` container to the agent-network so that
+ * disposable agent containers — which run ONLY on agent-network — can
+ * reach it by service name for git over `FORGEJO_URL` (http://forgejo:3000).
+ *
+ * The orchestrator itself reaches Forgejo over compose's default project
+ * network; this connect is purely for the agent containers' git traffic.
+ *
+ * Best-effort and idempotent — safe to call on every startup:
+ *   - 'absent'            → no `forgejo` container (external-Forgejo deploy);
+ *                           reachability is the operator's responsibility.
+ *   - 'already-connected' → endpoint already exists on the network.
+ *   - 'connected'         → freshly attached.
+ */
+export async function connectBundledForgejoToAgentNetwork(
+  // Injectable for tests; defaults to the initialized singleton.
+  docker: Pick<Docker, 'getNetwork'> = getDocker(),
+): Promise<'connected' | 'already-connected' | 'absent'> {
+  try {
+    const network = docker.getNetwork(AGENT_NETWORK);
+    // Pin the `forgejo` DNS alias explicitly so agent containers resolve
+    // FORGEJO_URL=http://forgejo:3000 regardless of the container's name.
+    await network.connect({
+      Container: BUNDLED_FORGEJO_CONTAINER,
+      EndpointConfig: { Aliases: [BUNDLED_FORGEJO_CONTAINER] },
+    });
+    return 'connected';
+  } catch (err: unknown) {
+    if (isDockerError(err)) {
+      // 404: no such container (external Forgejo) — nothing to do.
+      if (err.statusCode === 404) return 'absent';
+      // 403: endpoint with that name already exists — already attached.
+      if (err.statusCode === 403) return 'already-connected';
+    }
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
