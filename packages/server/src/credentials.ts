@@ -13,7 +13,11 @@
  */
 export const ORCHESTRATOR_ENV_VARS = [
   // Connection to the Forgejo host the orchestrator drives.
+  // FORGEJO_URL is the internal (container-facing) URL used for all
+  // server-side calls; FORGEJO_PUBLIC_URL is the browser-facing URL the
+  // OIDC `authorize` redirect uses and the expected id_token `iss`.
   'FORGEJO_URL',
+  'FORGEJO_PUBLIC_URL',
   'FORGEJO_ORCHESTRATOR_TOKEN',
   'FORGEJO_AGENT_TOKEN',
   'FORGEJO_WEBHOOK_SECRET',
@@ -25,7 +29,10 @@ export const ORCHESTRATOR_ENV_VARS = [
   'FORGEJO_OAUTH_CLIENT_ID',
   'FORGEJO_OAUTH_CLIENT_SECRET',
   'COOKIE_SECRET',
-  // Public URL the orchestrator advertises for the OAuth callback and
-  // webhook URLs.
+  // Browser-facing URL the orchestrator advertises for the OAuth
+  // callback (redirect_uri) and the MCP resource/issuer.
   'ORCHESTRATOR_URL',
+  // Container-facing URL Forgejo uses to reach the orchestrator's
+  // webhook endpoint. Falls back to ORCHESTRATOR_URL when unset.
+  'ORCHESTRATOR_INTERNAL_URL',
 ] as const;

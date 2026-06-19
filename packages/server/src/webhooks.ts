@@ -5,9 +5,16 @@ import type { FastifyBaseLogger } from 'fastify';
 
 const WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
+/** Container-facing orchestrator URL. The webhook target Forgejo
+ *  registers must be reachable from the Forgejo *container* (a compose
+ *  service name like `orchestrator`), which is not the same as the
+ *  browser-facing ORCHESTRATOR_URL. Falls back to ORCHESTRATOR_URL so
+ *  existing single-address (e.g. LAN-IP) deployments are unchanged. */
+const ORCHESTRATOR_INTERNAL_URL =
+  process.env.ORCHESTRATOR_INTERNAL_URL ?? ORCHESTRATOR_URL;
 
 function getWebhookUrl(): string {
-  return `${ORCHESTRATOR_URL}/webhooks/forgejo`;
+  return `${ORCHESTRATOR_INTERNAL_URL}/webhooks/forgejo`;
 }
 
 /**
