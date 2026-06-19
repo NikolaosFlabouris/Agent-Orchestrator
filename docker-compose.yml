@@ -1,11 +1,21 @@
+# Near-out-of-the-box single-machine package: bundles Forgejo, defaults every
+# URL to localhost / compose service names (no IP editing), auto-generates the
+# cookie secret on first boot, and auto-registers webhooks.
+#
 # Before first boot:
-#   1. cp .env.example .env  and fill in tokens / API keys
-#   2. docker compose up -d --build      (builds the orchestrator image,
-#                                         builds the agent image
-#                                         `orchestrator-agent:latest`, and
-#                                         starts the orchestrator — first boot
-#                                         seeds providers/models/default profile
-#                                         and creates the `agent-network` bridge)
+#   1. cp .env.example .env
+#   2. docker compose up -d --build forgejo   (bring up the bundled Forgejo at
+#                                              http://localhost:3000), then in
+#                                              Forgejo create the OAuth2 app
+#                                              (redirect http://localhost:8081/auth/callback)
+#                                              + two service-account tokens and
+#                                              drop them + one LLM key into .env
+#   3. docker compose up -d --build           (builds the orchestrator + agent
+#                                              `orchestrator-agent:latest` images,
+#                                              creates the `agent-network` bridge,
+#                                              and starts Forgejo + orchestrator —
+#                                              first boot seeds providers/models/
+#                                              default profile)
 # See docs/quick-start.md for the full bring-up procedure.
 
 services:
@@ -59,6 +69,21 @@ services:
     depends_on:
       agent-image:
         condition: service_completed_successfully
+      forgejo:
+        condition: service_started
+    # Two-tier URL defaults wired in here so a `git clone` + `docker compose
+    # up` works with NO IP/URL editing. Each is overridable from `.env` (the
+    # same file backs both `env_file` below and compose interpolation), so an
+    # external-Forgejo or LAN deploy just sets the vars there.
+    #   * Browser-facing  : ORCHESTRATOR_URL, FORGEJO_PUBLIC_URL  → localhost
+    #   * Container-facing : ORCHESTRATOR_INTERNAL_URL, FORGEJO_URL → service names
+    # MCP_ENABLED defaults on so the create-task plugin works out of the box.
+    environment:
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://localhost:8081}
+      - ORCHESTRATOR_INTERNAL_URL=${ORCHESTRATOR_INTERNAL_URL:-http://orchestrator:8080}
+      - FORGEJO_URL=${FORGEJO_URL:-http://forgejo:3000}
+      - FORGEJO_PUBLIC_URL=${FORGEJO_PUBLIC_URL:-http://localhost:3000}
+      - MCP_ENABLED=${MCP_ENABLED:-1}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data
@@ -76,6 +101,36 @@ services:
     env_file:
       - .env
 
+  # Bundled Forgejo — the default git host. This makes the orchestrator a
+  # near-out-of-the-box single-machine package: `docker compose up` brings up
+  # Forgejo too, reachable by the host browser at http://localhost:3000 and by
+  # the orchestrator container at http://forgejo:3000 (compose service name).
+  #
+  # Image is pinned to the same major as test/docker-compose.test.yml.
+  #
+  # ROOT_URL must match FORGEJO_PUBLIC_URL so the OIDC id_token `iss` validates
+  # during UI login (split-horizon OIDC — see the two-tier URL note in .env.example).
+  #
+  # External-Forgejo escape hatch: to point at a Forgejo you run elsewhere,
+  # set FORGEJO_URL / FORGEJO_PUBLIC_URL in `.env` (use
+  # http://host.docker.internal:3000 for a host-run Forgejo on Docker Desktop)
+  # and start only the orchestrator: `docker compose up -d orchestrator`
+  # without `forgejo` — but note the orchestrator `depends_on: forgejo`, so to
+  # fully skip the bundled instance run `docker compose up -d --no-deps orchestrator`.
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:14
+    container_name: forgejo
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      # Forgejo reads ini settings from FORGEJO__<section>__<KEY> env vars.
+      - FORGEJO__server__ROOT_URL=${FORGEJO_PUBLIC_URL:-http://localhost:3000}
+    volumes:
+      - forgejo-data:/data
+    ports:
+      - "3000:3000"
+
 # No `networks:` block — the orchestrator runs on compose's default
 # project network (for its own outbound traffic to Forgejo / LLM
 # endpoints) and that's all it needs. The `agent-network` bridge that
@@ -88,8 +143,15 @@ services:
 #
 # Agent containers don't talk to the orchestrator over agent-network
 # (the orchestrator drives them via the Docker socket); they only use
-# it for outbound traffic to LLM endpoints and Forgejo, which routes
-# via the bridge's NAT to the host.
+# it for outbound traffic to LLM endpoints and Forgejo.
+#
+# The bundled `forgejo` service runs on the compose default network, so
+# agent containers couldn't resolve `forgejo:3000` over agent-network by
+# default. At startup the orchestrator attaches the `forgejo` container to
+# agent-network too (connectBundledForgejoToAgentNetwork() in docker.ts),
+# giving it the `forgejo` DNS alias on that bridge so `git` over
+# FORGEJO_URL=http://forgejo:3000 works from inside agent containers.
 
 volumes:
   orchestrator-data:
+  forgejo-data:
