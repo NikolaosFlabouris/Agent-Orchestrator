@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import {
   loadOrCreatePersistedCookieSecret,
   resolveCookieSecret,
 } from '../../cookie-secret.js';
+import { resolveSigningKey } from '../../mcp/oauth/config.js';
 
 const STRONG = 'a'.repeat(32);
 
@@ -125,6 +126,57 @@ describe('resolveCookieSecret — non-production', () => {
         onFatal,
       }),
     ).toThrow(FatalError);
+  });
+});
+
+describe('zero-touch production: cookie secret feeds MCP signing key', () => {
+  // Mirrors index.ts: resolveCookieSecret() must propagate the effective
+  // secret into process.env.COOKIE_SECRET so resolveSigningKey() (which
+  // HKDF-derives the MCP OAuth HS256 key from it) succeeds in the default
+  // zero-touch production path. Without the propagation, the first MCP token
+  // issuance throws and the create-task plugin breaks.
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const k of [
+      'COOKIE_SECRET',
+      'MCP_OAUTH_SIGNING_SECRET',
+      'NODE_ENV',
+      'ORCHESTRATOR_ALLOW_DEFAULT_COOKIE_SECRET',
+    ]) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('resolveSigningKey succeeds (HKDF) from an auto-generated secret when COOKIE_SECRET is unset', () => {
+    process.env.NODE_ENV = 'production';
+    // COOKIE_SECRET and MCP_OAUTH_SIGNING_SECRET intentionally unset.
+    const file = tmpPath();
+    const r = resolveCookieSecret({ file, onFatal });
+    expect(r.generated).toBe(true);
+    expect(r.secret).toMatch(/^[0-9a-f]{64}$/);
+
+    // index.ts performs exactly this propagation after resolution.
+    process.env.COOKIE_SECRET = r.secret;
+
+    const key = resolveSigningKey();
+    expect(key).toBeInstanceOf(Uint8Array);
+    expect(key.length).toBe(32);
+  });
+
+  it('resolveSigningKey throws if the resolved secret is NOT propagated to the env', () => {
+    process.env.NODE_ENV = 'production';
+    const file = tmpPath();
+    const r = resolveCookieSecret({ file, onFatal });
+    expect(r.generated).toBe(true);
+    // Deliberately skip propagation — proves the regression the propagation fixes.
+    expect(() => resolveSigningKey()).toThrow(/No strong secret available/);
   });
 });
 

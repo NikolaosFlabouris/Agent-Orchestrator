@@ -65,6 +65,16 @@ const {
   isDevFallback: COOKIE_SECRET_IS_DEV,
   generated: COOKIE_SECRET_GENERATED,
 } = resolveCookieSecret();
+// Propagate the effective secret back into the environment so downstream
+// consumers that read process.env.COOKIE_SECRET directly observe the
+// resolved value — most importantly the MCP OAuth signing key, which is
+// HKDF-derived from COOKIE_SECRET (see mcp/oauth/config.ts resolveSigningKey).
+// Without this, the zero-touch production path (COOKIE_SECRET unset →
+// auto-generated, MCP_OAUTH_SIGNING_SECRET unset) would throw at the first
+// MCP token issuance and break the create-task plugin. It also keeps the
+// Credentials UI (ORCHESTRATOR_ENV_VARS) from reporting COOKIE_SECRET as
+// "not set". An explicit COOKIE_SECRET is simply written back unchanged.
+process.env.COOKIE_SECRET = COOKIE_SECRET;
 if (COOKIE_SECRET_GENERATED) {
   // Logger isn't up yet at module-load time, so emit on console.
   console.warn(

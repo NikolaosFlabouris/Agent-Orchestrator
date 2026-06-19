@@ -345,10 +345,10 @@ const BUNDLED_FORGEJO_CONTAINER = 'forgejo';
  *   - 'already-connected' → endpoint already exists on the network.
  *   - 'connected'         → freshly attached.
  */
-export async function connectBundledForgejoToAgentNetwork(): Promise<
-  'connected' | 'already-connected' | 'absent'
-> {
-  const docker = getDocker();
+export async function connectBundledForgejoToAgentNetwork(
+  // Injectable for tests; defaults to the initialized singleton.
+  docker: Pick<Docker, 'getNetwork'> = getDocker(),
+): Promise<'connected' | 'already-connected' | 'absent'> {
   try {
     const network = docker.getNetwork(AGENT_NETWORK);
     // Pin the `forgejo` DNS alias explicitly so agent containers resolve
