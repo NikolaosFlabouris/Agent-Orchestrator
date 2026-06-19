@@ -1,10 +1,27 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import fastifyOAuth2 from '@fastify/oauth2';
 
+/** Internal (container-facing) Forgejo URL. Used for ALL server-side
+ *  calls: OIDC token exchange + userinfo, REST API, and git. Reachable
+ *  from inside the container network (a compose service name like
+ *  `forgejo`), not necessarily from the host browser. */
 const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
+/** Browser-facing Forgejo URL for the split-horizon OIDC flow: the host
+ *  the user's browser is redirected to for the `authorize` step, AND the
+ *  `iss` Forgejo signs into the id_token (Forgejo sets `iss = ROOT_URL`).
+ *  Falls back to FORGEJO_URL so existing single-address (e.g. LAN-IP)
+ *  deployments keep working unchanged. */
+const FORGEJO_PUBLIC_URL = process.env.FORGEJO_PUBLIC_URL ?? FORGEJO_URL;
 const OAUTH_CLIENT_ID = process.env.FORGEJO_OAUTH_CLIENT_ID ?? '';
 const OAUTH_CLIENT_SECRET = process.env.FORGEJO_OAUTH_CLIENT_SECRET ?? '';
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL ?? 'http://localhost:8080';
+
+/** Forgejo's OAuth2/OIDC endpoint paths. Stable across the Forgejo
+ *  versions we target; split out as constants because we configure the
+ *  authorize and token hosts separately (split-horizon) rather than
+ *  letting single-issuer discovery derive both from one URL. */
+const FORGEJO_AUTHORIZE_PATH = '/login/oauth/authorize';
+const FORGEJO_TOKEN_PATH = '/login/oauth/access_token';
 /** Name of the signed, httpOnly session cookie. Exported so tests can
  *  build a valid session for the logout route. */
 export const COOKIE_NAME = 'orchestrator_session';
@@ -102,10 +119,31 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
   await app.register(fastifyOAuth2, {
     name: 'forgejoOAuth2',
     scope: ['openid', 'profile'],
+    // PKCE: single-issuer discovery used to auto-select this from
+    // Forgejo's published metadata. The split-horizon config below
+    // configures the endpoints explicitly (no discovery), so request
+    // S256 directly — Forgejo supports it.
+    pkce: 'S256',
     credentials: {
       client: {
         id: OAUTH_CLIENT_ID,
         secret: OAUTH_CLIENT_SECRET,
+      },
+      // Split-horizon OIDC. Discovery couples every endpoint to one
+      // issuer host, but no single Forgejo URL is reachable from both
+      // the host browser AND inside the container network. So configure
+      // the two hosts explicitly:
+      //   * authorizeHost = FORGEJO_PUBLIC_URL — the browser follows
+      //     this redirect, so it must be browser-reachable.
+      //   * tokenHost     = FORGEJO_URL — the orchestrator exchanges the
+      //     code server-side, so it must be container-reachable.
+      // (`@fastify/oauth2` / `simple-oauth2` support separate
+      // authorizeHost / tokenHost for exactly this case.)
+      auth: {
+        authorizeHost: FORGEJO_PUBLIC_URL,
+        authorizePath: FORGEJO_AUTHORIZE_PATH,
+        tokenHost: FORGEJO_URL,
+        tokenPath: FORGEJO_TOKEN_PATH,
       },
     },
     tokenRequestParams: {
@@ -113,9 +151,6 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
     },
     startRedirectPath: '/auth/login',
     callbackUri: `${ORCHESTRATOR_URL}/auth/callback`,
-    discovery: {
-      issuer: FORGEJO_URL,
-    },
   });
 
   // Callback route — exchanges code for token, stores in signed cookie
@@ -126,6 +161,19 @@ export async function registerAuth(app: FastifyInstance): Promise<void> {
         await oauth2.getAccessTokenFromAuthorizationCodeFlow(request);
 
       const token = tokenResult.token;
+
+      // Split-horizon OIDC issuer check. The code was exchanged against
+      // the internal token host (FORGEJO_URL), but Forgejo signs the
+      // id_token `iss` as its ROOT_URL — the public/browser-facing URL —
+      // so validate against FORGEJO_PUBLIC_URL, NOT the host we just
+      // talked to. Rejects a token minted by an unexpected issuer.
+      if (!validateIdTokenIssuer(token.id_token, FORGEJO_PUBLIC_URL)) {
+        app.log.error(
+          { event: 'oauth_iss_mismatch' },
+          'OIDC id_token issuer did not match the expected public Forgejo URL'
+        );
+        return reply.redirect('/auth/login');
+      }
 
       // Best-effort identity lookup against Forgejo's OIDC userinfo
       // endpoint. A failure here must NOT block login — the session
@@ -436,6 +484,55 @@ async function revokeForgejoTokens(
       );
     }
   }
+}
+
+/**
+ * Validate the OIDC id_token issuer for the split-horizon flow.
+ *
+ * Forgejo signs `iss` into the id_token as its configured ROOT_URL,
+ * which is the browser-facing/public URL — so the expected value is
+ * `FORGEJO_PUBLIC_URL`, NOT the internal token host the orchestrator
+ * exchanged the code against. This is the check that makes the
+ * split-horizon safe: the browser and the orchestrator reach Forgejo
+ * at different URLs, but the token must still come from the one
+ * Forgejo we trust.
+ *
+ * Returns:
+ *   - true  when there is no id_token to check. Forgejo always issues
+ *           one with the `openid` scope, but a missing token must not
+ *           hard-fail login — keeps older/edge setups working.
+ *   - true  when the token's `iss` matches `expectedPublicUrl`
+ *           (trailing slashes ignored on both sides).
+ *   - false when an id_token is present but its `iss` is missing,
+ *           unparseable, or doesn't match.
+ *
+ * The signature is NOT verified: the id_token arrives over the
+ * server-side token-exchange channel straight from Forgejo (it never
+ * passes through the browser), so we trust the transport and only
+ * confirm the minting issuer.
+ *
+ * Exported so the split-horizon behaviour can be unit-tested without
+ * standing up the full OAuth plugin.
+ */
+export function validateIdTokenIssuer(
+  idToken: string | undefined,
+  expectedPublicUrl: string
+): boolean {
+  if (!idToken) return true;
+  const parts = idToken.split('.');
+  if (parts.length < 2) return false;
+  let iss: unknown;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(parts[1], 'base64url').toString('utf-8')
+    ) as { iss?: unknown };
+    iss = payload.iss;
+  } catch {
+    return false;
+  }
+  if (typeof iss !== 'string') return false;
+  const strip = (u: string): string => u.replace(/\/+$/, '');
+  return strip(iss) === strip(expectedPublicUrl);
 }
 
 /** Allowlist for the post-login redirect target. Keeps the cookie
