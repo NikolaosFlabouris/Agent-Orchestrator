@@ -9,6 +9,8 @@ import {
   listContainers,
   getContainer,
   inspectContainer,
+  stopContainer,
+  removeContainer,
 } from './docker.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import { resetTask } from './actions.js';
@@ -158,6 +160,13 @@ export async function recoverReviewOrphan(
   forgejo: ForgejoClient,
   log: FastifyBaseLogger
 ): Promise<void> {
+  // A prior failed launch may have left a started-but-untracked container
+  // (task.container_id is null, yet a `managed-by=orchestrator` container with
+  // this task-id is still in Docker). Reap it before relaunch/escalation so the
+  // relaunch starts clean and no orphan survives. Best-effort — the #109 reaper
+  // is the backstop.
+  await reapLingeringContainers(task, log);
+
   finaliseAttemptAsFailed(stuckAttempt, 'Container disappeared before review completed');
 
   if (isCrashLoop(task, stuckAttempt)) {
@@ -239,6 +248,11 @@ export async function recoverDevOrphan(
   scheduler: Scheduler,
   log: FastifyBaseLogger
 ): Promise<void> {
+  // See recoverReviewOrphan: reap any lingering untracked container for this
+  // task left behind by a failed launch before resetting/escalating, so the
+  // requeued attempt starts clean.
+  await reapLingeringContainers(task, log);
+
   finaliseAttemptAsFailed(stuckAttempt, 'Container disappeared before develop completed');
 
   if (isCrashLoop(task, stuckAttempt)) {
@@ -341,6 +355,53 @@ async function markExhausted(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Stop and remove any lingering `managed-by=orchestrator` container that
+ * carries this task's `task-id` label. A failed launch can leave such a
+ * container running even though `task.container_id` is null, so recovery must
+ * reap it before relaunch/escalation.
+ *
+ * Strictly scoped to the orchestrator label set via `listContainers(taskId)` —
+ * never enumerates or removes containers outside it. Best-effort and
+ * non-blocking: a Docker enumeration failure or a non-404 stop/remove error is
+ * logged and swallowed (the periodic reaper remains the backstop) so it never
+ * prevents the task's recovery.
+ */
+async function reapLingeringContainers(
+  task: Task,
+  log: FastifyBaseLogger
+): Promise<void> {
+  let containers: Awaited<ReturnType<typeof listContainers>>;
+  try {
+    containers = await listContainers(task.id);
+  } catch (err) {
+    log.warn(
+      { event: 'orphan_reap_list_failed', task_id: task.id, err },
+      'Could not list containers while reaping lingering launch container'
+    );
+    return;
+  }
+
+  for (const c of containers) {
+    try {
+      const container = getContainer(c.Id);
+      await stopContainer(container);
+      await removeContainer(container);
+      log.info(
+        { event: 'orphan_reap_container_removed', task_id: task.id, container_id: c.Id },
+        'Removed lingering container before orphan recovery'
+      );
+    } catch (err) {
+      // stopContainer is idempotent on 304, removeContainer on 404. Any other
+      // error is logged and skipped — recovery must still proceed.
+      log.warn(
+        { event: 'orphan_reap_container_failed', task_id: task.id, container_id: c.Id, err },
+        'Best-effort removal of lingering container failed'
+      );
+    }
+  }
+}
 
 function finaliseAttemptAsFailed(attempt: Attempt, feedback: string): void {
   updateAttempt(attempt.id, {

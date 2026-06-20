@@ -985,6 +985,52 @@ export class Scheduler {
 
   // ---- Container launch helpers ----
 
+  /**
+   * Best-effort stop+remove of a container that was created during a launch
+   * which then failed before `container_id` was durably persisted (or before
+   * the attempt row / watch callback were wired up). Without this, a partially
+   * successful launch leaks an untracked container that no completion path can
+   * reap — the root cause this change prevents (the #109 reaper is the
+   * after-the-fact backstop).
+   *
+   * Never throws: the original launch error must still propagate so the
+   * caller's failure handling (`handleDevFailure` / `handleReviewFailure`)
+   * runs. `stopContainer` is already idempotent on a 304 (already stopped) and
+   * `removeContainer` on a 404 (already gone); any other Docker error is logged
+   * and swallowed.
+   */
+  private async cleanupFailedLaunch(
+    container: Awaited<ReturnType<typeof createAgentContainer>>,
+    taskId: number
+  ): Promise<void> {
+    try {
+      await stopContainer(container);
+    } catch (err) {
+      this.log.warn(
+        {
+          event: 'launch_cleanup_stop_failed',
+          task_id: taskId,
+          container_id: container.id,
+          err,
+        },
+        'Best-effort stop of failed-launch container failed'
+      );
+    }
+    try {
+      await removeContainer(container);
+    } catch (err) {
+      this.log.warn(
+        {
+          event: 'launch_cleanup_remove_failed',
+          task_id: taskId,
+          container_id: container.id,
+          err,
+        },
+        'Best-effort removal of failed-launch container failed'
+      );
+    }
+  }
+
   async launchDevContainer(
     task: Task,
     feedback: string | null = null
@@ -1043,48 +1089,58 @@ export class Scheduler {
       env,
     });
 
-    await startContainer(container);
-    updateTaskWithSync(task.id, {
-      container_id: container.id,
-      started_at: new Date().toISOString(),
-      status: 'in-progress',
-    });
-
+    // Everything from here until the watch callback is wired up must be
+    // unwound if it throws: the container is already created, so a failure to
+    // start it, persist its id, record the attempt, or set up the watch would
+    // otherwise leak an untracked container. Stop+remove it before rethrowing
+    // so the caller's failure handling still runs.
     try {
-      const repo = getRepo(task.repo_id);
-      if (repo) {
-        await this.forgejo.commentOnIssue(
-          repo,
-          task.issue_id,
-          `Dev agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
-        );
+      await startContainer(container);
+      updateTaskWithSync(task.id, {
+        container_id: container.id,
+        started_at: new Date().toISOString(),
+        status: 'in-progress',
+      });
+
+      try {
+        const repo = getRepo(task.repo_id);
+        if (repo) {
+          await this.forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            `Dev agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
+          );
+        }
+      } catch {
+        /* best effort */
       }
-    } catch {
-      /* best effort */
+
+      // Record attempt with a snapshot of the profile/harness/model
+      // resolved at this exact launch moment. Captured here — not at
+      // queue time and not deferred to later reads — because this is
+      // the single queued→in-progress transition for this attempt and
+      // operator edits to the profile after this point must not change
+      // what this attempt audits as having run with (H5).
+      const attempt = insertAttempt({
+        task_id: task.id,
+        attempt_number: task.attempt,
+        role: 'develop',
+        status: 'running',
+        model_id: ctx.invocation.resolved_model,
+        harness_id: ctx.harness.id,
+        timeout_minutes_snapshot: ctx.profile.timeout_minutes,
+      });
+      activeState.set(task.id, {
+        currentAttemptId: attempt.id,
+        reviewRetryCount: 0,
+      });
+
+      // Set up container completion callback
+      this.watchContainer(container, task.id);
+    } catch (err) {
+      await this.cleanupFailedLaunch(container, task.id);
+      throw err;
     }
-
-    // Record attempt with a snapshot of the profile/harness/model
-    // resolved at this exact launch moment. Captured here — not at
-    // queue time and not deferred to later reads — because this is
-    // the single queued→in-progress transition for this attempt and
-    // operator edits to the profile after this point must not change
-    // what this attempt audits as having run with (H5).
-    const attempt = insertAttempt({
-      task_id: task.id,
-      attempt_number: task.attempt,
-      role: 'develop',
-      status: 'running',
-      model_id: ctx.invocation.resolved_model,
-      harness_id: ctx.harness.id,
-      timeout_minutes_snapshot: ctx.profile.timeout_minutes,
-    });
-    activeState.set(task.id, {
-      currentAttemptId: attempt.id,
-      reviewRetryCount: 0,
-    });
-
-    // Set up container completion callback
-    this.watchContainer(container, task.id);
 
     recordTaskEvent(task.id, 'container_started', `Dev container started (attempt ${task.attempt})`);
 
@@ -1145,47 +1201,55 @@ export class Scheduler {
       env,
     });
 
-    await startContainer(container);
-    updateTaskWithSync(task.id, {
-      container_id: container.id,
-      status: 'in-review',
-    });
-
+    // See launchDevContainer: unwind the just-created container if any step
+    // after creation throws before the watch callback is wired up, so a
+    // partially successful review launch never leaks an untracked container.
     try {
-      const repo = getRepo(task.repo_id);
-      if (repo) {
-        await this.forgejo.commentOnIssue(
-          repo,
-          task.issue_id,
-          `Review agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
-        );
+      await startContainer(container);
+      updateTaskWithSync(task.id, {
+        container_id: container.id,
+        status: 'in-review',
+      });
+
+      try {
+        const repo = getRepo(task.repo_id);
+        if (repo) {
+          await this.forgejo.commentOnIssue(
+            repo,
+            task.issue_id,
+            `Review agent starting (attempt ${task.attempt}/${task.max_attempts ?? DEFAULT_MAX_ATTEMPTS}).`
+          );
+        }
+      } catch {
+        /* best effort */
       }
-    } catch {
-      /* best effort */
+
+      // Record attempt with snapshot of harness + model + timeout used.
+      // Same snapshot policy as launchDevContainer — review attempts are
+      // also a queued→in-progress transition for the review run.
+      const attempt = insertAttempt({
+        task_id: task.id,
+        attempt_number: task.attempt,
+        role: 'review',
+        status: 'running',
+        model_id: ctx.invocation.resolved_model,
+        harness_id: ctx.harness.id,
+        timeout_minutes_snapshot: ctx.profile.timeout_minutes,
+      });
+      const state = activeState.get(task.id) ?? {
+        currentAttemptId: 0,
+        reviewRetryCount: 0,
+      };
+      state.currentAttemptId = attempt.id;
+      if (preReviewSha) state.preReviewSha = preReviewSha;
+      activeState.set(task.id, state);
+
+      // Set up container completion callback
+      this.watchContainer(container, task.id);
+    } catch (err) {
+      await this.cleanupFailedLaunch(container, task.id);
+      throw err;
     }
-
-    // Record attempt with snapshot of harness + model + timeout used.
-    // Same snapshot policy as launchDevContainer — review attempts are
-    // also a queued→in-progress transition for the review run.
-    const attempt = insertAttempt({
-      task_id: task.id,
-      attempt_number: task.attempt,
-      role: 'review',
-      status: 'running',
-      model_id: ctx.invocation.resolved_model,
-      harness_id: ctx.harness.id,
-      timeout_minutes_snapshot: ctx.profile.timeout_minutes,
-    });
-    const state = activeState.get(task.id) ?? {
-      currentAttemptId: 0,
-      reviewRetryCount: 0,
-    };
-    state.currentAttemptId = attempt.id;
-    if (preReviewSha) state.preReviewSha = preReviewSha;
-    activeState.set(task.id, state);
-
-    // Set up container completion callback
-    this.watchContainer(container, task.id);
 
     recordTaskEvent(task.id, 'container_started', `Review container started (attempt ${task.attempt})`);
 

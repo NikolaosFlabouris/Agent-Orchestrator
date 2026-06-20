@@ -444,6 +444,115 @@ describe('develop→review transition under overlapping ticks', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 4. Launch-failure cleanup: a partially-successful launch must not leak the
+//    just-created container (issue #111).
+// ---------------------------------------------------------------------------
+
+describe('launchDevContainer failure cleanup', () => {
+  it('stops+removes the created container when startContainer throws, then rethrows', async () => {
+    const task = mkTask({
+      id: 1,
+      status: 'queued',
+      container_id: null,
+      branch_name: 'feat/x',
+    });
+    store = [task];
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'dev1' });
+    mocks.startContainer.mockRejectedValue(new Error('start boom'));
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await expect(scheduler.launchDevContainer(task)).rejects.toThrow('start boom');
+
+    // The just-created container is reaped before the error propagates.
+    expect(mocks.stopContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'dev1' })
+    );
+    expect(mocks.removeContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'dev1' })
+    );
+    // No untracked container left behind: container_id was never persisted.
+    expect(store[0].container_id).toBeNull();
+  });
+
+  it('reaps the container when the container_id persist throws', async () => {
+    const task = mkTask({
+      id: 1,
+      status: 'queued',
+      container_id: null,
+      branch_name: 'feat/x',
+    });
+    store = [task];
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'dev1' });
+    mocks.startContainer.mockResolvedValue(undefined);
+    // Throw only on the container_id persist; other updateTaskWithSync calls
+    // (e.g. status:'preparing') still mutate the store.
+    mocks.updateTaskWithSync.mockImplementation((id: number, patch: Partial<Task>) => {
+      if (patch.container_id) throw new Error('persist boom');
+      const t = store.find((x) => x.id === id);
+      if (t) Object.assign(t, patch);
+    });
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await expect(scheduler.launchDevContainer(task)).rejects.toThrow('persist boom');
+
+    expect(mocks.removeContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'dev1' })
+    );
+  });
+
+  it('still surfaces the original launch error when cleanup removal fails (non-404)', async () => {
+    const task = mkTask({
+      id: 1,
+      status: 'queued',
+      container_id: null,
+      branch_name: 'feat/x',
+    });
+    store = [task];
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'dev1' });
+    mocks.startContainer.mockRejectedValue(new Error('start boom'));
+    // Cleanup itself errors with a non-404 — must be swallowed, original error wins.
+    mocks.removeContainer.mockRejectedValue(new Error('daemon error'));
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await expect(scheduler.launchDevContainer(task)).rejects.toThrow('start boom');
+    expect(mocks.removeContainer).toHaveBeenCalled();
+  });
+});
+
+describe('launchReviewContainer failure cleanup', () => {
+  it('stops+removes the created container when startContainer throws, then rethrows', async () => {
+    const task = mkTask({
+      id: 1,
+      status: 'in-review',
+      container_id: null,
+      branch_name: 'feat/x',
+    });
+    store = [task];
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'rev1' });
+    mocks.startContainer.mockRejectedValue(new Error('start boom'));
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await expect(scheduler.launchReviewContainer(task)).rejects.toThrow('start boom');
+
+    expect(mocks.stopContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'rev1' })
+    );
+    expect(mocks.removeContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'rev1' })
+    );
+    expect(store[0].container_id).toBeNull();
+  });
+});
+
 describe('deferred-review transition under overlapping ticks', () => {
   it('defers the review exactly once and launches nothing', async () => {
     store = [mkTask({ id: 1, status: 'in-progress', container_id: 'c1' })];
