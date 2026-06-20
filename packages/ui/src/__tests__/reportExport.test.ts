@@ -3,6 +3,8 @@ import { toCsv, toJson, type ReportExportData } from '../components/reportExport
 import type {
   ReportsOverview,
   ReportsLeaderboard,
+  ReportsReliability,
+  ReportsDurations,
 } from '@orchestrator/shared';
 
 const overview: ReportsOverview = {
@@ -55,10 +57,47 @@ const modelBoard: ReportsLeaderboard = {
   ],
 };
 
+const reliability: ReportsReliability = {
+  range: { from: '2026-01-01', to: '2026-04-01' },
+  repos: [1],
+  bucket: 'day',
+  counts: {
+    timeout_kills: 3,
+    orphans_detected: 2,
+    orphans_recovered: 2,
+    orphans_exhausted: 0,
+    review_deferrals: 1,
+    prep_failures: 4,
+  },
+  series: [],
+  by_repo: [],
+};
+
+const durationsImpl: ReportsDurations = {
+  range: { from: '2026-01-01', to: '2026-04-01' },
+  group_by: 'model',
+  metric: 'implementation',
+  groups: [
+    {
+      key: 'opus',
+      label: 'opus',
+      count: 4,
+      min_seconds: 100,
+      p50_seconds: 200,
+      p90_seconds: 400,
+      p99_seconds: 400,
+      max_seconds: 400,
+      avg_seconds: 250,
+    },
+  ],
+};
+
 const data: ReportExportData = {
   filter: { repos: [1], from: '2026-01-01', to: '2026-04-01' },
   overview,
   leaderboards: [modelBoard],
+  reliability,
+  durations: [durationsImpl],
 };
 
 describe('toJson', () => {
@@ -95,5 +134,28 @@ describe('toCsv', () => {
       overview: { ...overview, success_rate: null },
     };
     expect(toCsv(withNulls)).toContain('Success rate,\n');
+  });
+
+  it('includes the reliability incidence block when present', () => {
+    expect(csv).toContain('Reliability metric,Count');
+    expect(csv).toContain('Timeout kills,3');
+    expect(csv).toContain('Prep failures,4');
+  });
+
+  it('includes the duration percentile tables when present', () => {
+    expect(csv).toContain('Durations: implementation by model');
+    expect(csv).toContain('metric,group_by,key,count,min_s,p50_s,p90_s,p99_s,max_s,avg_s');
+    expect(csv).toContain('implementation,model,opus,4,100,200,400,400,400,250');
+  });
+
+  it('omits the advanced blocks when those fields are absent', () => {
+    const minimal: ReportExportData = {
+      filter: { repos: [1], from: '2026-01-01', to: '2026-04-01' },
+      overview,
+      leaderboards: [modelBoard],
+    };
+    const out = toCsv(minimal);
+    expect(out).not.toContain('Reliability metric');
+    expect(out).not.toContain('Durations:');
   });
 });

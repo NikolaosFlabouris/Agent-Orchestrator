@@ -1,6 +1,8 @@
 import type {
   ReportsOverview,
   ReportsLeaderboard,
+  ReportsReliability,
+  ReportsDurations,
   ReportFilter,
 } from '@orchestrator/shared';
 
@@ -12,6 +14,11 @@ export interface ReportExportData {
   filter: ReportFilter;
   overview: ReportsOverview;
   leaderboards: ReportsLeaderboard[];
+  /** Operational-incidence roll-up (timeout-kills, orphans, prep failures,
+   *  review deferrals). Optional so older callers still type-check. */
+  reliability?: ReportsReliability;
+  /** Per-group duration percentile summaries (implementation + review). */
+  durations?: ReportsDurations[];
 }
 
 /** Trigger a client-side file download for an in-memory string. */
@@ -51,7 +58,7 @@ function csvRow(cells: unknown[]): string {
  *  perfectly readable in any spreadsheet, and keeps the whole filtered
  *  picture in one file. */
 export function toCsv(data: ReportExportData): string {
-  const { filter, overview, leaderboards } = data;
+  const { filter, overview, leaderboards, reliability, durations } = data;
   const lines: string[] = [];
 
   lines.push(csvRow(['Report range', filter.from, filter.to]));
@@ -125,6 +132,57 @@ export function toCsv(data: ReportExportData): string {
       );
     }
     lines.push('');
+  }
+
+  // Reliability / ops incidence block.
+  if (reliability) {
+    const c = reliability.counts;
+    lines.push(csvRow(['Reliability metric', 'Count']));
+    lines.push(csvRow(['Timeout kills', c.timeout_kills]));
+    lines.push(csvRow(['Orphans detected', c.orphans_detected]));
+    lines.push(csvRow(['Orphans recovered', c.orphans_recovered]));
+    lines.push(csvRow(['Recovery exhausted', c.orphans_exhausted]));
+    lines.push(csvRow(['Prep failures', c.prep_failures]));
+    lines.push(csvRow(['Review deferrals', c.review_deferrals]));
+    lines.push('');
+  }
+
+  // Duration percentile summaries (one table per metric).
+  if (durations && durations.length > 0) {
+    const header = [
+      'metric',
+      'group_by',
+      'key',
+      'count',
+      'min_s',
+      'p50_s',
+      'p90_s',
+      'p99_s',
+      'max_s',
+      'avg_s',
+    ];
+    for (const dist of durations) {
+      if (dist.groups.length === 0) continue;
+      lines.push(csvRow([`Durations: ${dist.metric} by ${dist.group_by}`]));
+      lines.push(csvRow(header));
+      for (const g of dist.groups) {
+        lines.push(
+          csvRow([
+            dist.metric,
+            dist.group_by,
+            g.key,
+            g.count,
+            g.min_seconds ?? '',
+            g.p50_seconds ?? '',
+            g.p90_seconds ?? '',
+            g.p99_seconds ?? '',
+            g.max_seconds ?? '',
+            g.avg_seconds ?? '',
+          ])
+        );
+      }
+      lines.push('');
+    }
   }
 
   return lines.join('\n');

@@ -22,6 +22,19 @@ import type {
   ReportsLeaderboard,
   LeaderboardGroupBy,
   LeaderboardRow,
+  DurationGroupBy,
+  DurationMetric,
+  DurationDistribution,
+  ReportsDurations,
+  ReportsFunnel,
+  FunnelStage,
+  ReliabilityCounts,
+  ReliabilityRepoRow,
+  ReliabilityTimeseriesBucket,
+  ReportsReliability,
+  HeatmapMetric,
+  HeatmapCell,
+  ReportsHeatmap,
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
@@ -2481,4 +2494,352 @@ export function getReportLeaderboard(
   );
 
   return { range: { from: filter.from, to: filter.to }, group_by: groupBy, rows };
+}
+
+// ---------------------------------------------------------------------------
+// Advanced reports: duration distribution / funnel / reliability / heatmap
+// ---------------------------------------------------------------------------
+
+/** Per-group duration distribution for `GET /api/reports/durations`.
+ *
+ *  Returns nearest-rank p50/p90/p99 plus min/max/avg/count over the
+ *  implementation (develop-role) or review (review-role) attempt durations,
+ *  grouped by the per-attempt model/harness snapshot. Like the leaderboard,
+ *  grouping keys off attempts.* so historical accuracy survives profile
+ *  edits, and an attempt with a NULL/empty snapshot is excluded. All
+ *  aggregation runs in one SQL pass (window functions partitioned by key). */
+export function getReportDurations(
+  filter: ReportFilter,
+  groupBy: DurationGroupBy,
+  metric: DurationMetric
+): ReportsDurations {
+  const db = getDb();
+  const cohort = rangeClause('t.created_at', filter);
+
+  const keyCol = groupBy === 'model' ? 'a.model_id' : 'a.harness_id';
+  const keyNotNull = `${keyCol} IS NOT NULL AND ${keyCol} != ''`;
+  const role = metric === 'implementation' ? 'develop' : 'review';
+  const dur = `(${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0`;
+
+  const rows = db
+    .prepare(
+      `WITH vals AS (
+         SELECT ${keyCol} AS key, ${dur} AS d
+         FROM attempts a JOIN tasks t ON t.id = a.task_id
+         WHERE a.role = '${role}'
+           AND a.started_at IS NOT NULL AND a.completed_at IS NOT NULL
+           AND ${keyNotNull}
+           AND ${cohort.clause}
+       ),
+       ordered AS (
+         SELECT key, d,
+           ROW_NUMBER() OVER (PARTITION BY key ORDER BY d) AS rn,
+           COUNT(*) OVER (PARTITION BY key) AS n
+         FROM vals
+       )
+       SELECT key,
+         COUNT(*) AS count,
+         MIN(d) AS min_d,
+         MAX(d) AS max_d,
+         AVG(d) AS avg_d,
+         MAX(CASE WHEN rn = ${nearestRank(0.5)} THEN d END) AS p50,
+         MAX(CASE WHEN rn = ${nearestRank(0.9)} THEN d END) AS p90,
+         MAX(CASE WHEN rn = ${nearestRank(0.99)} THEN d END) AS p99
+       FROM ordered
+       GROUP BY key`
+    )
+    .all(...cohort.params) as Array<{
+    key: string;
+    count: number;
+    min_d: number | null;
+    max_d: number | null;
+    avg_d: number | null;
+    p50: number | null;
+    p90: number | null;
+    p99: number | null;
+  }>;
+
+  const groups: DurationDistribution[] = rows
+    .map((r) => ({
+      key: r.key,
+      label: r.key,
+      count: Number(r.count),
+      min_seconds: numOrNull(r.min_d),
+      p50_seconds: numOrNull(r.p50),
+      p90_seconds: numOrNull(r.p90),
+      p99_seconds: numOrNull(r.p99),
+      max_seconds: numOrNull(r.max_d),
+      avg_seconds: numOrNull(r.avg_d),
+    }))
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+
+  return {
+    range: { from: filter.from, to: filter.to },
+    group_by: groupBy,
+    metric,
+    groups,
+  };
+}
+
+/** Lifecycle funnel for `GET /api/reports/funnel`.
+ *
+ *  Stages: created → preparing → in-progress → in-review → merged. "Created"
+ *  is the cohort of tasks created in [from, to) (optionally repo-narrowed);
+ *  every later stage counts the DISTINCT cohort tasks that ever emitted the
+ *  matching `status_*` timeline event (written by updateTaskWithSync on every
+ *  status transition — see state-sync.ts). Counting "ever reached" makes the
+ *  funnel a true high-water-mark of progression and drop-off, surviving
+ *  rework loops (a task that bounced in-review→changes-needed→in-progress
+ *  still counts at every stage it touched). */
+export function getReportFunnel(filter: ReportFilter): ReportsFunnel {
+  const db = getDb();
+  const cohort = rangeClause('t.created_at', filter);
+
+  const created = (
+    db
+      .prepare(`SELECT COUNT(*) AS c FROM tasks t WHERE ${cohort.clause}`)
+      .get(...cohort.params) as { c: number }
+  ).c;
+
+  // DISTINCT cohort tasks that emitted each status_* event. One grouped pass
+  // over the events joined to the cohort.
+  const eventRows = db
+    .prepare(
+      `SELECT e.event_type AS event_type, COUNT(DISTINCT e.task_id) AS c
+       FROM task_events e JOIN tasks t ON t.id = e.task_id
+       WHERE e.event_type IN ('status_preparing', 'status_in-progress', 'status_in-review', 'status_merged')
+         AND ${cohort.clause}
+       GROUP BY e.event_type`
+    )
+    .all(...cohort.params) as Array<{ event_type: string; c: number }>;
+  const byEvent = new Map(eventRows.map((r) => [r.event_type, Number(r.c)]));
+
+  const stageDefs: Array<{ stage: string; label: string; count: number }> = [
+    { stage: 'created', label: 'Created', count: Number(created) },
+    { stage: 'preparing', label: 'Preparing', count: byEvent.get('status_preparing') ?? 0 },
+    { stage: 'in-progress', label: 'In progress', count: byEvent.get('status_in-progress') ?? 0 },
+    { stage: 'in-review', label: 'In review', count: byEvent.get('status_in-review') ?? 0 },
+    { stage: 'merged', label: 'Merged', count: byEvent.get('status_merged') ?? 0 },
+  ];
+
+  const first = stageDefs[0].count;
+  const stages: FunnelStage[] = stageDefs.map((s, i) => {
+    const prev = i > 0 ? stageDefs[i - 1].count : null;
+    return {
+      stage: s.stage,
+      label: s.label,
+      count: s.count,
+      pct_of_created: first > 0 ? s.count / first : null,
+      pct_of_previous: prev != null ? (prev > 0 ? s.count / prev : null) : null,
+    };
+  });
+
+  return { range: { from: filter.from, to: filter.to }, repos: filter.repos, stages };
+}
+
+/** The reliability event types surfaced by the ops panel, mapped to the
+ *  response field they populate. */
+const RELIABILITY_EVENTS: Array<{
+  event_type: string;
+  field: keyof Omit<ReliabilityCounts, 'prep_failures'>;
+}> = [
+  { event_type: 'container_timeout_kill', field: 'timeout_kills' },
+  { event_type: 'orphan_detected', field: 'orphans_detected' },
+  { event_type: 'orphan_recovery_triggered', field: 'orphans_recovered' },
+  { event_type: 'orphan_recovery_exhausted', field: 'orphans_exhausted' },
+  { event_type: 'review_deferred', field: 'review_deferrals' },
+];
+
+/** Operational-health roll-up for `GET /api/reports/reliability`.
+ *
+ *  The event-driven incidences (timeout-kills, orphan detect/recover/exhaust,
+ *  review deferrals) are scoped by the EVENT's created_at falling in the
+ *  range (the incident happened in-window) and the owning task's repo. Prep
+ *  failures are a point-in-time per-task counter (tasks.prep_failure_count),
+ *  so they're summed over the created-in-range cohort and reported in the
+ *  totals + per-repo breakdown only — not the time-series. */
+export function getReportReliability(
+  filter: ReportFilter,
+  bucket: 'day' | 'week'
+): ReportsReliability {
+  const db = getDb();
+  const eventRange = rangeClause('e.created_at', filter);
+
+  const eventTypes = RELIABILITY_EVENTS.map((e) => e.event_type);
+  const placeholders = eventTypes.map(() => '?').join(',');
+
+  // -- Totals + per-repo, one grouped pass over the in-range events. --
+  const rows = db
+    .prepare(
+      `SELECT e.event_type AS event_type, t.repo_id AS repo_id, COUNT(*) AS c
+       FROM task_events e JOIN tasks t ON t.id = e.task_id
+       WHERE e.event_type IN (${placeholders})
+         AND ${eventRange.clause}
+       GROUP BY e.event_type, t.repo_id`
+    )
+    .all(...eventTypes, ...eventRange.params) as Array<{
+    event_type: string;
+    repo_id: number;
+    c: number;
+  }>;
+
+  const fieldFor = new Map(
+    RELIABILITY_EVENTS.map((e) => [e.event_type, e.field] as const)
+  );
+
+  const counts: ReliabilityCounts = {
+    timeout_kills: 0,
+    orphans_detected: 0,
+    orphans_recovered: 0,
+    orphans_exhausted: 0,
+    review_deferrals: 0,
+    prep_failures: 0,
+  };
+  const byRepo = new Map<number, ReliabilityRepoRow>();
+  const ensureRepo = (id: number): ReliabilityRepoRow => {
+    let row = byRepo.get(id);
+    if (!row) {
+      row = {
+        key: String(id),
+        label: String(id),
+        timeout_kills: 0,
+        orphans_detected: 0,
+        orphans_recovered: 0,
+        orphans_exhausted: 0,
+        review_deferrals: 0,
+        prep_failures: 0,
+      };
+      byRepo.set(id, row);
+    }
+    return row;
+  };
+
+  for (const r of rows) {
+    const field = fieldFor.get(r.event_type);
+    if (!field) continue;
+    counts[field] += Number(r.c);
+    ensureRepo(r.repo_id)[field] += Number(r.c);
+  }
+
+  // -- Prep failures: sum the per-task counter over the created-in-range
+  //    cohort, both as a total and per repo. --
+  const cohort = rangeClause('t.created_at', filter);
+  const prepRows = db
+    .prepare(
+      `SELECT t.repo_id AS repo_id, SUM(t.prep_failure_count) AS c
+       FROM tasks t
+       WHERE t.prep_failure_count > 0 AND ${cohort.clause}
+       GROUP BY t.repo_id`
+    )
+    .all(...cohort.params) as Array<{ repo_id: number; c: number }>;
+  for (const r of prepRows) {
+    const n = Number(r.c) || 0;
+    counts.prep_failures += n;
+    ensureRepo(r.repo_id).prep_failures += n;
+  }
+
+  // -- Time-series of the event incidences (prep failures omitted). --
+  const bucketExpr = (col: string): string => {
+    const n = normTsSql(col);
+    if (bucket === 'day') return `date(${n})`;
+    return `date(${n}, '-' || ((CAST(strftime('%w', ${n}) AS INT) + 6) % 7) || ' days')`;
+  };
+  const seriesRows = db
+    .prepare(
+      `SELECT ${bucketExpr('e.created_at')} AS bucket, e.event_type AS event_type, COUNT(*) AS c
+       FROM task_events e JOIN tasks t ON t.id = e.task_id
+       WHERE e.event_type IN (${placeholders})
+         AND ${eventRange.clause}
+       GROUP BY bucket, e.event_type`
+    )
+    .all(...eventTypes, ...eventRange.params) as Array<{
+    bucket: string;
+    event_type: string;
+    c: number;
+  }>;
+
+  const seriesByBucket = new Map<string, ReliabilityTimeseriesBucket>();
+  for (const b of enumerateBuckets(filter.from, filter.to, bucket)) {
+    seriesByBucket.set(b, {
+      bucket: b,
+      timeout_kills: 0,
+      orphans_detected: 0,
+      orphans_recovered: 0,
+      orphans_exhausted: 0,
+      review_deferrals: 0,
+    });
+  }
+  for (const r of seriesRows) {
+    const slot = seriesByBucket.get(r.bucket);
+    const field = fieldFor.get(r.event_type);
+    if (!slot || !field) continue;
+    slot[field] += Number(r.c);
+  }
+
+  // Repo labels.
+  for (const repo of getRepos()) {
+    const row = byRepo.get(repo.id);
+    if (row) row.label = `${repo.owner}/${repo.name}`;
+  }
+
+  const by_repo = [...byRepo.values()].sort((a, b) => {
+    const ta =
+      a.timeout_kills + a.orphans_detected + a.orphans_recovered +
+      a.orphans_exhausted + a.review_deferrals + a.prep_failures;
+    const tb =
+      b.timeout_kills + b.orphans_detected + b.orphans_recovered +
+      b.orphans_exhausted + b.review_deferrals + b.prep_failures;
+    return tb - ta || a.key.localeCompare(b.key);
+  });
+
+  return {
+    range: { from: filter.from, to: filter.to },
+    repos: filter.repos,
+    bucket,
+    counts,
+    series: [...seriesByBucket.values()],
+    by_repo,
+  };
+}
+
+/** Activity heatmap for `GET /api/reports/heatmap`. Buckets task launches
+ *  (created_at) or merges (completed_at of merged tasks) by UTC hour-of-day
+ *  × day-of-week. Returns only non-zero cells plus the max for the UI's
+ *  colour scale; the client fills the rest of the 7×24 grid with zero. */
+export function getReportHeatmap(
+  filter: ReportFilter,
+  metric: HeatmapMetric
+): ReportsHeatmap {
+  const db = getDb();
+
+  let col: string;
+  let extra = '';
+  if (metric === 'merged') {
+    col = 't.completed_at';
+    extra = " AND t.status = 'merged' AND t.completed_at IS NOT NULL";
+  } else {
+    col = 't.created_at';
+  }
+  const range = rangeClause(col, filter);
+  const n = normTsSql(col);
+
+  const rows = db
+    .prepare(
+      `SELECT CAST(strftime('%w', ${n}) AS INT) AS dow,
+              CAST(strftime('%H', ${n}) AS INT) AS hour,
+              COUNT(*) AS c
+       FROM tasks t
+       WHERE ${range.clause}${extra}
+       GROUP BY dow, hour`
+    )
+    .all(...range.params) as Array<{ dow: number; hour: number; c: number }>;
+
+  let max = 0;
+  const cells: HeatmapCell[] = rows.map((r) => {
+    const count = Number(r.c);
+    if (count > max) max = count;
+    return { dow: Number(r.dow), hour: Number(r.hour), count };
+  });
+
+  return { range: { from: filter.from, to: filter.to }, metric, cells, max };
 }
