@@ -2,6 +2,7 @@ import './index.css';
 import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom';
 import { createRoot } from 'react-dom/client';
 import { Dashboard } from './views/Dashboard.js';
+import { Reports } from './views/Reports.js';
 import { TaskDetail } from './views/TaskDetail.js';
 import { CreateTask } from './views/CreateTask.js';
 import { Settings } from './views/Settings.js';
@@ -32,6 +33,7 @@ function App() {
         <Route path="/signed-out" element={<SignedOut />} />
         <Route element={<GatedLayout />}>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/tasks/:id" element={<TaskDetail />} />
           <Route path="/tasks/new" element={<CreateTask />} />
           <Route path="/settings" element={<Settings />} />

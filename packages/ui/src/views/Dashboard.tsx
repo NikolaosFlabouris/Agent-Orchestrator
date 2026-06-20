@@ -8,6 +8,10 @@ import type { DashboardWsEvent, HostPool } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { QueueList } from '../components/QueueList.js';
+import { KpiCard } from '../components/KpiCard.js';
+import { formatNumber, formatPercent } from '../components/reportFormat.js';
+import { defaultRange, previousRange } from '../components/reportFilter.js';
+import type { ReportsOverview } from '@orchestrator/shared';
 
 const ACTIVE_STATUSES = new Set([
   'preparing',
@@ -178,6 +182,9 @@ export function Dashboard() {
         >
           {paused ? 'Resume' : 'Pause'}
         </button>
+        <Link to="/reports" className="text-blue-400 hover:text-blue-300">
+          Reports
+        </Link>
         <Link to="/settings" className="text-blue-400 hover:text-blue-300">
           Settings
         </Link>
@@ -250,6 +257,8 @@ export function Dashboard() {
        )}
 
        <AlertBanner alerts={alerts} />
+
+      <KpiStrip />
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
         {/* Active tasks */}
@@ -506,6 +515,78 @@ function CompletedItem({ task }: { task: TaskResponse }) {
         {task.completed_at && (
           <span className="text-gray-500">{timeAgo(task.completed_at)}</span>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Compact, non-interactive KPI strip over a fixed last-30-days window.
+ *  Reuses the Reports page KpiCard (compact variant) and links through to
+ *  the full Reports view. Fails silently — a reporting hiccup must never
+ *  break the operational Dashboard, so it simply renders nothing on error. */
+const STRIP_WINDOW_DAYS = 30;
+
+function KpiStrip() {
+  const [overview, setOverview] = useState<ReportsOverview | null>(null);
+  const [prev, setPrev] = useState<ReportsOverview | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { from, to } = defaultRange(STRIP_WINDOW_DAYS);
+    const previous = previousRange(from, to);
+    api
+      .getReportOverview({ from, to })
+      .then((res) => !cancelled && setOverview(res))
+      .catch(() => {});
+    if (previous) {
+      api
+        .getReportOverview({ from: previous.from, to: previous.to })
+        .then((res) => !cancelled && setPrev(res))
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!overview) return null;
+
+  return (
+    <div className="border-b border-gray-800 bg-gray-900/40 px-6 py-3">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3">
+        <Link
+          to="/reports"
+          className="text-xs uppercase tracking-wide text-gray-500 hover:text-blue-300"
+          title="Open the full Reports view"
+        >
+          Last 30 days ↗
+        </Link>
+        <div className="grid flex-1 grid-cols-3 gap-3">
+          <KpiCard
+            compact
+            label="Merged"
+            value={overview.throughput.tasks_merged}
+            previous={prev?.throughput.tasks_merged}
+            format={formatNumber}
+            polarity="higher-good"
+          />
+          <KpiCard
+            compact
+            label="Success rate"
+            value={overview.success_rate}
+            previous={prev?.success_rate ?? null}
+            format={(v) => formatPercent(v)}
+            polarity="higher-good"
+          />
+          <KpiCard
+            compact
+            label="Backlog"
+            value={overview.backlog.queued}
+            format={formatNumber}
+            polarity="lower-good"
+            sub={overview.backlog.blocked > 0 ? `${overview.backlog.blocked} blocked` : undefined}
+          />
+        </div>
       </div>
     </div>
   );
