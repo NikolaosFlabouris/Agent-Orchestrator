@@ -75,6 +75,7 @@ import {
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import { runOrphanSweep } from './orphan-recovery.js';
+import { reapOrphanedContainers } from './container-reaper.js';
 import {
   DEFAULT_MAX_ATTEMPTS,
   POLL_INTERVAL_SECONDS,
@@ -261,6 +262,19 @@ export class Scheduler {
   // its own floor/markers in depPassState (see dependencies.ts).
   private depPassInFlight = false;
   private depPassState: DependencyPassState = createDependencyPassState();
+  // tick() itself fires concurrently from the poll timer, triggerTick()
+  // (webhooks), and the watchContainer() wait callback. Without a guard two
+  // ticks can observe the same exited container before either nulls
+  // container_id and both dispatch the completion — launching duplicate
+  // downstream containers that are never tracked or reaped. `tickInFlight`
+  // serialises the whole tick; `tickPending` records that a trigger arrived
+  // while a tick was running so exactly one trailing tick runs afterward (no
+  // event is lost, but triggers don't queue without bound).
+  private tickInFlight = false;
+  private tickPending = false;
+  // Runtime container reaper. Same flag-serialisation pattern — a slow
+  // listContainers()/remove must not let a re-tick start a second sweep.
+  private containerReapInFlight = false;
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -347,7 +361,37 @@ export class Scheduler {
 
   // ---- Main tick ----
 
+  /**
+   * Serialised entry point for the reconciliation tick. Fires from the poll
+   * timer, webhook triggers (triggerTick), and container-wait callbacks —
+   * all of which can overlap. A single-flight guard runs at most one tick at
+   * a time; a trigger that arrives mid-tick sets a pending flag so exactly
+   * one trailing tick runs after the current one drains (a pending-flag, not
+   * an unbounded queue). The actual work lives in `_runTick`.
+   */
   async tick(): Promise<void> {
+    if (this.tickInFlight) {
+      // A tick is already running. Record that another was requested so a
+      // single trailing tick runs once the current one finishes — this is
+      // what guarantees a webhook/wait-callback event isn't lost while a
+      // long tick holds the guard.
+      this.tickPending = true;
+      return;
+    }
+    this.tickInFlight = true;
+    try {
+      do {
+        // Clear before running: any trigger that arrives DURING this run
+        // re-sets the flag and earns exactly one more trailing pass.
+        this.tickPending = false;
+        await this._runTick();
+      } while (this.tickPending);
+    } finally {
+      this.tickInFlight = false;
+    }
+  }
+
+  private async _runTick(): Promise<void> {
     // `paused` only gates NEW task launches (fillSlots). Reconciliation,
     // completed-container processing, and the external poller (separate
     // class) continue so the DB stays in sync with Forgejo/Docker state.
@@ -374,6 +418,16 @@ export class Scheduler {
 
     // Step 1: Check for completed containers
     await this.checkCompletedContainers();
+
+    // Step 1.4: Reap orchestrator-managed containers whose task is no longer
+    // active. Runs AFTER checkCompletedContainers so a container that just
+    // finished and transitioned its task to a terminal state — including one
+    // whose best-effort removal failed above (container_id left set) — is
+    // cleaned up on this same pass instead of lingering until restart. The
+    // reaper enumerates only via listContainers() (managed-by=orchestrator)
+    // and never touches a container whose task is still active, so it can
+    // never remove a live agent or a non-orchestrator container.
+    await this.reapContainers();
 
     // Step 1.5: Re-derive queued tasks' dependency rows from their issue
     // bodies. Runs after completed-container processing (a dep task that
@@ -414,6 +468,26 @@ export class Scheduler {
       );
     } finally {
       this.orphanSweepInFlight = false;
+    }
+  }
+
+  /** Periodic reaper for orchestrator-managed containers that have outlived
+   *  their task (the long-running-orchestrator leak the startup/shutdown
+   *  prune paths never catch). Serialised by `containerReapInFlight` so a
+   *  slow Docker call doesn't let a re-tick start a second sweep. The reaper
+   *  itself is conservative and label-scoped — see container-reaper.ts. */
+  private async reapContainers(): Promise<void> {
+    if (this.containerReapInFlight) return;
+    this.containerReapInFlight = true;
+    try {
+      await reapOrphanedContainers(this.log);
+    } catch (err) {
+      this.log.error(
+        { event: 'container_reap_error', err },
+        'Container reap failed'
+      );
+    } finally {
+      this.containerReapInFlight = false;
     }
   }
 
@@ -698,14 +772,37 @@ export class Scheduler {
     // Signal stream completion to WebSocket clients
     notifyStreamComplete(task.id);
 
-    // Remove container
+    // Remove the now-exited container, then forget its id — but ONLY when
+    // the removal genuinely succeeds. `removeContainer` treats a 404
+    // ("already gone") as success and resolves; any other failure throws.
+    // Nulling container_id unconditionally (the old behaviour) had two
+    // hazards: (1) if removal actually failed, the DB forgot the id and the
+    // exited container lingered forever; (2) nulling before the handler's
+    // status transition opened a window where the task looked like a
+    // deferred-review candidate (in-review, container_id=null) and a
+    // concurrent fillSlots re-launched a review container. Leaving
+    // container_id set on a failed removal lets a later tick (and the
+    // reaper) retry — mirroring the care in enforceTimeoutForTask, which
+    // also declines to finalise when its stop fails.
+    let removed = false;
     try {
       const container = getContainer(task.container_id!);
       await removeContainer(container);
-    } catch {
-      // Best effort
+      removed = true;
+    } catch (err) {
+      this.log.warn(
+        {
+          event: 'container_remove_failed',
+          task_id: task.id,
+          container_id: task.container_id,
+          err,
+        },
+        'Failed to remove exited container; leaving container_id set for retry'
+      );
     }
-    updateTask(task.id, { container_id: null });
+    if (removed) {
+      updateTask(task.id, { container_id: null });
+    }
 
     // Dispatch to appropriate handler
     if (role === 'develop') {
