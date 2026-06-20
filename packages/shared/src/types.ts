@@ -533,6 +533,45 @@ export interface ReportsLeaderboard {
   rows: LeaderboardRow[];
 }
 
+/** Inline performance gauge for a single (repo, model, harness) combination,
+ *  shown on the Create Task screen so the operator can judge a model/harness
+ *  assignment at the moment they pick it. Reuses the leaderboard aggregation
+ *  filtered to one repo + one model/harness, so the numbers match the Reports
+ *  page exactly.
+ *
+ *  Every metric is nullable and "insufficient data" aware: `success_rate` and
+ *  the averages are NULL when nothing in-window supports them, and
+ *  `insufficient_data` is true when `task_count` is below the server's
+ *  GAUGE_MIN_SAMPLE threshold (or zero). The UI shows `task_count` (n)
+ *  alongside the numbers and an explicit low-confidence state instead of a
+ *  misleading 0% / 100% read off an empty or tiny sample. The gauge is purely
+ *  advisory — it never gates or alters task creation. */
+export interface ProfileGauge {
+  repo_id: number;
+  model_id: string;
+  harness_id: string;
+  range: { from: string; to: string };
+  /** Distinct tasks touched by a develop/review attempt whose snapshot used
+   *  this model AND harness, within the window. The sample size (n). */
+  task_count: number;
+  /** True when `task_count` is below GAUGE_MIN_SAMPLE (or zero) — the rates
+   *  should be shown as low-confidence, never as a definitive 0% / 100%. */
+  insufficient_data: boolean;
+  /** merged / (merged + failed + cancelled); NULL when no terminal task. */
+  success_rate: number | null;
+  terminal_counts: { merged: number; failed: number; cancelled: number };
+  /** Average develop attempts per task (rework factor). NULL when none. */
+  avg_rework: number | null;
+  /** Average develop-attempt wall-clock seconds. NULL when none timed. */
+  avg_implementation_seconds: number | null;
+  /** Average agent turns per attempt that reported a turn count. NULL when
+   *  no attempt reported turns (never read a NULL as 0). */
+  avg_num_turns: number | null;
+  /** Average total tokens (input + output) per attempt that reported usage.
+   *  NULL when no attempt reported tokens. */
+  avg_total_tokens: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Advanced reporting (durations distribution / funnel / reliability / heatmap)
 // ---------------------------------------------------------------------------

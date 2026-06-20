@@ -10,6 +10,7 @@ import type {
   ReportsReliability,
   ReportsHeatmap,
   HeatmapMetric,
+  ProfileGauge,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -195,6 +196,20 @@ export const api = {
       'GET',
       `/api/reports/heatmap${reportQuery(filter, { metric })}`
     ),
+  /** Inline Create-Task performance gauge for one (repo, model, harness)
+   *  combination. Advisory only — callers must tolerate the loading/empty/
+   *  error states without blocking task creation. */
+  getProfileGauge: (params: { repo: number; model: string; harness: string }) => {
+    const qs = new URLSearchParams({
+      repo: String(params.repo),
+      model: params.model,
+      harness: params.harness,
+    });
+    return request<ProfileGauge>(
+      'GET',
+      `/api/reports/profile-gauge?${qs.toString()}`
+    );
+  },
 
   // -- Harnesses (read-only registry) --
   getHarnesses: () =>
