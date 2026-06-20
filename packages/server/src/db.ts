@@ -14,10 +14,18 @@ import type {
   TaskDependency,
   DependencyState,
   SettingsKey,
+  ReportFilter,
+  DurationStats,
+  ReportsOverview,
+  ReportsTimeseries,
+  ReportsTimeseriesBucket,
+  ReportsLeaderboard,
+  LeaderboardGroupBy,
+  LeaderboardRow,
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 27;
+const CURRENT_SCHEMA_VERSION = 28;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -143,6 +151,9 @@ function createTables(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_repo_id ON tasks(repo_id);
+    -- Reports aggregation (v28): throughput/lead-time roll-ups filter and
+    -- bucket on completed_at.
+    CREATE INDEX IF NOT EXISTS idx_tasks_completed_at ON tasks(completed_at);
 
     -- ON DELETE CASCADE: when a task is deleted, its attempts/events/
     -- steps go with it. Orphaned audit rows for a non-existent task
@@ -178,6 +189,10 @@ function createTables(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
+    -- Reports aggregation (v28): leaderboard grouping by per-attempt model
+    -- snapshot, and duration roll-ups partitioned by role.
+    CREATE INDEX IF NOT EXISTS idx_attempts_model_id ON attempts(model_id);
+    CREATE INDEX IF NOT EXISTS idx_attempts_role ON attempts(role);
 
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
@@ -244,6 +259,9 @@ function createTables(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id);
+    -- Reports aggregation (v28): event-type lookups bounded by time window.
+    CREATE INDEX IF NOT EXISTS idx_task_events_type_created
+      ON task_events(event_type, created_at);
 
     CREATE TABLE IF NOT EXISTS task_steps (
       id INTEGER PRIMARY KEY,
@@ -562,6 +580,22 @@ function runMigrations(db: Database.Database): void {
       // v27's data work (the tasks-table rebuild) runs above, outside this
       // transaction, because it must toggle PRAGMA foreign_keys. Nothing to
       // do here — the schema_version bump below records the upgrade.
+      if (version < 28) {
+        // v28: supporting indexes for the Reports aggregation endpoints.
+        // createTables holds the canonical definitions with IF NOT EXISTS;
+        // re-run the same DDL idempotently for existing installs. All four
+        // are (re)created here — idx_tasks_completed_at in particular,
+        // because the v27 tasks-table rebuild (which runs above when
+        // upgrading from <27) only recreates the status/repo_id indexes, so
+        // a 26→28 upgrade would otherwise lose it.
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_attempts_model_id ON attempts(model_id);
+          CREATE INDEX IF NOT EXISTS idx_attempts_role ON attempts(role);
+          CREATE INDEX IF NOT EXISTS idx_tasks_completed_at ON tasks(completed_at);
+          CREATE INDEX IF NOT EXISTS idx_task_events_type_created
+            ON task_events(event_type, created_at);
+        `);
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -1842,4 +1876,544 @@ export function getAllSettings(): Record<string, string> {
     result[row.key] = row.value;
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Reports — read-only aggregation
+// ---------------------------------------------------------------------------
+//
+// All aggregation happens in SQL (GROUP BY + aggregate/window functions);
+// JS only stitches the small per-group result sets together. Endpoints are
+// O(groups), never O(rows-shipped).
+//
+// Timestamp-format gotcha: two on-disk shapes coexist in this DB —
+//   * `created_at` defaults to datetime('now')      → "YYYY-MM-DD HH:MM:SS"
+//   * started_at/completed_at via toISOString()     → "YYYY-MM-DDThh:mm:ss.sssZ"
+// Both are UTC. Before any julianday()/comparison we normalize via
+// `normTsSql` (SQL) — and the pure-JS `normalizeTimestamp`/`durationSeconds`
+// below mirror that contract for callers/tests outside SQL.
+
+/** All TaskStatus values, used to zero-fill the overview status map so the
+ *  UI always sees every bucket. Kept in sync with the TaskStatus union. */
+const ALL_TASK_STATUSES: TaskStatus[] = [
+  'queued',
+  'preparing',
+  'in-progress',
+  'in-review',
+  'changes-needed',
+  'merged',
+  'failed',
+  'cancelled',
+  'awaiting-human-merge',
+  'awaiting-human-review',
+  'needs-human-review',
+  'reset',
+];
+
+/** Normalize a stored timestamp to canonical ISO-8601 UTC ("…Z"),
+ *  tolerating both the space-separated datetime('now') form and the
+ *  toISOString() form. Naive (zone-less) inputs are treated as UTC — every
+ *  timestamp this orchestrator writes is UTC. Mirrors `normTsSql`. */
+export function normalizeTimestamp(ts: string): string {
+  let s = ts.trim().replace(' ', 'T');
+  // Append a UTC marker when the value carries no zone designator so
+  // `new Date()` parses it as UTC rather than local time.
+  if (!/[zZ]$/.test(s) && !/[+-]\d\d:?\d\d$/.test(s)) {
+    s += 'Z';
+  }
+  return new Date(s).toISOString();
+}
+
+/** Seconds between two stored timestamps, each independently normalized.
+ *  Correct across the mixed datetime('now') / toISOString() formats. */
+export function durationSeconds(start: string, end: string): number {
+  return (
+    (Date.parse(normalizeTimestamp(end)) -
+      Date.parse(normalizeTimestamp(start))) /
+    1000
+  );
+}
+
+/** SQL counterpart of {@link normalizeTimestamp}: rewrite a timestamp
+ *  column so both stored forms become a single julianday()-parseable,
+ *  lexically-comparable shape (space→'T', drop trailing 'Z'). */
+function normTsSql(col: string): string {
+  return `replace(replace(${col}, ' ', 'T'), 'Z', '')`;
+}
+
+/** `julianday()` of a normalized timestamp column. */
+function juld(col: string): string {
+  return `julianday(${normTsSql(col)})`;
+}
+
+interface RangeFragment {
+  clause: string;
+  params: unknown[];
+}
+
+/** WHERE fragment (alias `t`) selecting rows whose `col` falls in
+ *  [from, to), optionally narrowed to `filter.repos`. */
+function rangeClause(col: string, filter: ReportFilter): RangeFragment {
+  const n = `${juld(col)}`;
+  const parts = [`${n} >= julianday(?)`, `${n} < julianday(?)`];
+  const params: unknown[] = [filter.from, filter.to];
+  if (filter.repos && filter.repos.length > 0) {
+    parts.push(`t.repo_id IN (${filter.repos.map(() => '?').join(',')})`);
+    params.push(...filter.repos);
+  }
+  return { clause: parts.join(' AND '), params };
+}
+
+/** Repo-only WHERE fragment (alias `t`) for point-in-time metrics that
+ *  ignore the date window (e.g. current backlog). */
+function repoClause(filter: ReportFilter): RangeFragment {
+  if (filter.repos && filter.repos.length > 0) {
+    return {
+      clause: `t.repo_id IN (${filter.repos.map(() => '?').join(',')})`,
+      params: [...filter.repos],
+    };
+  }
+  return { clause: '1=1', params: [] };
+}
+
+function numOrNull(v: unknown): number | null {
+  return v === null || v === undefined ? null : Number(v);
+}
+
+/** Nearest-rank percentile index expression over a window column `n`
+ *  (= COUNT(*) OVER ()). rank = clamp(ceil(p·n), 1, n). `ceil` is built
+ *  from CAST-truncate + a fractional-part bump so it works regardless of
+ *  the bundled SQLite's ceil() availability. */
+function nearestRank(p: number): string {
+  const pn = `${p} * n`;
+  return `MAX(1, MIN(n, CAST(${pn} AS INT) + (${pn} > CAST(${pn} AS INT))))`;
+}
+
+/** Run a duration roll-up (count, mean, p50, p90 in seconds) over a
+ *  values subquery that yields a single column `d`. Percentiles are
+ *  computed in SQL via window functions — no per-row JS reduction. */
+function computeDurationStats(
+  valuesSql: string,
+  params: unknown[]
+): DurationStats {
+  const row = getDb()
+    .prepare(
+      `WITH vals AS (${valuesSql}),
+       ordered AS (
+         SELECT d, ROW_NUMBER() OVER (ORDER BY d) AS rn, COUNT(*) OVER () AS n
+         FROM vals
+       )
+       SELECT
+         (SELECT COUNT(*) FROM vals) AS count,
+         (SELECT AVG(d) FROM vals) AS avg,
+         (SELECT d FROM ordered WHERE rn = ${nearestRank(0.5)}) AS p50,
+         (SELECT d FROM ordered WHERE rn = ${nearestRank(0.9)}) AS p90`
+    )
+    .get(...params) as {
+    count: number;
+    avg: number | null;
+    p50: number | null;
+    p90: number | null;
+  };
+  return {
+    count: Number(row.count ?? 0),
+    avg_seconds: numOrNull(row.avg),
+    p50_seconds: numOrNull(row.p50),
+    p90_seconds: numOrNull(row.p90),
+  };
+}
+
+/** KPI roll-up for `GET /api/reports/overview`. */
+export function getReportOverview(filter: ReportFilter): ReportsOverview {
+  const db = getDb();
+  const cohort = rangeClause('t.created_at', filter);
+
+  // Status counts over the created-in-range cohort.
+  const statusRows = db
+    .prepare(
+      `SELECT t.status AS status, COUNT(*) AS c
+       FROM tasks t WHERE ${cohort.clause} GROUP BY t.status`
+    )
+    .all(...cohort.params) as { status: TaskStatus; c: number }[];
+  const status_counts = Object.fromEntries(
+    ALL_TASK_STATUSES.map((s) => [s, 0])
+  ) as Record<TaskStatus, number>;
+  for (const r of statusRows) status_counts[r.status] = Number(r.c);
+
+  const total_tasks = ALL_TASK_STATUSES.reduce(
+    (sum, s) => sum + status_counts[s],
+    0
+  );
+  const terminal_counts = {
+    merged: status_counts.merged,
+    failed: status_counts.failed,
+    cancelled: status_counts.cancelled,
+  };
+  const terminal =
+    terminal_counts.merged + terminal_counts.failed + terminal_counts.cancelled;
+  const success_rate = terminal > 0 ? terminal_counts.merged / terminal : null;
+
+  // Throughput: tasks merged whose completed_at lands in the window.
+  const mergedRange = rangeClause('t.completed_at', filter);
+  const tasksMerged = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM tasks t
+         WHERE t.status = 'merged' AND t.completed_at IS NOT NULL
+           AND ${mergedRange.clause}`
+      )
+      .get(...mergedRange.params) as { c: number }
+  ).c;
+
+  // Backlog: point-in-time, repo-scoped only.
+  const repo = repoClause(filter);
+  const backlogRow = db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM tasks t
+            WHERE t.status = 'queued' AND ${repo.clause}) AS queued,
+         (SELECT COUNT(*) FROM tasks t
+            WHERE t.status = 'queued' AND ${repo.clause}
+              AND EXISTS (
+                SELECT 1 FROM task_dependencies d
+                WHERE d.task_id = t.id
+                  AND d.state NOT IN ('satisfied', 'manually-satisfied')
+              )) AS blocked`
+    )
+    .get(...repo.params, ...repo.params) as {
+    queued: number;
+    blocked: number;
+  };
+
+  // Durations (seconds).
+  const implementation_duration = computeDurationStats(
+    `SELECT (${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0 AS d
+     FROM attempts a JOIN tasks t ON t.id = a.task_id
+     WHERE a.role = 'develop'
+       AND a.started_at IS NOT NULL AND a.completed_at IS NOT NULL
+       AND ${cohort.clause}`,
+    cohort.params
+  );
+  const review_duration = computeDurationStats(
+    `SELECT (${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0 AS d
+     FROM attempts a JOIN tasks t ON t.id = a.task_id
+     WHERE a.role = 'review'
+       AND a.started_at IS NOT NULL AND a.completed_at IS NOT NULL
+       AND ${cohort.clause}`,
+    cohort.params
+  );
+  const lead_time = computeDurationStats(
+    `SELECT (${juld('t.completed_at')} - ${juld('t.created_at')}) * 86400.0 AS d
+     FROM tasks t
+     WHERE t.status = 'merged' AND t.completed_at IS NOT NULL
+       AND ${cohort.clause}`,
+    cohort.params
+  );
+
+  // Rework: average develop-attempt count over cohort tasks that ran ≥1
+  // develop attempt.
+  const reworkRow = db
+    .prepare(
+      `SELECT AVG(cnt) AS avg, COUNT(*) AS task_count FROM (
+         SELECT a.task_id, COUNT(*) AS cnt
+         FROM attempts a JOIN tasks t ON t.id = a.task_id
+         WHERE a.role = 'develop' AND ${cohort.clause}
+         GROUP BY a.task_id
+       )`
+    )
+    .get(...cohort.params) as { avg: number | null; task_count: number };
+
+  return {
+    range: { from: filter.from, to: filter.to },
+    repos: filter.repos,
+    status_counts,
+    total_tasks,
+    success_rate,
+    terminal_counts,
+    throughput: { tasks_created: total_tasks, tasks_merged: Number(tasksMerged) },
+    backlog: {
+      queued: Number(backlogRow.queued),
+      blocked: Number(backlogRow.blocked),
+    },
+    implementation_duration,
+    review_duration,
+    lead_time,
+    rework: {
+      avg: numOrNull(reworkRow.avg),
+      task_count: Number(reworkRow.task_count),
+    },
+  };
+}
+
+/** Per-bucket created/merged counts for `GET /api/reports/timeseries`.
+ *  Buckets are zero-filled across the range so the chart has no gaps. */
+export function getReportTimeseries(
+  filter: ReportFilter,
+  bucket: 'day' | 'week'
+): ReportsTimeseries {
+  const db = getDb();
+
+  // Bucket key = the day, or the Monday of the ISO week. The week math
+  // mirrors `weekStart` below: days-since-Monday = (dow + 6) % 7, where
+  // dow is strftime('%w') (0=Sun … 6=Sat).
+  const bucketExpr = (col: string): string => {
+    const n = normTsSql(col);
+    if (bucket === 'day') return `date(${n})`;
+    return `date(${n}, '-' || ((CAST(strftime('%w', ${n}) AS INT) + 6) % 7) || ' days')`;
+  };
+
+  const createdRange = rangeClause('t.created_at', filter);
+  const createdRows = db
+    .prepare(
+      `SELECT ${bucketExpr('t.created_at')} AS bucket, COUNT(*) AS c
+       FROM tasks t WHERE ${createdRange.clause} GROUP BY bucket`
+    )
+    .all(...createdRange.params) as { bucket: string; c: number }[];
+
+  const mergedRange = rangeClause('t.completed_at', filter);
+  const mergedRows = db
+    .prepare(
+      `SELECT ${bucketExpr('t.completed_at')} AS bucket, COUNT(*) AS c
+       FROM tasks t
+       WHERE t.status = 'merged' AND t.completed_at IS NOT NULL
+         AND ${mergedRange.clause}
+       GROUP BY bucket`
+    )
+    .all(...mergedRange.params) as { bucket: string; c: number }[];
+
+  const created = new Map(createdRows.map((r) => [r.bucket, Number(r.c)]));
+  const merged = new Map(mergedRows.map((r) => [r.bucket, Number(r.c)]));
+
+  const series: ReportsTimeseriesBucket[] = [];
+  for (const b of enumerateBuckets(filter.from, filter.to, bucket)) {
+    series.push({
+      bucket: b,
+      tasks_created: created.get(b) ?? 0,
+      tasks_merged: merged.get(b) ?? 0,
+    });
+  }
+  return { range: { from: filter.from, to: filter.to }, bucket, series };
+}
+
+/** YYYY-MM-DD of `d` in UTC. */
+function ymdUtc(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Monday (UTC) of the week containing `d`, as YYYY-MM-DD. Mirrors the SQL
+ *  week-bucket expression in {@link getReportTimeseries}. */
+function weekStart(d: Date): string {
+  const dow = d.getUTCDay(); // 0=Sun … 6=Sat
+  const daysSinceMon = (dow + 6) % 7;
+  const m = new Date(d);
+  m.setUTCDate(m.getUTCDate() - daysSinceMon);
+  return ymdUtc(m);
+}
+
+/** Ordered, de-duplicated list of bucket keys covering [from, to). */
+function enumerateBuckets(
+  from: string,
+  to: string,
+  bucket: 'day' | 'week'
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const end = Date.parse(to);
+  // Anchor on the UTC day so day/week keys line up with the SQL date()s.
+  const cursor = new Date(`${normalizeTimestamp(from).slice(0, 10)}T00:00:00Z`);
+  // Guard against pathological ranges (malformed bounds) producing a
+  // runaway loop — cap at a generous bucket count.
+  let guard = 0;
+  while (cursor.getTime() < end && guard < 100000) {
+    const key = bucket === 'day' ? ymdUtc(cursor) : weekStart(cursor);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(key);
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    guard++;
+  }
+  return out;
+}
+
+/** Per-group leaderboard for `GET /api/reports/leaderboard`.
+ *
+ *  model/harness grouping keys off the per-attempt snapshots
+ *  (attempts.model_id / .harness_id) so historical accuracy survives
+ *  profile edits; a task touched by two models contributes to both. repo
+ *  grouping keys off tasks.repo_id and counts every cohort task (even ones
+ *  with no attempts yet). All three sub-queries are SQL aggregates; results
+ *  are merged by key in JS (O(groups)). */
+export function getReportLeaderboard(
+  filter: ReportFilter,
+  groupBy: LeaderboardGroupBy
+): ReportsLeaderboard {
+  const db = getDb();
+  const cohort = rangeClause('t.created_at', filter);
+
+  const attemptGrouped = groupBy !== 'repo';
+  const keyCol =
+    groupBy === 'model'
+      ? 'a.model_id'
+      : groupBy === 'harness'
+        ? 'a.harness_id'
+        : 'CAST(t.repo_id AS TEXT)';
+  const keyNotNull =
+    groupBy === 'model'
+      ? "a.model_id IS NOT NULL AND a.model_id != ''"
+      : groupBy === 'harness'
+        ? "a.harness_id IS NOT NULL AND a.harness_id != ''"
+        : null;
+  const andKey = keyNotNull ? ` AND ${keyNotNull}` : '';
+
+  const dur = `(${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0`;
+  const durGuard =
+    'a.started_at IS NOT NULL AND a.completed_at IS NOT NULL';
+
+  // Query A — attempt-derived durations + review-verdict distribution.
+  const metricRows = db
+    .prepare(
+      `SELECT ${keyCol} AS key,
+         AVG(CASE WHEN a.role = 'develop' AND ${durGuard} THEN ${dur} END) AS avg_impl,
+         AVG(CASE WHEN a.role = 'review' AND ${durGuard} THEN ${dur} END) AS avg_review,
+         SUM(CASE WHEN a.role = 'review' AND a.verdict = 'approved' THEN 1 ELSE 0 END) AS v_approved,
+         SUM(CASE WHEN a.role = 'review' AND a.verdict = 'changes_needed' THEN 1 ELSE 0 END) AS v_changes,
+         SUM(CASE WHEN a.role = 'review' AND a.verdict = 'unclear' THEN 1 ELSE 0 END) AS v_unclear
+       FROM attempts a JOIN tasks t ON t.id = a.task_id
+       WHERE ${cohort.clause}${andKey}
+       GROUP BY ${keyCol}`
+    )
+    .all(...cohort.params) as Array<{
+    key: string;
+    avg_impl: number | null;
+    avg_review: number | null;
+    v_approved: number;
+    v_changes: number;
+    v_unclear: number;
+  }>;
+
+  // Query B — task counts + terminal breakdown per group.
+  const taskRows = (
+    attemptGrouped
+      ? db
+          .prepare(
+            `SELECT key,
+               COUNT(*) AS task_count,
+               SUM(CASE WHEN status = 'merged' THEN 1 ELSE 0 END) AS merged,
+               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+             FROM (
+               SELECT DISTINCT ${keyCol} AS key, a.task_id, t.status
+               FROM attempts a JOIN tasks t ON t.id = a.task_id
+               WHERE ${cohort.clause}${andKey}
+             )
+             GROUP BY key`
+          )
+          .all(...cohort.params)
+      : db
+          .prepare(
+            `SELECT CAST(t.repo_id AS TEXT) AS key,
+               COUNT(*) AS task_count,
+               SUM(CASE WHEN t.status = 'merged' THEN 1 ELSE 0 END) AS merged,
+               SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+               SUM(CASE WHEN t.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+             FROM tasks t
+             WHERE ${cohort.clause}
+             GROUP BY t.repo_id`
+          )
+          .all(...cohort.params)
+  ) as Array<{
+    key: string;
+    task_count: number;
+    merged: number;
+    failed: number;
+    cancelled: number;
+  }>;
+
+  // Query C — average develop-attempt count (rework) per group.
+  const reworkRows = (
+    attemptGrouped
+      ? db
+          .prepare(
+            `SELECT key, AVG(cnt) AS avg_rework FROM (
+               SELECT ${keyCol} AS key, a.task_id, COUNT(*) AS cnt
+               FROM attempts a JOIN tasks t ON t.id = a.task_id
+               WHERE a.role = 'develop' AND ${cohort.clause}${andKey}
+               GROUP BY ${keyCol}, a.task_id
+             ) GROUP BY key`
+          )
+          .all(...cohort.params)
+      : db
+          .prepare(
+            `SELECT key, AVG(cnt) AS avg_rework FROM (
+               SELECT CAST(t.repo_id AS TEXT) AS key, a.task_id, COUNT(*) AS cnt
+               FROM attempts a JOIN tasks t ON t.id = a.task_id
+               WHERE a.role = 'develop' AND ${cohort.clause}
+               GROUP BY t.repo_id, a.task_id
+             ) GROUP BY key`
+          )
+          .all(...cohort.params)
+  ) as Array<{ key: string; avg_rework: number | null }>;
+
+  // Repo display labels.
+  const repoLabels = new Map<string, string>();
+  if (groupBy === 'repo') {
+    for (const r of getRepos()) {
+      repoLabels.set(String(r.id), `${r.owner}/${r.name}`);
+    }
+  }
+
+  // Merge by key.
+  const byKey = new Map<string, LeaderboardRow>();
+  const ensure = (key: string): LeaderboardRow => {
+    let row = byKey.get(key);
+    if (!row) {
+      row = {
+        key,
+        label: groupBy === 'repo' ? repoLabels.get(key) ?? key : key,
+        task_count: 0,
+        success_rate: null,
+        terminal_counts: { merged: 0, failed: 0, cancelled: 0 },
+        avg_implementation_seconds: null,
+        avg_review_seconds: null,
+        avg_rework: null,
+        verdicts: { approved: 0, changes_needed: 0, unclear: 0 },
+      };
+      byKey.set(key, row);
+    }
+    return row;
+  };
+
+  for (const m of metricRows) {
+    const row = ensure(m.key);
+    row.avg_implementation_seconds = numOrNull(m.avg_impl);
+    row.avg_review_seconds = numOrNull(m.avg_review);
+    row.verdicts = {
+      approved: Number(m.v_approved),
+      changes_needed: Number(m.v_changes),
+      unclear: Number(m.v_unclear),
+    };
+  }
+  for (const t of taskRows) {
+    const row = ensure(t.key);
+    row.task_count = Number(t.task_count);
+    row.terminal_counts = {
+      merged: Number(t.merged),
+      failed: Number(t.failed),
+      cancelled: Number(t.cancelled),
+    };
+    const terminal = row.terminal_counts.merged +
+      row.terminal_counts.failed +
+      row.terminal_counts.cancelled;
+    row.success_rate = terminal > 0 ? row.terminal_counts.merged / terminal : null;
+  }
+  for (const r of reworkRows) {
+    ensure(r.key).avg_rework = numOrNull(r.avg_rework);
+  }
+
+  const rows = [...byKey.values()].sort(
+    (a, b) => b.task_count - a.task_count || a.key.localeCompare(b.key)
+  );
+
+  return { range: { from: filter.from, to: filter.to }, group_by: groupBy, rows };
 }

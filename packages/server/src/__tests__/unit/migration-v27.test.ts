@@ -83,7 +83,7 @@ describe('v27 repo-scoped tasks uniqueness migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('27');
+    expect(v.value).toBe('28');
 
     db.close();
   });
@@ -168,7 +168,7 @@ describe('v27 repo-scoped tasks uniqueness migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('27');
+    expect(v.value).toBe('28');
 
     db.close();
   });
@@ -257,7 +257,7 @@ describe('v27 repo-scoped tasks uniqueness migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('27');
+    expect(v.value).toBe('28');
 
     db.close();
   });
@@ -290,7 +290,7 @@ describe('v27 repo-scoped tasks uniqueness migration', () => {
     const v = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(v.value).toBe('27');
+    expect(v.value).toBe('28');
 
     db.close();
   });

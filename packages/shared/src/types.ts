@@ -349,3 +349,108 @@ export interface TaskStep {
   result: unknown;
   completed_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Reports API (read-only aggregates)
+// ---------------------------------------------------------------------------
+//
+// Server-side aggregation of the orchestrator's task/attempt/event history
+// into KPI roll-ups, time series, and per-group leaderboards. All three
+// endpoints accept the common filter (`repos`, `from`, `to`) and return
+// pre-aggregated rows so the Reports UI can render charts without shipping
+// raw rows or doing client-side reduction.
+//
+// Duration metrics are reported in SECONDS. `from` is inclusive, `to`
+// exclusive. Unless noted, a metric is computed over the "cohort" of tasks
+// CREATED within [from, to) (optionally narrowed to `repos`).
+
+/** Common filter applied to every report endpoint. */
+export interface ReportFilter {
+  /** Repo ids the report is scoped to, or null for all repos. */
+  repos: number[] | null;
+  /** Inclusive lower bound (ISO-8601). */
+  from: string;
+  /** Exclusive upper bound (ISO-8601). */
+  to: string;
+}
+
+/** Mean + percentile summary of a set of durations (seconds). All fields
+ *  are null when the filtered set is empty. */
+export interface DurationStats {
+  /** Number of values in the set. */
+  count: number;
+  /** Arithmetic mean (seconds), or null when count = 0. */
+  avg_seconds: number | null;
+  /** 50th percentile (nearest-rank), or null when count = 0. */
+  p50_seconds: number | null;
+  /** 90th percentile (nearest-rank), or null when count = 0. */
+  p90_seconds: number | null;
+}
+
+export interface ReportsOverview {
+  range: { from: string; to: string };
+  repos: number[] | null;
+  /** Tasks created in range, grouped by status. Every TaskStatus key is
+   *  present (0 when none). */
+  status_counts: Record<TaskStatus, number>;
+  /** Total tasks created in range (sum of status_counts). */
+  total_tasks: number;
+  /** merged / (merged + failed + cancelled) over the created-in-range
+   *  cohort, or null when no task in the cohort reached a terminal state. */
+  success_rate: number | null;
+  /** The terminal-state tallies the success rate is derived from. */
+  terminal_counts: { merged: number; failed: number; cancelled: number };
+  /** Throughput within range: tasks whose created_at falls in range, and
+   *  tasks whose completed_at falls in range with status = merged. These
+   *  use literal range membership (not the created cohort) so they line up
+   *  with the timeseries endpoint. */
+  throughput: { tasks_created: number; tasks_merged: number };
+  /** Point-in-time backlog (NOT date-filtered): queued tasks, and the
+   *  subset of those with at least one unsatisfied dependency. */
+  backlog: { queued: number; blocked: number };
+  /** completed_at − started_at across develop-role attempts in the cohort. */
+  implementation_duration: DurationStats;
+  /** completed_at − started_at across review-role attempts in the cohort. */
+  review_duration: DurationStats;
+  /** completed_at − created_at across merged tasks in the cohort. */
+  lead_time: DurationStats;
+  /** Average number of develop-role attempts per implemented task (1 = a
+   *  single pass). Averaged over cohort tasks that have ≥1 develop attempt;
+   *  `task_count` is that denominator. avg is null when it is 0. */
+  rework: { avg: number | null; task_count: number };
+}
+
+export interface ReportsTimeseriesBucket {
+  /** Bucket start as a YYYY-MM-DD date (the day, or the Monday of the week). */
+  bucket: string;
+  tasks_created: number;
+  tasks_merged: number;
+}
+
+export interface ReportsTimeseries {
+  range: { from: string; to: string };
+  bucket: 'day' | 'week';
+  series: ReportsTimeseriesBucket[];
+}
+
+export type LeaderboardGroupBy = 'model' | 'harness' | 'repo';
+
+export interface LeaderboardRow {
+  /** Grouping key: model_id, harness_id, or repo id (as a string). */
+  key: string;
+  /** Human-readable label (repo "owner/name"; otherwise same as key). */
+  label: string;
+  task_count: number;
+  success_rate: number | null;
+  terminal_counts: { merged: number; failed: number; cancelled: number };
+  avg_implementation_seconds: number | null;
+  avg_review_seconds: number | null;
+  avg_rework: number | null;
+  verdicts: { approved: number; changes_needed: number; unclear: number };
+}
+
+export interface ReportsLeaderboard {
+  range: { from: string; to: string };
+  group_by: LeaderboardGroupBy;
+  rows: LeaderboardRow[];
+}
