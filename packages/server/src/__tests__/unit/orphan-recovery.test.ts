@@ -13,9 +13,11 @@ const mocks = vi.hoisted(() => {
     getAttempts: vi.fn<(taskId: number) => Attempt[]>(),
     updateAttempt: vi.fn(),
     getRepo: vi.fn(),
-    listContainers: vi.fn<() => Promise<Array<{ Id: string }>>>(),
+    listContainers: vi.fn<(taskId?: number) => Promise<Array<{ Id: string }>>>(),
     getContainer: vi.fn(),
     inspectContainer: vi.fn(),
+    stopContainer: vi.fn(),
+    removeContainer: vi.fn(),
     updateTaskWithSync: vi.fn(),
     recordTaskEvent: vi.fn(),
     resetTask: vi.fn<(...args: unknown[]) => Promise<void>>(),
@@ -33,6 +35,8 @@ vi.mock('../../docker.js', () => ({
   listContainers: mocks.listContainers,
   getContainer: mocks.getContainer,
   inspectContainer: mocks.inspectContainer,
+  stopContainer: mocks.stopContainer,
+  removeContainer: mocks.removeContainer,
 }));
 
 vi.mock('../../state-sync.js', () => ({
@@ -127,6 +131,11 @@ beforeEach(() => {
   mocks.getTasks.mockReturnValue([]);
   // Default resetTask to a successful no-op.
   mocks.resetTask.mockResolvedValue(undefined);
+  // Default: no lingering containers to reap, and stop/remove succeed.
+  mocks.listContainers.mockResolvedValue([]);
+  mocks.getContainer.mockImplementation((id: string) => ({ id, Id: id }));
+  mocks.stopContainer.mockResolvedValue(undefined);
+  mocks.removeContainer.mockResolvedValue(undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -360,6 +369,60 @@ describe('recoverReviewOrphan', () => {
       expect.stringContaining('crash-looped')
     );
   });
+
+  it('stops+removes a lingering task-scoped container before relaunch', async () => {
+    const task = mkTask({ id: 3, attempt: 1, max_attempts: 3, container_id: null });
+    const attempt = mkAttempt({
+      id: 87,
+      task_id: 3,
+      started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    // A prior failed launch left a started-but-untracked container.
+    mocks.listContainers.mockResolvedValue([{ Id: 'leaked-1' }]);
+
+    await recoverReviewOrphan(task, attempt, fakeForgejo, silentLog);
+
+    // Only the task-scoped label filter is used — never an unscoped list.
+    expect(mocks.listContainers).toHaveBeenCalledWith(3);
+    expect(mocks.getContainer).toHaveBeenCalledWith('leaked-1');
+    expect(mocks.stopContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'leaked-1' })
+    );
+    expect(mocks.removeContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'leaked-1' })
+    );
+    // Recovery still proceeds: attempt bumped, container cleared.
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      3,
+      expect.objectContaining({ attempt: 2, container_id: null })
+    );
+  });
+
+  it('still relaunches when a non-404 stop/remove error occurs during reaping', async () => {
+    const task = mkTask({ id: 3, attempt: 1, max_attempts: 3, container_id: null });
+    const attempt = mkAttempt({
+      id: 87,
+      task_id: 3,
+      started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    mocks.listContainers.mockResolvedValue([{ Id: 'leaked-1' }]);
+    // removeContainer throws a non-404 daemon error — must not block recovery.
+    mocks.removeContainer.mockRejectedValue(new Error('daemon error'));
+
+    await recoverReviewOrphan(task, attempt, fakeForgejo, silentLog);
+
+    expect(mocks.removeContainer).toHaveBeenCalled();
+    // Recovery still proceeds despite the cleanup failure.
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      3,
+      expect.objectContaining({ attempt: 2, container_id: null })
+    );
+    expect(mocks.recordTaskEvent).toHaveBeenCalledWith(
+      3,
+      'orphan_recovery_triggered',
+      expect.any(String)
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -534,5 +597,28 @@ describe('recoverDevOrphan', () => {
       'orphan_recovery_exhausted',
       expect.stringContaining('crash-looped')
     );
+  });
+
+  it('stops+removes a lingering task-scoped container before reset/relaunch', async () => {
+    const task = mkTask({ id: 4, attempt: 1, max_attempts: 3, container_id: null });
+    const attempt = mkAttempt({
+      id: 300,
+      task_id: 4,
+      role: 'develop',
+      started_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    mocks.listContainers.mockResolvedValue([{ Id: 'leaked-dev' }]);
+
+    await recoverDevOrphan(task, attempt, fakeForgejo, fakeScheduler, silentLog);
+
+    expect(mocks.listContainers).toHaveBeenCalledWith(4);
+    expect(mocks.stopContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'leaked-dev' })
+    );
+    expect(mocks.removeContainer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'leaked-dev' })
+    );
+    // Recovery still hands off to resetTask after the reap.
+    expect(mocks.resetTask).toHaveBeenCalledTimes(1);
   });
 });
