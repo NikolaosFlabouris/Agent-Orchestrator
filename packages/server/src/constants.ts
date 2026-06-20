@@ -90,3 +90,11 @@ export const DEFAULT_CONTAINER_CPU_CORES = 2;
  *  ever change them, change the compose bind mounts in the same commit. */
 export const WORKSPACES_ROOT = '/workspaces';
 export const CACHES_ROOT = '/caches';
+
+/** Default look-back window (days) for the Reports API when a request
+ *  omits explicit `from`/`to` bounds. 90 days is a pragmatic default for
+ *  a model/harness/repo performance gauge: long enough to accumulate a
+ *  meaningful sample on a single-machine orchestrator, short enough that
+ *  stale profile/model assignments don't dominate the aggregates. The
+ *  report endpoints treat `from` as inclusive and `to` as exclusive. */
+export const DEFAULT_REPORT_WINDOW_DAYS = 90;
