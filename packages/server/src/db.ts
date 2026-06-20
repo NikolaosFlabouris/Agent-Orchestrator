@@ -25,7 +25,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 28;
+const CURRENT_SCHEMA_VERSION = 29;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -185,7 +185,17 @@ function createTables(db: Database.Database): void {
       -- shorten the threshold for already-running attempts (H5a). NULL
       -- on pre-v22 rows; consumers fall back to a live profile read
       -- when the snapshot is absent.
-      timeout_minutes_snapshot INTEGER
+      timeout_minutes_snapshot INTEGER,
+      -- Per-run effort metrics (v29), read from the harness's result.json
+      -- usage block at completion. Immutable per-run facts (the run
+      -- already happened — no snapshot-vs-live concern). All nullable:
+      -- NULL means "unknown" (a harness that emits no usage, or a pre-v29
+      -- row), and must never be conflated with a real 0. Raw token counts
+      -- only — the orchestrator never derives a dollar cost.
+      num_turns INTEGER,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      tool_calls INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
@@ -595,6 +605,34 @@ function runMigrations(db: Database.Database): void {
           CREATE INDEX IF NOT EXISTS idx_task_events_type_created
             ON task_events(event_type, created_at);
         `);
+      }
+      if (version < 29) {
+        // v29: per-attempt effort metrics (agent turns + token usage +
+        // tool-call count), read from the harness's result.json `usage`
+        // block at completion. All four are nullable — existing rows
+        // simply get NULL (unknown), which the reports/UI distinguish
+        // from a real 0. createTables holds the canonical shape; the
+        // ALTERs below forward-migrate existing installs. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so guard via pragma_table_info to stay
+        // idempotent after a partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        for (const col of [
+          'num_turns',
+          'input_tokens',
+          'output_tokens',
+          'tool_calls',
+        ]) {
+          if (!hasColumn('attempts', col)) {
+            db.exec(`ALTER TABLE attempts ADD COLUMN ${col} INTEGER`);
+          }
+        }
       }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
@@ -1069,6 +1107,10 @@ export function updateAttempt(
       | 'feedback'
       | 'model_id'
       | 'harness_id'
+      | 'num_turns'
+      | 'input_tokens'
+      | 'output_tokens'
+      | 'tool_calls'
     >
   >
 ): void {
@@ -2270,12 +2312,23 @@ export function getReportLeaderboard(
   const durGuard =
     'a.started_at IS NOT NULL AND a.completed_at IS NOT NULL';
 
-  // Query A — attempt-derived durations + review-verdict distribution.
+  // Query A — attempt-derived durations + effort metrics + review-verdict
+  // distribution. AVG() skips NULL inputs in SQLite, so attempts that
+  // reported no turns/tokens are excluded from the effort averages rather
+  // than dragged toward 0. The token sums COALESCE per-row so a group with
+  // no reported usage totals 0 (not NULL).
   const metricRows = db
     .prepare(
       `SELECT ${keyCol} AS key,
          AVG(CASE WHEN a.role = 'develop' AND ${durGuard} THEN ${dur} END) AS avg_impl,
          AVG(CASE WHEN a.role = 'review' AND ${durGuard} THEN ${dur} END) AS avg_review,
+         AVG(a.num_turns) AS avg_turns,
+         AVG(CASE
+               WHEN a.input_tokens IS NOT NULL OR a.output_tokens IS NOT NULL
+               THEN COALESCE(a.input_tokens, 0) + COALESCE(a.output_tokens, 0)
+             END) AS avg_total_tokens,
+         SUM(COALESCE(a.input_tokens, 0)) AS sum_input,
+         SUM(COALESCE(a.output_tokens, 0)) AS sum_output,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'approved' THEN 1 ELSE 0 END) AS v_approved,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'changes_needed' THEN 1 ELSE 0 END) AS v_changes,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'unclear' THEN 1 ELSE 0 END) AS v_unclear
@@ -2287,6 +2340,10 @@ export function getReportLeaderboard(
     key: string;
     avg_impl: number | null;
     avg_review: number | null;
+    avg_turns: number | null;
+    avg_total_tokens: number | null;
+    sum_input: number;
+    sum_output: number;
     v_approved: number;
     v_changes: number;
     v_unclear: number;
@@ -2377,6 +2434,10 @@ export function getReportLeaderboard(
         avg_implementation_seconds: null,
         avg_review_seconds: null,
         avg_rework: null,
+        avg_num_turns: null,
+        avg_total_tokens: null,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
         verdicts: { approved: 0, changes_needed: 0, unclear: 0 },
       };
       byKey.set(key, row);
@@ -2388,6 +2449,10 @@ export function getReportLeaderboard(
     const row = ensure(m.key);
     row.avg_implementation_seconds = numOrNull(m.avg_impl);
     row.avg_review_seconds = numOrNull(m.avg_review);
+    row.avg_num_turns = numOrNull(m.avg_turns);
+    row.avg_total_tokens = numOrNull(m.avg_total_tokens);
+    row.total_input_tokens = Number(m.sum_input) || 0;
+    row.total_output_tokens = Number(m.sum_output) || 0;
     row.verdicts = {
       approved: Number(m.v_approved),
       changes_needed: Number(m.v_changes),

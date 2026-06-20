@@ -30,6 +30,8 @@ import {
   formatPercent,
   formatNumber,
   formatRework,
+  formatTokens,
+  formatTurns,
 } from '../components/reportFormat.js';
 import { defaultRange, previousRange } from '../components/reportFilter.js';
 import {
@@ -566,7 +568,9 @@ type SortKey =
   | 'success_rate'
   | 'avg_implementation_seconds'
   | 'avg_review_seconds'
-  | 'avg_rework';
+  | 'avg_rework'
+  | 'avg_num_turns'
+  | 'avg_total_tokens';
 
 interface ColumnDef {
   key: SortKey;
@@ -582,6 +586,8 @@ const LEADERBOARD_COLUMNS: ColumnDef[] = [
   { key: 'avg_implementation_seconds', label: 'Avg impl', numeric: true, render: (r) => formatDuration(r.avg_implementation_seconds) },
   { key: 'avg_review_seconds', label: 'Avg review', numeric: true, render: (r) => formatDuration(r.avg_review_seconds) },
   { key: 'avg_rework', label: 'Rework', numeric: true, render: (r) => formatRework(r.avg_rework) },
+  { key: 'avg_num_turns', label: 'Avg turns', numeric: true, render: (r) => formatTurns(r.avg_num_turns) },
+  { key: 'avg_total_tokens', label: 'Avg tokens', numeric: true, render: (r) => formatTokens(r.avg_total_tokens) },
 ];
 
 function sortRows(

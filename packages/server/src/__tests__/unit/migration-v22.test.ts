@@ -72,7 +72,7 @@ describe('v22 ALTER migration', () => {
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('28');
+    expect(versionRow.value).toBe('29');
 
     db.close();
   });

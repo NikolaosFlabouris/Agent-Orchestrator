@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Task } from '@orchestrator/shared';
+import type { Task, AgentResult } from '@orchestrator/shared';
 
 const execFileP = promisify(execFile);
 import { getTasks, getRepo, updateTask, insertTaskEvent } from './db.js';
@@ -26,12 +26,6 @@ import {
 import type { Scheduler } from './scheduler.js';
 import { runOrphanSweep } from './orphan-recovery.js';
 import type { FastifyBaseLogger } from 'fastify';
-
-interface AgentResult {
-  status: 'success' | 'failure' | 'timeout';
-  exit_code?: number;
-  error_message?: string;
-}
 
 /**
  * Startup recovery — examines the actual state of each in-flight task

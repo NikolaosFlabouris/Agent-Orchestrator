@@ -27,10 +27,65 @@ interface InstallCommand {
   cwd: string;
 }
 
+interface Usage {
+  num_turns?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  tool_calls?: number;
+}
+
 interface Result {
   status: 'success' | 'failure' | 'timeout';
   exit_code: number;
   error_message: string | null;
+  /** Per-run effort metrics, populated from the SDK's final `result`
+   *  message when available. Optional and backward-compatible: when the
+   *  SDK reports no usage the field is omitted and the orchestrator leaves
+   *  the attempt's usage columns NULL. Raw counts only — no cost. */
+  usage?: Usage;
+}
+
+/** The Claude Agent SDK streams messages; the final one has
+ *  `type: 'result'` and carries `num_turns` plus a `usage` object with
+ *  `input_tokens` / `output_tokens` (mirroring the Anthropic Messages API
+ *  shape). Map that final message into our `Usage` shape, taking only the
+ *  fields that are present as finite numbers. Returns undefined when the
+ *  message isn't a usable result message — the caller then omits `usage`
+ *  entirely so behaviour is unchanged from the no-usage harness.
+ *
+ *  Exported as a pure function so the mapping is unit-testable without
+ *  driving a live SDK run. The token usage object can carry extra fields
+ *  (cache_creation_input_tokens, etc.); only the prompt/completion totals
+ *  are surfaced here. */
+export function extractUsage(message: unknown): Usage | undefined {
+  if (
+    typeof message !== 'object' ||
+    message === null ||
+    (message as { type?: unknown }).type !== 'result'
+  ) {
+    return undefined;
+  }
+  const m = message as {
+    num_turns?: unknown;
+    usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  };
+  const usage: Usage = {};
+  if (typeof m.num_turns === 'number' && Number.isFinite(m.num_turns)) {
+    usage.num_turns = m.num_turns;
+  }
+  const u = m.usage;
+  if (u && typeof u === 'object') {
+    if (typeof u.input_tokens === 'number' && Number.isFinite(u.input_tokens)) {
+      usage.input_tokens = u.input_tokens;
+    }
+    if (
+      typeof u.output_tokens === 'number' &&
+      Number.isFinite(u.output_tokens)
+    ) {
+      usage.output_tokens = u.output_tokens;
+    }
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 const meta: Meta = JSON.parse(readFileSync('/task/meta.json', 'utf-8'));
@@ -123,6 +178,11 @@ async function main() {
       writeFileSync('/output/progress.log', JSON.stringify(message) + '\n', {
         flag: 'a',
       });
+      // The SDK emits a final `result` message with turn/token usage. Keep
+      // the latest one we see; whatever survives the loop is the run's
+      // authoritative usage summary.
+      const u = extractUsage(message);
+      if (u) result.usage = u;
     }
   } catch (error: unknown) {
     result.status = 'failure';

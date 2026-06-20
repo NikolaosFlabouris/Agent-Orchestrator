@@ -193,7 +193,7 @@ describe.skipIf(SKIP)('Harness contract integration', { timeout: 120_000 }, () =
     expect(review.feedback).toBeTruthy();
   });
 
-  it('writes result.json without a usage field', async () => {
+  it('omits usage when the harness reports none (usage is optional)', async () => {
     const dirs = setupDirs('no-usage-field');
     // Use review role to avoid git operations
     await runMockContainer(dirs, {
@@ -209,8 +209,11 @@ describe.skipIf(SKIP)('Harness contract integration', { timeout: 120_000 }, () =
       fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
     );
     expect(result.status).toBe('success');
-    // Cost / token tracking was removed — result.json must not regrow a
-    // usage field. See docs/08-technology-stack.md for the design note.
+    // Per-run usage (#115) is an OPTIONAL result.json field — the real SDK/CLI
+    // harnesses emit raw turn/token counts (never a dollar cost), but a
+    // harness that can't report them (like this mock) simply omits `usage`
+    // and the orchestrator leaves the attempt's usage columns NULL. Backward-
+    // compatible by construction: absent usage behaves exactly as before.
     expect(result.usage).toBeUndefined();
   });
 });

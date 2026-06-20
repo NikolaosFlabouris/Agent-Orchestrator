@@ -308,6 +308,44 @@ describe('GET /api/reports/leaderboard', () => {
     expect(code!.avg_rework).toBeCloseTo(2, 6);
   });
 
+  it('aggregates avg turns / avg+total tokens, excluding NULL-usage attempts', async () => {
+    // Attach per-run usage (#115) to only TWO of sonnet's four attempts in
+    // repo 1 (T1 develop + T1 review); T3's attempts stay NULL. The averages
+    // must divide by the two rows that reported usage, not by all four — a
+    // NULL must not be read as a 0.
+    const db = getDb();
+    db.prepare(
+      `UPDATE attempts SET num_turns = 10, input_tokens = 1000, output_tokens = 500
+         WHERE task_id = 1 AND role = 'develop' AND attempt_number = 1`
+    ).run();
+    db.prepare(
+      `UPDATE attempts SET num_turns = 2, input_tokens = 200, output_tokens = 100
+         WHERE task_id = 1 AND role = 'review' AND attempt_number = 1`
+    ).run();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/leaderboard?groupBy=model&repos=1&${Q}`,
+    });
+    const body = res.json() as ReportsLeaderboard;
+
+    const sonnet = body.rows.find((r) => r.key === 'claude-sonnet-4-6')!;
+    // avg over the two rows that reported usage: turns (10,2) → 6.
+    expect(sonnet.avg_num_turns).toBeCloseTo(6, 6);
+    // total tokens per row (1500, 300) → avg 900.
+    expect(sonnet.avg_total_tokens).toBeCloseTo(900, 6);
+    // sums are over all reported rows.
+    expect(sonnet.total_input_tokens).toBe(1200);
+    expect(sonnet.total_output_tokens).toBe(600);
+
+    // opus reported no usage → averages NULL (unknown), totals 0 (not NULL).
+    const opus = body.rows.find((r) => r.key === 'claude-opus-4-7')!;
+    expect(opus.avg_num_turns).toBeNull();
+    expect(opus.avg_total_tokens).toBeNull();
+    expect(opus.total_input_tokens).toBe(0);
+    expect(opus.total_output_tokens).toBe(0);
+  });
+
   it('groups by repo across all repos, with owner/name labels', async () => {
     const res = await app.inject({
       method: 'GET',

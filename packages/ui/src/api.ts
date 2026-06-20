@@ -314,6 +314,12 @@ export interface AttemptResponse {
   model_id: string | null;
   /** Snapshot of the harness used at attempt-launch. */
   harness_id: string | null;
+  /** Per-run effort metrics read from the harness at completion. NULL =
+   *  unknown (harness emitted no usage); never conflate with a real 0. */
+  num_turns: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  tool_calls: number | null;
   feedback: string | null;
 }
 
