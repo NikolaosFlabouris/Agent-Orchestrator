@@ -40,6 +40,7 @@ import {
   formatRework,
   formatTokens,
   formatTurns,
+  formatChurn,
 } from '../components/reportFormat.js';
 import { defaultRange, previousRange } from '../components/reportFilter.js';
 import {
@@ -634,7 +635,8 @@ type SortKey =
   | 'avg_review_seconds'
   | 'avg_rework'
   | 'avg_num_turns'
-  | 'avg_total_tokens';
+  | 'avg_total_tokens'
+  | 'avg_total_churn';
 
 interface ColumnDef {
   key: SortKey;
@@ -652,6 +654,15 @@ const LEADERBOARD_COLUMNS: ColumnDef[] = [
   { key: 'avg_rework', label: 'Rework', numeric: true, render: (r) => formatRework(r.avg_rework) },
   { key: 'avg_num_turns', label: 'Avg turns', numeric: true, render: (r) => formatTurns(r.avg_num_turns) },
   { key: 'avg_total_tokens', label: 'Avg tokens', numeric: true, render: (r) => formatTokens(r.avg_total_tokens) },
+  {
+    key: 'avg_total_churn',
+    label: 'Avg churn',
+    numeric: true,
+    render: (r) =>
+      r.avg_total_churn == null
+        ? '—'
+        : `${formatNumber(Math.round(r.avg_total_churn))} (+${formatChurn(r.avg_additions)}/-${formatChurn(r.avg_deletions)})`,
+  },
 ];
 
 function sortRows(

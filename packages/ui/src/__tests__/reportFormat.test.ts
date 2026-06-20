@@ -4,6 +4,7 @@ import {
   formatPercent,
   formatNumber,
   formatRework,
+  formatChurn,
   relativeDelta,
 } from '../components/reportFormat.js';
 import {
@@ -46,6 +47,14 @@ describe('formatPercent / formatNumber / formatRework', () => {
     expect(formatNumber(null)).toBe('—');
     expect(formatRework(1.4)).toBe('1.4×');
     expect(formatRework(null)).toBe('—');
+  });
+
+  it('rounds churn line counts and renders — for unknown (never 0)', () => {
+    expect(formatChurn(120.6)).toBe((121).toLocaleString());
+    expect(formatChurn(0)).toBe('0');
+    expect(formatChurn(null)).toBe('—');
+    expect(formatChurn(undefined)).toBe('—');
+    expect(formatChurn(NaN)).toBe('—');
   });
 });
 

@@ -1065,23 +1065,46 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
  *  when the attempt reports none of the four metrics (e.g. a still-running
  *  attempt, or a pre-#115 row). */
 function AttemptUsage({ attempt }: { attempt: AttemptResponse }) {
-  const { num_turns, input_tokens, output_tokens, tool_calls } = attempt;
-  if (
-    num_turns == null &&
-    input_tokens == null &&
-    output_tokens == null &&
-    tool_calls == null
-  ) {
+  const {
+    num_turns,
+    input_tokens,
+    output_tokens,
+    tool_calls,
+    changed_files,
+    additions,
+    deletions,
+  } = attempt;
+  const hasUsage =
+    num_turns != null ||
+    input_tokens != null ||
+    output_tokens != null ||
+    tool_calls != null;
+  // PR diff stats (#116) are captured on the review attempt at review/merge
+  // time. Shown whenever any of the three is present (a review harness may
+  // report churn but no token usage). NULL renders as "—", never 0.
+  const hasDiff =
+    changed_files != null || additions != null || deletions != null;
+  if (!hasUsage && !hasDiff) {
     return null;
   }
   const fmt = (n: number | null) => (n == null ? '—' : n.toLocaleString());
   return (
     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
-      <span title="Agent turns">Turns: <span className="text-gray-300 tabular-nums">{fmt(num_turns)}</span></span>
-      <span title="Input (prompt) tokens">In: <span className="text-gray-300 tabular-nums">{fmt(input_tokens)}</span></span>
-      <span title="Output (completion) tokens">Out: <span className="text-gray-300 tabular-nums">{fmt(output_tokens)}</span></span>
-      {tool_calls != null && (
-        <span title="Tool calls">Tools: <span className="text-gray-300 tabular-nums">{fmt(tool_calls)}</span></span>
+      {hasUsage && (
+        <>
+          <span title="Agent turns">Turns: <span className="text-gray-300 tabular-nums">{fmt(num_turns)}</span></span>
+          <span title="Input (prompt) tokens">In: <span className="text-gray-300 tabular-nums">{fmt(input_tokens)}</span></span>
+          <span title="Output (completion) tokens">Out: <span className="text-gray-300 tabular-nums">{fmt(output_tokens)}</span></span>
+          {tool_calls != null && (
+            <span title="Tool calls">Tools: <span className="text-gray-300 tabular-nums">{fmt(tool_calls)}</span></span>
+          )}
+        </>
+      )}
+      {hasDiff && (
+        <>
+          <span title="Files changed in the PR">Files: <span className="text-gray-300 tabular-nums">{fmt(changed_files)}</span></span>
+          <span title="Lines added in the PR">Diff: <span className="text-green-400 tabular-nums">+{fmt(additions)}</span> <span className="text-red-400 tabular-nums">-{fmt(deletions)}</span></span>
+        </>
       )}
     </div>
   );
