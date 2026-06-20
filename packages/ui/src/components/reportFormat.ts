@@ -43,6 +43,22 @@ export function formatRework(n: number | null | undefined): string {
   return `${n.toFixed(1)}×`;
 }
 
+/** Compact token count → e.g. 0, 850, 12.3k, 4.1M. NULL/non-finite render
+ *  as "—" so "unknown" never shows as 0. Raw counts only — the orchestrator
+ *  never prices tokens; operators look up provider rates themselves. */
+export function formatTokens(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return EMPTY;
+  if (n < 1000) return Math.round(n).toString();
+  if (n < 1_000_000) return `${trim(n / 1000)}k`;
+  return `${trim(n / 1_000_000)}M`;
+}
+
+/** Average turn count → one decimal (e.g. "3.0", "12"). NULL → "—". */
+export function formatTurns(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return EMPTY;
+  return trim(n);
+}
+
 /** Signed relative change between two values, or null when it can't be
  *  computed (missing data or a zero baseline, which would divide by zero). */
 export function relativeDelta(

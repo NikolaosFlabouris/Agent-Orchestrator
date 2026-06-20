@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Task } from '@orchestrator/shared';
+import type { Task, AgentResult } from '@orchestrator/shared';
 import { getTasks } from './db.js';
 import {
   getContainer,
@@ -12,12 +12,6 @@ import { getOutputDir, getTaskDir } from './workspace.js';
 import { DRAIN_TIMEOUT_MINUTES } from './constants.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
-
-interface AgentResult {
-  status: 'success' | 'failure' | 'timeout';
-  exit_code?: number;
-  error_message?: string;
-}
 
 /**
  * Graceful shutdown handler.

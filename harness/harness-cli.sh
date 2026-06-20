@@ -91,10 +91,32 @@ if [ "$ROLE" = "review" ] && [ "$STATUS" = "success" ]; then
   fi
 fi
 
+# Best-effort per-run usage (#115). Claude Code's stream-json mode emits a
+# final {"type":"result", ...} event carrying num_turns and a usage object
+# with input/output token counts. Parse it into a `usage` block when present;
+# tools that don't emit stream-json (OpenCode's text logs, etc.) leave it out
+# and the orchestrator keeps the attempt's usage columns NULL. Raw counts
+# only — no dollar cost is computed. Never fails the run: any jq error or
+# missing field collapses to an empty USAGE_FIELD.
+USAGE_FIELD=""
+USAGE_LINE=$(grep -a '^{"type":"result"' "$AGENT_LOG" 2>/dev/null | tail -1 || true)
+if [ -n "$USAGE_LINE" ]; then
+  USAGE_JSON=$(echo "$USAGE_LINE" | jq -c '
+    {}
+    + (if (.num_turns | type) == "number" then { num_turns: .num_turns } else {} end)
+    + (if (.usage.input_tokens | type) == "number" then { input_tokens: .usage.input_tokens } else {} end)
+    + (if (.usage.output_tokens | type) == "number" then { output_tokens: .usage.output_tokens } else {} end)
+  ' 2>/dev/null || true)
+  if [ -n "$USAGE_JSON" ] && [ "$USAGE_JSON" != "{}" ]; then
+    USAGE_FIELD=",
+  \"usage\": $USAGE_JSON"
+  fi
+fi
+
 cat > "$RESULT" <<EOF
 {
   "status": "$STATUS",
   "exit_code": $AGENT_EXIT,
-  "error_message": $ERROR_MSG
+  "error_message": $ERROR_MSG$USAGE_FIELD
 }
 EOF

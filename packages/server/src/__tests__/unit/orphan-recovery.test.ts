@@ -102,6 +102,10 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     model_id: null,
     harness_id: null,
     timeout_minutes_snapshot: null,
+    num_turns: null,
+    input_tokens: null,
+    output_tokens: null,
+    tool_calls: null,
     ...overrides,
   };
 }

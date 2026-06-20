@@ -1041,6 +1041,7 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
           )}
         </div>
       </div>
+      <AttemptUsage attempt={attempt} />
       {attempt.feedback && (
         <div className="mt-3 text-xs text-gray-400 border-t border-gray-800 pt-2">
           <details>
@@ -1052,6 +1053,35 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
             </pre>
           </details>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Per-run effort metrics (#115): agent turns + input/output token counts,
+ *  read from the harness at completion. Each is nullable — a harness that
+ *  emitted no usage leaves the column NULL, which renders as "—" (never 0).
+ *  Raw token counts only; no dollar cost is shown. The whole strip is hidden
+ *  when the attempt reports none of the four metrics (e.g. a still-running
+ *  attempt, or a pre-#115 row). */
+function AttemptUsage({ attempt }: { attempt: AttemptResponse }) {
+  const { num_turns, input_tokens, output_tokens, tool_calls } = attempt;
+  if (
+    num_turns == null &&
+    input_tokens == null &&
+    output_tokens == null &&
+    tool_calls == null
+  ) {
+    return null;
+  }
+  const fmt = (n: number | null) => (n == null ? '—' : n.toLocaleString());
+  return (
+    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+      <span title="Agent turns">Turns: <span className="text-gray-300 tabular-nums">{fmt(num_turns)}</span></span>
+      <span title="Input (prompt) tokens">In: <span className="text-gray-300 tabular-nums">{fmt(input_tokens)}</span></span>
+      <span title="Output (completion) tokens">Out: <span className="text-gray-300 tabular-nums">{fmt(output_tokens)}</span></span>
+      {tool_calls != null && (
+        <span title="Tool calls">Tools: <span className="text-gray-300 tabular-nums">{fmt(tool_calls)}</span></span>
       )}
     </div>
   );

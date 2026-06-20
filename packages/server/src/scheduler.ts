@@ -8,6 +8,7 @@ import type {
   Model,
   AgentProfile,
   AttemptRole,
+  AgentResult,
 } from '@orchestrator/shared';
 import {
   getTask,
@@ -89,12 +90,6 @@ import type { FastifyBaseLogger } from 'fastify';
 // ---------------------------------------------------------------------------
 // Result / meta types (read from container output files)
 // ---------------------------------------------------------------------------
-
-interface AgentResult {
-  status: 'success' | 'failure' | 'timeout';
-  exit_code?: number;
-  error_message?: string;
-}
 
 interface TaskMeta {
   issue_id: number;
@@ -1603,12 +1598,37 @@ export class Scheduler {
     else if (result.status === 'timeout') attemptStatus = 'timeout';
     else attemptStatus = 'failed';
 
+    // Per-run effort metrics (#115). The harness writes these into
+    // result.json's `usage` block; they're immutable per-run facts so we
+    // simply store them. Only include a column when the harness reported a
+    // value — an absent metric leaves the column NULL (unknown), never 0,
+    // and a harness that emits no usage at all behaves exactly as before.
+    const usage = result.usage;
+    const usageUpdates =
+      usage == null
+        ? {}
+        : {
+            ...(typeof usage.num_turns === 'number'
+              ? { num_turns: usage.num_turns }
+              : {}),
+            ...(typeof usage.input_tokens === 'number'
+              ? { input_tokens: usage.input_tokens }
+              : {}),
+            ...(typeof usage.output_tokens === 'number'
+              ? { output_tokens: usage.output_tokens }
+              : {}),
+            ...(typeof usage.tool_calls === 'number'
+              ? { tool_calls: usage.tool_calls }
+              : {}),
+          };
+
     updateAttempt(attemptId, {
       status: attemptStatus as any,
       completed_at: new Date().toISOString(),
       verdict,
       log_path: path.join(getOutputDir(task), 'progress.log'),
       feedback,
+      ...usageUpdates,
     });
   }
 

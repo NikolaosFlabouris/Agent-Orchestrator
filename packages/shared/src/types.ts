@@ -69,6 +69,46 @@ export interface Attempt {
    *  Null for pre-v22 attempts; consumers fall back to a live profile
    *  read in that case. */
   timeout_minutes_snapshot: number | null;
+  /** Number of agent turns the run took, read from the harness's
+   *  result.json `usage` block at completion. Immutable per-run effort
+   *  fact (the run already happened — no snapshot-vs-live concern). NULL
+   *  when the harness emitted no usage (pre-v29 rows, CLI harnesses with
+   *  no machine-readable summary). NULL means "unknown", never 0. */
+  num_turns: number | null;
+  /** Input (prompt) tokens consumed by the run. Raw count — the
+   *  orchestrator never derives a dollar cost; operators look up provider
+   *  pricing themselves. NULL = unknown (see num_turns). */
+  input_tokens: number | null;
+  /** Output (completion) tokens produced by the run. Raw count. NULL =
+   *  unknown. */
+  output_tokens: number | null;
+  /** Number of tool invocations the run made, when the harness reports
+   *  it. NULL = unknown / not reported. */
+  tool_calls: number | null;
+}
+
+/** Per-run effort metrics emitted by the in-container harness into
+ *  result.json's `usage` block and persisted onto the attempt row by the
+ *  completion path. Every field is optional: a harness that can't report a
+ *  metric simply omits it, and the corresponding attempt column stays NULL.
+ *  Raw counts only — cost is intentionally NOT computed here. */
+export interface AgentUsage {
+  num_turns?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  tool_calls?: number;
+}
+
+/** The contract the orchestrator reads from a finished container's
+ *  /output/result.json. Declared here so the scheduler, startup recovery,
+ *  and shutdown drain all share one shape. `usage` is optional and
+ *  backward-compatible — a harness that emits no usage behaves exactly as
+ *  before. */
+export interface AgentResult {
+  status: 'success' | 'failure' | 'timeout';
+  exit_code?: number;
+  error_message?: string;
+  usage?: AgentUsage;
 }
 
 export type AttemptRole = 'develop' | 'review';
@@ -446,6 +486,20 @@ export interface LeaderboardRow {
   avg_implementation_seconds: number | null;
   avg_review_seconds: number | null;
   avg_rework: number | null;
+  /** Average agent turns per attempt across attempts in this group that
+   *  reported a turn count. Attempts with NULL num_turns are excluded from
+   *  the average (not counted as 0). NULL when no attempt in the group
+   *  reported turns. */
+  avg_num_turns: number | null;
+  /** Average total tokens (input + output) per attempt across attempts in
+   *  this group that reported token usage. NULL-usage attempts are excluded
+   *  from the average. NULL when no attempt reported tokens. */
+  avg_total_tokens: number | null;
+  /** Summed input tokens across the group (0 when none reported). Raw count
+   *  for operators to price externally — no cost is computed here. */
+  total_input_tokens: number;
+  /** Summed output tokens across the group (0 when none reported). */
+  total_output_tokens: number;
   verdicts: { approved: number; changes_needed: number; unclear: number };
 }
 
