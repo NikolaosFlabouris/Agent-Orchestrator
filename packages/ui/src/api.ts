@@ -3,6 +3,13 @@ import type {
   ReportsTimeseries,
   ReportsLeaderboard,
   LeaderboardGroupBy,
+  ReportsDurations,
+  DurationGroupBy,
+  DurationMetric,
+  ReportsFunnel,
+  ReportsReliability,
+  ReportsHeatmap,
+  HeatmapMetric,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -44,7 +51,11 @@ export interface ReportQuery {
  *  defaults. Mirrors the server-side `parseFilter` contract in reports.ts. */
 function reportQuery(
   filter?: ReportQuery,
-  extra?: { bucket?: 'day' | 'week'; groupBy?: LeaderboardGroupBy }
+  extra?: {
+    bucket?: 'day' | 'week';
+    groupBy?: LeaderboardGroupBy | DurationGroupBy;
+    metric?: DurationMetric | HeatmapMetric;
+  }
 ): string {
   const qs = new URLSearchParams();
   if (filter?.repos && filter.repos.length > 0) {
@@ -54,6 +65,7 @@ function reportQuery(
   if (filter?.to) qs.set('to', filter.to);
   if (extra?.bucket) qs.set('bucket', extra.bucket);
   if (extra?.groupBy) qs.set('groupBy', extra.groupBy);
+  if (extra?.metric) qs.set('metric', extra.metric);
   const query = qs.toString();
   return query ? `?${query}` : '';
 }
@@ -161,6 +173,27 @@ export const api = {
     request<ReportsLeaderboard>(
       'GET',
       `/api/reports/leaderboard${reportQuery(filter, { groupBy })}`
+    ),
+  getReportDurations: (
+    groupBy: DurationGroupBy,
+    metric: DurationMetric,
+    filter?: ReportQuery
+  ) =>
+    request<ReportsDurations>(
+      'GET',
+      `/api/reports/durations${reportQuery(filter, { groupBy, metric })}`
+    ),
+  getReportFunnel: (filter?: ReportQuery) =>
+    request<ReportsFunnel>('GET', `/api/reports/funnel${reportQuery(filter)}`),
+  getReportReliability: (filter?: ReportQuery, bucket?: 'day' | 'week') =>
+    request<ReportsReliability>(
+      'GET',
+      `/api/reports/reliability${reportQuery(filter, { bucket })}`
+    ),
+  getReportHeatmap: (metric: HeatmapMetric, filter?: ReportQuery) =>
+    request<ReportsHeatmap>(
+      'GET',
+      `/api/reports/heatmap${reportQuery(filter, { metric })}`
     ),
 
   // -- Harnesses (read-only registry) --

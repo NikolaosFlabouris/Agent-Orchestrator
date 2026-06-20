@@ -508,3 +508,132 @@ export interface ReportsLeaderboard {
   group_by: LeaderboardGroupBy;
   rows: LeaderboardRow[];
 }
+
+// ---------------------------------------------------------------------------
+// Advanced reporting (durations distribution / funnel / reliability / heatmap)
+// ---------------------------------------------------------------------------
+
+/** Distributions and the funnel group by the per-attempt model/harness
+ *  snapshot — the same keys the leaderboard uses (repo grouping isn't
+ *  meaningful for a per-attempt duration distribution). */
+export type DurationGroupBy = 'model' | 'harness';
+/** Which attempt-role duration the distribution endpoint summarises. */
+export type DurationMetric = 'implementation' | 'review';
+
+/** Full percentile summary of a set of durations (seconds) for one group.
+ *  Percentiles are nearest-rank. All stat fields are null when count = 0. */
+export interface DurationDistribution {
+  /** Grouping key (model_id or harness_id). */
+  key: string;
+  /** Human-readable label (same as key today; reserved for future maps). */
+  label: string;
+  count: number;
+  min_seconds: number | null;
+  p50_seconds: number | null;
+  p90_seconds: number | null;
+  p99_seconds: number | null;
+  max_seconds: number | null;
+  avg_seconds: number | null;
+}
+
+export interface ReportsDurations {
+  range: { from: string; to: string };
+  group_by: DurationGroupBy;
+  metric: DurationMetric;
+  groups: DurationDistribution[];
+}
+
+/** One stage of the lifecycle funnel. `count` is the number of cohort tasks
+ *  that ever reached this stage; the conversion ratios are 0..1 (null when
+ *  the denominator is 0). */
+export interface FunnelStage {
+  /** Stable stage key (created | preparing | in-progress | in-review | merged). */
+  stage: string;
+  /** Human-readable label. */
+  label: string;
+  count: number;
+  /** count / first-stage count (overall conversion from "created"). */
+  pct_of_created: number | null;
+  /** count / previous-stage count (step conversion). null for the first stage. */
+  pct_of_previous: number | null;
+}
+
+export interface ReportsFunnel {
+  range: { from: string; to: string };
+  repos: number[] | null;
+  stages: FunnelStage[];
+}
+
+/** Total operational-incidence counts over the range. */
+export interface ReliabilityCounts {
+  /** `container_timeout_kill` events. */
+  timeout_kills: number;
+  /** `orphan_detected` events. */
+  orphans_detected: number;
+  /** `orphan_recovery_triggered` events. */
+  orphans_recovered: number;
+  /** `orphan_recovery_exhausted` events (recovery gave up). */
+  orphans_exhausted: number;
+  /** `review_deferred` events. */
+  review_deferrals: number;
+  /** Sum of `tasks.prep_failure_count` over the cohort (created-in-range,
+   *  repo-filtered). Point-in-time counters rather than timestamped events,
+   *  so they appear in the totals + per-repo breakdown but NOT the series. */
+  prep_failures: number;
+}
+
+/** Per-bucket incidence for the reliability time-series. Prep failures are
+ *  omitted (they carry no per-incident timestamp — see ReliabilityCounts). */
+export interface ReliabilityTimeseriesBucket {
+  /** Bucket start as YYYY-MM-DD (the day, or the Monday of the week). */
+  bucket: string;
+  timeout_kills: number;
+  orphans_detected: number;
+  orphans_recovered: number;
+  orphans_exhausted: number;
+  review_deferrals: number;
+}
+
+/** Per-repo reliability breakdown row. */
+export interface ReliabilityRepoRow {
+  /** Repo id as a string. */
+  key: string;
+  /** "owner/name". */
+  label: string;
+  timeout_kills: number;
+  orphans_detected: number;
+  orphans_recovered: number;
+  orphans_exhausted: number;
+  review_deferrals: number;
+  prep_failures: number;
+}
+
+export interface ReportsReliability {
+  range: { from: string; to: string };
+  repos: number[] | null;
+  bucket: 'day' | 'week';
+  counts: ReliabilityCounts;
+  series: ReliabilityTimeseriesBucket[];
+  by_repo: ReliabilityRepoRow[];
+}
+
+/** Which activity drives the heatmap: task launches (created) or merges. */
+export type HeatmapMetric = 'created' | 'merged';
+
+/** One populated heatmap cell. Only non-zero cells are returned; the UI
+ *  fills the rest of the 7×24 grid with zero. */
+export interface HeatmapCell {
+  /** Day of week, 0=Sunday … 6=Saturday (UTC, matches strftime('%w')). */
+  dow: number;
+  /** Hour of day, 0…23 (UTC). */
+  hour: number;
+  count: number;
+}
+
+export interface ReportsHeatmap {
+  range: { from: string; to: string };
+  metric: HeatmapMetric;
+  cells: HeatmapCell[];
+  /** Largest single-cell count (0 when empty) — the UI's colour-scale max. */
+  max: number;
+}

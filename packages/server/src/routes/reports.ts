@@ -3,9 +3,19 @@ import {
   getReportOverview,
   getReportTimeseries,
   getReportLeaderboard,
+  getReportDurations,
+  getReportFunnel,
+  getReportReliability,
+  getReportHeatmap,
 } from '../db.js';
 import { DEFAULT_REPORT_WINDOW_DAYS } from '../constants.js';
-import type { ReportFilter, LeaderboardGroupBy } from '@orchestrator/shared';
+import type {
+  ReportFilter,
+  LeaderboardGroupBy,
+  DurationGroupBy,
+  DurationMetric,
+  HeatmapMetric,
+} from '@orchestrator/shared';
 
 /** Reports API (read-only aggregates).
  *
@@ -82,5 +92,59 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: 'groupBy must be one of: model, harness, repo' });
     }
     return getReportLeaderboard(filter, raw as LeaderboardGroupBy);
+  });
+
+  // GET /api/reports/durations?groupBy=model|harness&metric=implementation|review
+  // — per-group p50/p90/p99 + min/max/avg duration distribution.
+  app.get('/api/reports/durations', async (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+    const filter = parseFilter(query);
+
+    const groupRaw = query.groupBy;
+    const groups: DurationGroupBy[] = ['model', 'harness'];
+    if (typeof groupRaw !== 'string' || !groups.includes(groupRaw as DurationGroupBy)) {
+      return reply
+        .status(400)
+        .send({ error: 'groupBy must be one of: model, harness' });
+    }
+
+    const metricRaw = query.metric;
+    const metrics: DurationMetric[] = ['implementation', 'review'];
+    if (typeof metricRaw !== 'string' || !metrics.includes(metricRaw as DurationMetric)) {
+      return reply
+        .status(400)
+        .send({ error: 'metric must be one of: implementation, review' });
+    }
+
+    return getReportDurations(
+      filter,
+      groupRaw as DurationGroupBy,
+      metricRaw as DurationMetric
+    );
+  });
+
+  // GET /api/reports/funnel — created→preparing→in-progress→in-review→merged
+  // lifecycle funnel with counts and conversion percentages.
+  app.get('/api/reports/funnel', async (request) => {
+    const filter = parseFilter(request.query as Record<string, unknown>);
+    return getReportFunnel(filter);
+  });
+
+  // GET /api/reports/reliability?bucket=day|week — operational-incidence
+  // counts, time-series, and per-repo breakdown.
+  app.get('/api/reports/reliability', async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const filter = parseFilter(query);
+    const bucket = query.bucket === 'week' ? 'week' : 'day';
+    return getReportReliability(filter, bucket);
+  });
+
+  // GET /api/reports/heatmap?metric=created|merged — hour-of-day × day-of-week
+  // activity heatmap.
+  app.get('/api/reports/heatmap', async (request) => {
+    const query = request.query as Record<string, unknown>;
+    const filter = parseFilter(query);
+    const metric: HeatmapMetric = query.metric === 'merged' ? 'merged' : 'created';
+    return getReportHeatmap(filter, metric);
   });
 }

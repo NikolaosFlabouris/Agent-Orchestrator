@@ -19,12 +19,20 @@ import type {
   ReportsOverview,
   ReportsTimeseries,
   ReportsLeaderboard,
+  ReportsDurations,
+  ReportsFunnel,
+  ReportsReliability,
+  ReportsHeatmap,
+  DurationMetric,
   LeaderboardRow,
   TaskStatus,
 } from '@orchestrator/shared';
 import { AppHeader } from '../components/AppHeader.js';
 import { KpiCard } from '../components/KpiCard.js';
 import { ChartCard } from '../components/ChartCard.js';
+import { DurationDistributionChart } from '../components/DurationDistributionChart.js';
+import { FunnelChart } from '../components/FunnelChart.js';
+import { ActivityHeatmap } from '../components/ActivityHeatmap.js';
 import {
   formatDuration,
   formatPercent,
@@ -70,6 +78,11 @@ interface ReportBundle {
   modelBoard: ReportsLeaderboard;
   harnessBoard: ReportsLeaderboard;
   repoBoard: ReportsLeaderboard;
+  durationsImpl: ReportsDurations;
+  durationsReview: ReportsDurations;
+  funnel: ReportsFunnel;
+  reliability: ReportsReliability;
+  heatmap: ReportsHeatmap;
 }
 
 export function Reports() {
@@ -80,6 +93,11 @@ export function Reports() {
   const [to, setTo] = useState(initialRange.to);
   const [bucket, setBucket] = useState<'day' | 'week'>('day');
   const [boardGroup, setBoardGroup] = useState<'model' | 'harness'>('model');
+  const [distGroup, setDistGroup] = useState<'model' | 'harness'>('model');
+  const [distMetric, setDistMetric] = useState<DurationMetric>('implementation');
+  const [heatmapMetric, setHeatmapMetric] = useState<'created' | 'merged'>(
+    'created'
+  );
 
   const [data, setData] = useState<ReportBundle | null>(null);
   const [loading, setLoading] = useState(true);
@@ -116,6 +134,13 @@ export function Reports() {
       api.getReportLeaderboard('model', filter),
       api.getReportLeaderboard('harness', filter),
       api.getReportLeaderboard('repo', filter),
+      // Fetch BOTH duration metrics at the current grouping so the
+      // metric toggle is client-side; only the grouping toggle refetches.
+      api.getReportDurations(distGroup, 'implementation', filter),
+      api.getReportDurations(distGroup, 'review', filter),
+      api.getReportFunnel(filter),
+      api.getReportReliability(filter, bucket),
+      api.getReportHeatmap(heatmapMetric, filter),
     ])
       .then(
         ([
@@ -125,6 +150,11 @@ export function Reports() {
           modelBoard,
           harnessBoard,
           repoBoard,
+          durationsImpl,
+          durationsReview,
+          funnel,
+          reliability,
+          heatmap,
         ]) => {
           if (cancelled) return;
           setData({
@@ -134,6 +164,11 @@ export function Reports() {
             modelBoard,
             harnessBoard,
             repoBoard,
+            durationsImpl,
+            durationsReview,
+            funnel,
+            reliability,
+            heatmap,
           });
           setLoading(false);
         }
@@ -148,7 +183,7 @@ export function Reports() {
       cancelled = true;
     };
     // repoKey stands in for the selectedRepoIds array identity.
-  }, [from, to, repoKey, bucket]);
+  }, [from, to, repoKey, bucket, distGroup, heatmapMetric]);
 
   const toggleRepo = (id: number) => {
     setSelectedRepoIds((ids) =>
@@ -162,6 +197,8 @@ export function Reports() {
       filter: { repos: selectedRepoIds.length ? selectedRepoIds : null, from, to },
       overview: data.overview,
       leaderboards: [data.modelBoard, data.harnessBoard, data.repoBoard],
+      reliability: data.reliability,
+      durations: [data.durationsImpl, data.durationsReview],
     };
     const stamp = `${from}_${to}`;
     if (kind === 'csv') {
@@ -248,6 +285,33 @@ export function Reports() {
               board={boardGroup === 'model' ? data.modelBoard : data.harnessBoard}
               group={boardGroup}
               onGroupChange={setBoardGroup}
+            />
+
+            <DurationDistributionSection
+              durations={
+                distMetric === 'implementation'
+                  ? data.durationsImpl
+                  : data.durationsReview
+              }
+              group={distGroup}
+              onGroupChange={setDistGroup}
+              metric={distMetric}
+              onMetricChange={setDistMetric}
+            />
+
+            <div className="grid gap-6 lg:grid-cols-2">
+              <LifecycleFunnelSection funnel={data.funnel} />
+              <ActivityHeatmapSection
+                heatmap={data.heatmap}
+                metric={heatmapMetric}
+                onMetricChange={setHeatmapMetric}
+              />
+            </div>
+
+            <ReliabilitySection
+              reliability={data.reliability}
+              bucket={bucket}
+              repos={repos}
             />
 
             <RepoScorecard board={data.repoBoard} />
@@ -759,6 +823,274 @@ function ScoreStat({ label, value }: { label: string; value: string }) {
       <dt className="text-xs uppercase tracking-wide text-gray-500">{label}</dt>
       <dd className="text-gray-200">{value}</dd>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Duration distribution (percentile bars)
+// ---------------------------------------------------------------------------
+
+function DurationDistributionSection({
+  durations,
+  group,
+  onGroupChange,
+  metric,
+  onMetricChange,
+}: {
+  durations: ReportsDurations;
+  group: 'model' | 'harness';
+  onGroupChange: (g: 'model' | 'harness') => void;
+  metric: DurationMetric;
+  onMetricChange: (m: DurationMetric) => void;
+}) {
+  const empty = durations.groups.length === 0;
+  return (
+    <ChartCard
+      title={`${metric === 'implementation' ? 'Implementation' : 'Review'} duration distribution`}
+      actions={
+        <>
+          <Toggle
+            options={[
+              { value: 'implementation', label: 'Impl' },
+              { value: 'review', label: 'Review' },
+            ]}
+            value={metric}
+            onChange={(v) => onMetricChange(v as DurationMetric)}
+          />
+          <Toggle
+            options={[
+              { value: 'model', label: 'By model' },
+              { value: 'harness', label: 'By harness' },
+            ]}
+            value={group}
+            onChange={(v) => onGroupChange(v as 'model' | 'harness')}
+          />
+        </>
+      }
+      empty={empty}
+      emptyLabel="No completed attempts in this range"
+    >
+      <DurationDistributionChart groups={durations.groups} />
+    </ChartCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle funnel
+// ---------------------------------------------------------------------------
+
+function LifecycleFunnelSection({ funnel }: { funnel: ReportsFunnel }) {
+  const empty = (funnel.stages[0]?.count ?? 0) === 0;
+  return (
+    <ChartCard title="Lifecycle funnel" empty={empty}>
+      <FunnelChart stages={funnel.stages} />
+    </ChartCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Activity heatmap
+// ---------------------------------------------------------------------------
+
+function ActivityHeatmapSection({
+  heatmap,
+  metric,
+  onMetricChange,
+}: {
+  heatmap: ReportsHeatmap;
+  metric: 'created' | 'merged';
+  onMetricChange: (m: 'created' | 'merged') => void;
+}) {
+  return (
+    <ChartCard
+      title="Activity heatmap — hour × day (UTC)"
+      actions={
+        <Toggle
+          options={[
+            { value: 'created', label: 'Created' },
+            { value: 'merged', label: 'Merged' },
+          ]}
+          value={metric}
+          onChange={(v) => onMetricChange(v as 'created' | 'merged')}
+        />
+      }
+      empty={heatmap.cells.length === 0}
+    >
+      <ActivityHeatmap cells={heatmap.cells} max={heatmap.max} />
+    </ChartCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reliability / ops panel
+// ---------------------------------------------------------------------------
+
+const RELIABILITY_METRICS: Array<{
+  key: keyof ReportsReliability['series'][number] & string;
+  label: string;
+  color: string;
+}> = [
+  { key: 'timeout_kills', label: 'Timeout kills', color: '#f87171' },
+  { key: 'orphans_detected', label: 'Orphans detected', color: '#fbbf24' },
+  { key: 'orphans_recovered', label: 'Orphans recovered', color: '#4ade80' },
+  { key: 'orphans_exhausted', label: 'Recovery exhausted', color: '#fb923c' },
+  { key: 'review_deferrals', label: 'Review deferrals', color: '#a78bfa' },
+];
+
+function ReliabilitySection({
+  reliability,
+  bucket,
+  repos,
+}: {
+  reliability: ReportsReliability;
+  bucket: 'day' | 'week';
+  repos: RepoResponse[];
+}) {
+  const { counts, series, by_repo } = reliability;
+  const tiles = [
+    { label: 'Timeout kills', value: counts.timeout_kills },
+    { label: 'Orphans detected', value: counts.orphans_detected },
+    { label: 'Orphans recovered', value: counts.orphans_recovered },
+    { label: 'Recovery exhausted', value: counts.orphans_exhausted },
+    { label: 'Prep failures', value: counts.prep_failures },
+    { label: 'Review deferrals', value: counts.review_deferrals },
+  ];
+  const totalIncidents =
+    counts.timeout_kills +
+    counts.orphans_detected +
+    counts.orphans_recovered +
+    counts.orphans_exhausted +
+    counts.prep_failures +
+    counts.review_deferrals;
+  const seriesEmpty = series.every((b) =>
+    RELIABILITY_METRICS.every((m) => (b[m.key] as number) === 0)
+  );
+
+  // Repo label lookup for the breakdown table (the endpoint already labels
+  // rows, but fall back through the fetched repo list defensively).
+  const repoLabel = (key: string, fallback: string): string => {
+    const r = repos.find((x) => String(x.id) === key);
+    return r ? `${r.owner}/${r.name}` : fallback;
+  };
+
+  return (
+    <ChartCard
+      title="Reliability & ops"
+      empty={totalIncidents === 0}
+      emptyLabel="No operational incidents in this range"
+    >
+      <div className="space-y-5">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {tiles.map((t) => (
+            <div
+              key={t.label}
+              className="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2"
+            >
+              <div className="text-xs uppercase tracking-wide text-gray-500">
+                {t.label}
+              </div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-gray-100">
+                {formatNumber(t.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div>
+          <div className="mb-2 text-xs uppercase tracking-wide text-gray-500">
+            Incidence over time ({bucket})
+          </div>
+          {seriesEmpty ? (
+            <div className="flex h-32 items-center justify-center text-sm text-gray-600">
+              No timestamped incidents in this range
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart
+                data={series}
+                margin={{ top: 8, right: 8, left: -16, bottom: 0 }}
+              >
+                <CartesianGrid stroke={COLORS.grid} vertical={false} />
+                <XAxis
+                  dataKey="bucket"
+                  stroke={COLORS.axis}
+                  fontSize={11}
+                  tickLine={false}
+                />
+                <YAxis
+                  stroke={COLORS.axis}
+                  fontSize={11}
+                  tickLine={false}
+                  allowDecimals={false}
+                />
+                <Tooltip
+                  contentStyle={TOOLTIP_STYLE}
+                  cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                />
+                <Legend wrapperStyle={{ fontSize: '0.75rem' }} />
+                {RELIABILITY_METRICS.map((m) => (
+                  <Bar
+                    key={m.key}
+                    dataKey={m.key}
+                    name={m.label}
+                    stackId="incidents"
+                    fill={m.color}
+                  />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {by_repo.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th className="py-2 pr-4 font-medium">Repo</th>
+                  <th className="py-2 pr-4 text-right font-medium">Timeout</th>
+                  <th className="py-2 pr-4 text-right font-medium">Detected</th>
+                  <th className="py-2 pr-4 text-right font-medium">Recovered</th>
+                  <th className="py-2 pr-4 text-right font-medium">Exhausted</th>
+                  <th className="py-2 pr-4 text-right font-medium">Prep fail</th>
+                  <th className="py-2 pr-4 text-right font-medium">Deferred</th>
+                </tr>
+              </thead>
+              <tbody>
+                {by_repo.map((r) => (
+                  <tr
+                    key={r.key}
+                    className="border-b border-gray-800/50 last:border-0"
+                  >
+                    <td className="py-2 pr-4 font-mono text-gray-200">
+                      {repoLabel(r.key, r.label)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.timeout_kills)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.orphans_detected)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.orphans_recovered)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.orphans_exhausted)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.prep_failures)}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+                      {formatNumber(r.review_deferrals)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </ChartCard>
   );
 }
 
