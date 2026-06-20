@@ -22,6 +22,7 @@ import type {
   ReportsLeaderboard,
   LeaderboardGroupBy,
   LeaderboardRow,
+  ProfileGauge,
   DurationGroupBy,
   DurationMetric,
   DurationDistribution,
@@ -36,7 +37,7 @@ import type {
   HeatmapCell,
   ReportsHeatmap,
 } from '@orchestrator/shared';
-import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
+import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
 const CURRENT_SCHEMA_VERSION = 30;
 /** Oldest schema_version this binary can forward-migrate from. Anything
@@ -2336,12 +2337,24 @@ function enumerateBuckets(
  *  are merged by key in JS (O(groups)). */
 export function getReportLeaderboard(
   filter: ReportFilter,
-  groupBy: LeaderboardGroupBy
+  groupBy: LeaderboardGroupBy,
+  profile?: { model: string; harness: string }
 ): ReportsLeaderboard {
   const db = getDb();
   const cohort = rangeClause('t.created_at', filter);
 
   const attemptGrouped = groupBy !== 'repo';
+
+  // Optional (model, harness) narrowing used by the Create-Task profile gauge
+  // (getReportProfileGauge). When set it constrains every attempt-derived
+  // query to a single model+harness snapshot so the gauge reuses this exact
+  // aggregation rather than duplicating the stats SQL. Only meaningful for the
+  // attempt-grouped paths; the repo-grouped Query B/C branches ignore it (the
+  // gauge always groups by model).
+  const profileClause =
+    profile && attemptGrouped ? ` AND a.model_id = ? AND a.harness_id = ?` : '';
+  const profileParams: unknown[] =
+    profile && attemptGrouped ? [profile.model, profile.harness] : [];
   const keyCol =
     groupBy === 'model'
       ? 'a.model_id'
@@ -2388,10 +2401,10 @@ export function getReportLeaderboard(
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'changes_needed' THEN 1 ELSE 0 END) AS v_changes,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'unclear' THEN 1 ELSE 0 END) AS v_unclear
        FROM attempts a JOIN tasks t ON t.id = a.task_id
-       WHERE ${cohort.clause}${andKey}
+       WHERE ${cohort.clause}${andKey}${profileClause}
        GROUP BY ${keyCol}`
     )
-    .all(...cohort.params) as Array<{
+    .all(...cohort.params, ...profileParams) as Array<{
     key: string;
     avg_impl: number | null;
     avg_review: number | null;
@@ -2421,11 +2434,11 @@ export function getReportLeaderboard(
              FROM (
                SELECT DISTINCT ${keyCol} AS key, a.task_id, t.status
                FROM attempts a JOIN tasks t ON t.id = a.task_id
-               WHERE ${cohort.clause}${andKey}
+               WHERE ${cohort.clause}${andKey}${profileClause}
              )
              GROUP BY key`
           )
-          .all(...cohort.params)
+          .all(...cohort.params, ...profileParams)
       : db
           .prepare(
             `SELECT CAST(t.repo_id AS TEXT) AS key,
@@ -2454,11 +2467,11 @@ export function getReportLeaderboard(
             `SELECT key, AVG(cnt) AS avg_rework FROM (
                SELECT ${keyCol} AS key, a.task_id, COUNT(*) AS cnt
                FROM attempts a JOIN tasks t ON t.id = a.task_id
-               WHERE a.role = 'develop' AND ${cohort.clause}${andKey}
+               WHERE a.role = 'develop' AND ${cohort.clause}${andKey}${profileClause}
                GROUP BY ${keyCol}, a.task_id
              ) GROUP BY key`
           )
-          .all(...cohort.params)
+          .all(...cohort.params, ...profileParams)
       : db
           .prepare(
             `SELECT key, AVG(cnt) AS avg_rework FROM (
@@ -2548,6 +2561,46 @@ export function getReportLeaderboard(
   );
 
   return { range: { from: filter.from, to: filter.to }, group_by: groupBy, rows };
+}
+
+/** Performance gauge for a single (repo, model, harness) combination, backing
+ *  `GET /api/reports/profile-gauge`. Thin reuse of getReportLeaderboard: it
+ *  groups by model with the (model, harness) narrowing applied, so the numbers
+ *  are computed by the exact same SQL as the Reports leaderboard — no
+ *  duplicated stats logic. `filter` should already be pinned to the single
+ *  repo (filter.repos = [repoId]); the result reports `task_count` as the
+ *  sample size and flags `insufficient_data` when it falls below
+ *  GAUGE_MIN_SAMPLE so the UI never presents a misleading rate off a tiny or
+ *  empty set. */
+export function getReportProfileGauge(
+  filter: ReportFilter,
+  model: string,
+  harness: string
+): ProfileGauge {
+  const board = getReportLeaderboard(filter, 'model', { model, harness });
+  // With the harness constraint applied there is at most one model row.
+  const row = board.rows.find((r) => r.key === model) ?? null;
+  const repoId = filter.repos && filter.repos.length > 0 ? filter.repos[0] : 0;
+  const taskCount = row?.task_count ?? 0;
+
+  return {
+    repo_id: repoId,
+    model_id: model,
+    harness_id: harness,
+    range: { from: filter.from, to: filter.to },
+    task_count: taskCount,
+    insufficient_data: taskCount < GAUGE_MIN_SAMPLE,
+    success_rate: row?.success_rate ?? null,
+    terminal_counts: row?.terminal_counts ?? {
+      merged: 0,
+      failed: 0,
+      cancelled: 0,
+    },
+    avg_rework: row?.avg_rework ?? null,
+    avg_implementation_seconds: row?.avg_implementation_seconds ?? null,
+    avg_num_turns: row?.avg_num_turns ?? null,
+    avg_total_tokens: row?.avg_total_tokens ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------

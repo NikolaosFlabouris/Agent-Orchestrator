@@ -7,6 +7,7 @@ import type {
   ReportsOverview,
   ReportsTimeseries,
   ReportsLeaderboard,
+  ProfileGauge,
 } from '@orchestrator/shared';
 
 /** Reports API aggregation tests.
@@ -392,5 +393,106 @@ describe('GET /api/reports/leaderboard', () => {
     expect(r1!.success_rate).toBeCloseTo(0.5, 6);
     expect(r2!.task_count).toBe(1);
     expect(r2!.success_rate).toBeCloseTo(1, 6);
+  });
+});
+
+describe('GET /api/reports/profile-gauge', () => {
+  let app: FastifyInstance;
+  beforeEach(async () => {
+    app = await buildApp();
+  });
+
+  it('requires repo, model, and harness', async () => {
+    for (const url of [
+      `/api/reports/profile-gauge?model=m&harness=h&${Q}`,
+      `/api/reports/profile-gauge?repo=1&harness=h&${Q}`,
+      `/api/reports/profile-gauge?repo=1&model=m&${Q}`,
+      `/api/reports/profile-gauge?repo=notanumber&model=m&harness=h&${Q}`,
+    ]) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
+  it('flags a sparse (real but tiny) combination as insufficient data', async () => {
+    // sonnet + claude-sdk on repo 1 touched only T1 (merged) + T3 (failed) —
+    // n=2, below GAUGE_MIN_SAMPLE. The rates are still computed and returned,
+    // but the flag warns the UI not to present them as definitive.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/profile-gauge?repo=1&model=claude-sonnet-4-6&harness=claude-sdk&${Q}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as ProfileGauge;
+    expect(body.repo_id).toBe(1);
+    expect(body.model_id).toBe('claude-sonnet-4-6');
+    expect(body.harness_id).toBe('claude-sdk');
+    expect(body.task_count).toBe(2);
+    expect(body.insufficient_data).toBe(true);
+    expect(body.success_rate).toBeCloseTo(0.5, 6);
+    expect(body.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0 });
+    expect(body.avg_implementation_seconds).toBeCloseTo(3600, 1);
+  });
+
+  it('reports an empty combination as n=0 with null rates (never 0%/100%)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/profile-gauge?repo=1&model=does-not-exist&harness=nope&${Q}`,
+    });
+    const body = res.json() as ProfileGauge;
+    expect(body.task_count).toBe(0);
+    expect(body.insufficient_data).toBe(true);
+    // Critically: no misleading rate read off an empty set.
+    expect(body.success_rate).toBeNull();
+    expect(body.avg_rework).toBeNull();
+    expect(body.avg_implementation_seconds).toBeNull();
+    expect(body.avg_num_turns).toBeNull();
+    expect(body.avg_total_tokens).toBeNull();
+    expect(body.terminal_counts).toEqual({ merged: 0, failed: 0, cancelled: 0 });
+  });
+
+  it('returns confident stats once the sample clears the threshold', async () => {
+    // Seed a fresh combination on repo 1 with enough distinct tasks to clear
+    // GAUGE_MIN_SAMPLE (5): 4 merged + 1 failed + 1 cancelled = 6 terminal.
+    const db = getDb();
+    const task = db.prepare(
+      `INSERT INTO tasks (id, issue_id, repo_id, status, created_at, completed_at)
+       VALUES (?, ?, 1, ?, '2025-01-18 00:00:00', '2025-01-19T00:00:00.000Z')`
+    );
+    const attempt = db.prepare(
+      `INSERT INTO attempts
+         (task_id, attempt_number, role, status, started_at, completed_at, model_id, harness_id)
+       VALUES (?, 1, 'develop', 'completed', ?, ?, 'big-model', 'big-harness')`
+    );
+    const statuses = ['merged', 'merged', 'merged', 'merged', 'failed', 'cancelled'];
+    statuses.forEach((status, i) => {
+      const id = 200 + i;
+      task.run(id, 200 + i, status);
+      // 1800s each → avg implementation duration is a clean 1800.
+      attempt.run(id, '2025-01-18T10:00:00.000Z', '2025-01-18T10:30:00.000Z');
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/profile-gauge?repo=1&model=big-model&harness=big-harness&${Q}`,
+    });
+    const body = res.json() as ProfileGauge;
+    expect(body.task_count).toBe(6);
+    expect(body.insufficient_data).toBe(false);
+    expect(body.success_rate).toBeCloseTo(4 / 6, 6);
+    expect(body.terminal_counts).toEqual({ merged: 4, failed: 1, cancelled: 1 });
+    expect(body.avg_implementation_seconds).toBeCloseTo(1800, 1);
+    expect(body.avg_rework).toBeCloseTo(1, 6);
+  });
+
+  it('respects the repo filter — same combo on another repo is empty', async () => {
+    // gpt-4o + opencode exists only on repo 2 (T8); querying repo 1 finds none.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/profile-gauge?repo=1&model=gpt-4o&harness=opencode&${Q}`,
+    });
+    const body = res.json() as ProfileGauge;
+    expect(body.task_count).toBe(0);
+    expect(body.success_rate).toBeNull();
   });
 });

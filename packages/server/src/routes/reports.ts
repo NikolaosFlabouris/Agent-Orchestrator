@@ -7,6 +7,7 @@ import {
   getReportFunnel,
   getReportReliability,
   getReportHeatmap,
+  getReportProfileGauge,
 } from '../db.js';
 import { DEFAULT_REPORT_WINDOW_DAYS } from '../constants.js';
 import type {
@@ -137,6 +138,33 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
     const filter = parseFilter(query);
     const bucket = query.bucket === 'week' ? 'week' : 'day';
     return getReportReliability(filter, bucket);
+  });
+
+  // GET /api/reports/profile-gauge?repo=&model=&harness= — performance gauge
+  // for one (repo, model, harness) combination, used inline on the Create Task
+  // screen. Reuses the leaderboard aggregation narrowed to a single repo +
+  // model/harness (no duplicated stats SQL). `repo`, `model`, and `harness`
+  // are required — the gauge is always about a concrete combination — but the
+  // common `from`/`to` window is optional and defaults like every other
+  // endpoint. Auth is handled by the global hook, same as the rest.
+  app.get('/api/reports/profile-gauge', async (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+
+    const repoRaw = query.repo;
+    const repoId =
+      typeof repoRaw === 'string' ? parseInt(repoRaw, 10) : NaN;
+    const model = typeof query.model === 'string' ? query.model.trim() : '';
+    const harness = typeof query.harness === 'string' ? query.harness.trim() : '';
+
+    if (!Number.isInteger(repoId) || model === '' || harness === '') {
+      return reply
+        .status(400)
+        .send({ error: 'repo (integer), model, and harness are required' });
+    }
+
+    // Reuse the shared from/to parsing, but pin the cohort to the one repo.
+    const filter = { ...parseFilter(query), repos: [repoId] };
+    return getReportProfileGauge(filter, model, harness);
   });
 
   // GET /api/reports/heatmap?metric=created|merged — hour-of-day × day-of-week

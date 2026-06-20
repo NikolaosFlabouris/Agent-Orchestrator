@@ -98,3 +98,10 @@ export const CACHES_ROOT = '/caches';
  *  stale profile/model assignments don't dominate the aggregates. The
  *  report endpoints treat `from` as inclusive and `to` as exclusive. */
 export const DEFAULT_REPORT_WINDOW_DAYS = 90;
+
+/** Minimum number of distinct tasks a (repo, model, harness) combination must
+ *  have in-window before the Create-Task performance gauge treats its rates as
+ *  trustworthy. Below this the gauge still returns the raw numbers but flags
+ *  `insufficient_data` so the UI shows an explicit low-confidence state rather
+ *  than a misleading rate read off a tiny sample. */
+export const GAUGE_MIN_SAMPLE = 5;

@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import type { RepoResponse, AgentProfileResponse, IssueResponse } from '../api.js';
 import { useStore } from '../store.js';
 import { AppHeader } from '../components/AppHeader.js';
+import { ProfileGaugeCard } from '../components/ProfileGaugeCard.js';
 import ReactMarkdown from 'react-markdown';
 
 type Mode = 'create' | 'queue';
@@ -329,6 +330,25 @@ export function CreateTask() {
               />
             </div>
           </div>
+
+          {/* Advisory performance gauge for the selected repo + implementation
+              profile. Shown only when an explicit profile is picked (inherited
+              defaults aren't resolved to a concrete model client-side) and the
+              profile resolves to a model. Purely a hint — never gates submit. */}
+          {(() => {
+            if (!repoId || !agentProfile) return null;
+            const selected = profiles.find((p) => p.id === agentProfile);
+            if (!selected || !selected.model_id) return null;
+            return (
+              <ProfileGaugeCard
+                key={`${repoId}:${selected.id}`}
+                repoId={repoId}
+                modelId={selected.model_id}
+                harnessId={selected.harness_id}
+                profileLabel={selected.display_name}
+              />
+            );
+          })()}
 
           {/* Dependencies */}
           <div>
