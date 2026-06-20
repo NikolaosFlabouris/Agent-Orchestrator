@@ -1,3 +1,10 @@
+import type {
+  ReportsOverview,
+  ReportsTimeseries,
+  ReportsLeaderboard,
+  LeaderboardGroupBy,
+} from '@orchestrator/shared';
+
 const BASE = '';
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -20,6 +27,35 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
   if (res.status === 204) return undefined as T;
   return res.json();
+}
+
+/** Common filter accepted by every `/api/reports/*` endpoint. `repos`
+ *  omitted/empty = all repos; `from`/`to` omitted = the backend default
+ *  window. Values are ISO strings (or `YYYY-MM-DD`, which the server parses
+ *  as UTC midnight). */
+export interface ReportQuery {
+  repos?: number[];
+  from?: string;
+  to?: string;
+}
+
+/** Serialise a ReportQuery (plus the endpoint-specific `bucket`/`groupBy`)
+ *  into a `?…` string, omitting empty params so the server falls back to its
+ *  defaults. Mirrors the server-side `parseFilter` contract in reports.ts. */
+function reportQuery(
+  filter?: ReportQuery,
+  extra?: { bucket?: 'day' | 'week'; groupBy?: LeaderboardGroupBy }
+): string {
+  const qs = new URLSearchParams();
+  if (filter?.repos && filter.repos.length > 0) {
+    qs.set('repos', filter.repos.join(','));
+  }
+  if (filter?.from) qs.set('from', filter.from);
+  if (filter?.to) qs.set('to', filter.to);
+  if (extra?.bucket) qs.set('bucket', extra.bucket);
+  if (extra?.groupBy) qs.set('groupBy', extra.groupBy);
+  const query = qs.toString();
+  return query ? `?${query}` : '';
 }
 
 export const api = {
@@ -109,6 +145,23 @@ export const api = {
     request<ModelResponse>('PATCH', `/api/models/${pk}`, data),
   deleteModel: (pk: number) =>
     request<void>('DELETE', `/api/models/${pk}`),
+
+  // -- Reports (read-only aggregates) --
+  getReportOverview: (filter?: ReportQuery) =>
+    request<ReportsOverview>(
+      'GET',
+      `/api/reports/overview${reportQuery(filter)}`
+    ),
+  getReportTimeseries: (filter?: ReportQuery, bucket?: 'day' | 'week') =>
+    request<ReportsTimeseries>(
+      'GET',
+      `/api/reports/timeseries${reportQuery(filter, { bucket })}`
+    ),
+  getReportLeaderboard: (groupBy: LeaderboardGroupBy, filter?: ReportQuery) =>
+    request<ReportsLeaderboard>(
+      'GET',
+      `/api/reports/leaderboard${reportQuery(filter, { groupBy })}`
+    ),
 
   // -- Harnesses (read-only registry) --
   getHarnesses: () =>
