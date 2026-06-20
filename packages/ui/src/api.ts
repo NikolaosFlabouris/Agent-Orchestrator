@@ -353,6 +353,12 @@ export interface AttemptResponse {
   input_tokens: number | null;
   output_tokens: number | null;
   tool_calls: number | null;
+  /** PR code-churn stats captured at review/merge time (#116). NULL =
+   *  unknown (a develop attempt, a pre-#116 row, or a failed PR fetch);
+   *  never conflate with a real 0. */
+  changed_files: number | null;
+  additions: number | null;
+  deletions: number | null;
   feedback: string | null;
 }
 

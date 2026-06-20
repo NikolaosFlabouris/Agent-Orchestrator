@@ -85,6 +85,16 @@ export interface Attempt {
   /** Number of tool invocations the run made, when the harness reports
    *  it. NULL = unknown / not reported. */
   tool_calls: number | null;
+  /** Code-churn stats for the task's PR, captured at review/merge time
+   *  from the Forgejo PR object and persisted onto the review attempt
+   *  (#116). The number of files the PR touches. NULL = unknown (a
+   *  develop attempt, a pre-#116 row, or a review where the PR fetch
+   *  failed); never conflate with a real 0. */
+  changed_files: number | null;
+  /** Lines added in the PR. Raw count; NULL = unknown (see changed_files). */
+  additions: number | null;
+  /** Lines deleted in the PR. Raw count; NULL = unknown. */
+  deletions: number | null;
 }
 
 /** Per-run effort metrics emitted by the in-container harness into
@@ -500,6 +510,20 @@ export interface LeaderboardRow {
   total_input_tokens: number;
   /** Summed output tokens across the group (0 when none reported). */
   total_output_tokens: number;
+  /** Average changed-files count per review attempt in this group that
+   *  captured PR diff stats (#116). Attempts with NULL stats (develop
+   *  attempts, pre-#116 rows, failed PR fetches) are excluded from the
+   *  average — never counted as 0. NULL when no attempt reported stats. */
+  avg_changed_files: number | null;
+  /** Average lines added per review attempt that reported diff stats.
+   *  NULL-stat attempts excluded; NULL when none reported. */
+  avg_additions: number | null;
+  /** Average lines deleted per review attempt that reported diff stats.
+   *  NULL-stat attempts excluded; NULL when none reported. */
+  avg_deletions: number | null;
+  /** Average total churn (additions + deletions) per review attempt that
+   *  reported diff stats. NULL-stat attempts excluded; NULL when none. */
+  avg_total_churn: number | null;
   verdicts: { approved: number; changes_needed: number; unclear: number };
 }
 

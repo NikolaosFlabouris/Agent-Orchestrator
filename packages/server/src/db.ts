@@ -38,7 +38,7 @@ import type {
 } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 29;
+const CURRENT_SCHEMA_VERSION = 30;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -208,7 +208,16 @@ function createTables(db: Database.Database): void {
       num_turns INTEGER,
       input_tokens INTEGER,
       output_tokens INTEGER,
-      tool_calls INTEGER
+      tool_calls INTEGER,
+      -- PR code-churn stats (v30), captured at review/merge time from the
+      -- Forgejo PR object and persisted onto the review attempt (the run
+      -- already happened — immutable per-run facts, no snapshot concern).
+      -- All nullable: NULL means "unknown" (a develop attempt, a pre-v30
+      -- row, or a review where the PR fetch failed) and must never be
+      -- conflated with a real 0. Reported as-is — no churn is derived here.
+      changed_files INTEGER,
+      additions INTEGER,
+      deletions INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
@@ -642,6 +651,29 @@ function runMigrations(db: Database.Database): void {
           'output_tokens',
           'tool_calls',
         ]) {
+          if (!hasColumn('attempts', col)) {
+            db.exec(`ALTER TABLE attempts ADD COLUMN ${col} INTEGER`);
+          }
+        }
+      }
+      if (version < 30) {
+        // v30: PR code-churn stats (changed_files / additions / deletions)
+        // on the review attempt, captured from the already-fetched Forgejo
+        // PR object at review/merge time. All nullable — existing rows get
+        // NULL (unknown), which the reports/UI distinguish from a real 0.
+        // createTables holds the canonical shape; the ALTERs below
+        // forward-migrate existing installs. SQLite has no ADD COLUMN IF
+        // NOT EXISTS, so guard via pragma_table_info to stay idempotent
+        // after a partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        for (const col of ['changed_files', 'additions', 'deletions']) {
           if (!hasColumn('attempts', col)) {
             db.exec(`ALTER TABLE attempts ADD COLUMN ${col} INTEGER`);
           }
@@ -1124,6 +1156,9 @@ export function updateAttempt(
       | 'input_tokens'
       | 'output_tokens'
       | 'tool_calls'
+      | 'changed_files'
+      | 'additions'
+      | 'deletions'
     >
   >
 ): void {
@@ -2342,6 +2377,13 @@ export function getReportLeaderboard(
              END) AS avg_total_tokens,
          SUM(COALESCE(a.input_tokens, 0)) AS sum_input,
          SUM(COALESCE(a.output_tokens, 0)) AS sum_output,
+         AVG(a.changed_files) AS avg_changed_files,
+         AVG(a.additions) AS avg_additions,
+         AVG(a.deletions) AS avg_deletions,
+         AVG(CASE
+               WHEN a.additions IS NOT NULL OR a.deletions IS NOT NULL
+               THEN COALESCE(a.additions, 0) + COALESCE(a.deletions, 0)
+             END) AS avg_total_churn,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'approved' THEN 1 ELSE 0 END) AS v_approved,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'changes_needed' THEN 1 ELSE 0 END) AS v_changes,
          SUM(CASE WHEN a.role = 'review' AND a.verdict = 'unclear' THEN 1 ELSE 0 END) AS v_unclear
@@ -2357,6 +2399,10 @@ export function getReportLeaderboard(
     avg_total_tokens: number | null;
     sum_input: number;
     sum_output: number;
+    avg_changed_files: number | null;
+    avg_additions: number | null;
+    avg_deletions: number | null;
+    avg_total_churn: number | null;
     v_approved: number;
     v_changes: number;
     v_unclear: number;
@@ -2451,6 +2497,10 @@ export function getReportLeaderboard(
         avg_total_tokens: null,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        avg_changed_files: null,
+        avg_additions: null,
+        avg_deletions: null,
+        avg_total_churn: null,
         verdicts: { approved: 0, changes_needed: 0, unclear: 0 },
       };
       byKey.set(key, row);
@@ -2466,6 +2516,10 @@ export function getReportLeaderboard(
     row.avg_total_tokens = numOrNull(m.avg_total_tokens);
     row.total_input_tokens = Number(m.sum_input) || 0;
     row.total_output_tokens = Number(m.sum_output) || 0;
+    row.avg_changed_files = numOrNull(m.avg_changed_files);
+    row.avg_additions = numOrNull(m.avg_additions);
+    row.avg_deletions = numOrNull(m.avg_deletions);
+    row.avg_total_churn = numOrNull(m.avg_total_churn);
     row.verdicts = {
       approved: Number(m.v_approved),
       changes_needed: Number(m.v_changes),

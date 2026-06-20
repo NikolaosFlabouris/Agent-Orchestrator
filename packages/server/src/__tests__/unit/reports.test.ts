@@ -346,6 +346,37 @@ describe('GET /api/reports/leaderboard', () => {
     expect(opus.total_output_tokens).toBe(0);
   });
 
+  it('aggregates avg PR churn from review attempts, excluding NULL-stat rows', async () => {
+    // Attach diff stats (#116) to sonnet's T1 review attempt only. Develop
+    // attempts and sonnet's other (T3) review attempt stay NULL. The averages
+    // must divide by the single review row that captured stats — a NULL must
+    // not be read as a 0.
+    const db = getDb();
+    db.prepare(
+      `UPDATE attempts SET changed_files = 5, additions = 100, deletions = 20
+         WHERE task_id = 1 AND role = 'review' AND attempt_number = 1`
+    ).run();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/leaderboard?groupBy=model&repos=1&${Q}`,
+    });
+    const body = res.json() as ReportsLeaderboard;
+
+    const sonnet = body.rows.find((r) => r.key === 'claude-sonnet-4-6')!;
+    expect(sonnet.avg_changed_files).toBeCloseTo(5, 6);
+    expect(sonnet.avg_additions).toBeCloseTo(100, 6);
+    expect(sonnet.avg_deletions).toBeCloseTo(20, 6);
+    expect(sonnet.avg_total_churn).toBeCloseTo(120, 6);
+
+    // opus (T2) captured no stats → every churn average is NULL (unknown).
+    const opus = body.rows.find((r) => r.key === 'claude-opus-4-7')!;
+    expect(opus.avg_changed_files).toBeNull();
+    expect(opus.avg_additions).toBeNull();
+    expect(opus.avg_deletions).toBeNull();
+    expect(opus.avg_total_churn).toBeNull();
+  });
+
   it('groups by repo across all repos, with owner/name labels', async () => {
     const res = await app.inject({
       method: 'GET',

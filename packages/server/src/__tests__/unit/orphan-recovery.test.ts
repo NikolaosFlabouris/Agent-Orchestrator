@@ -106,6 +106,9 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     input_tokens: null,
     output_tokens: null,
     tool_calls: null,
+    changed_files: null,
+    additions: null,
+    deletions: null,
     ...overrides,
   };
 }

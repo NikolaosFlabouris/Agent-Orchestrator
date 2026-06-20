@@ -52,6 +52,10 @@ const modelBoard: ReportsLeaderboard = {
       avg_total_tokens: 900,
       total_input_tokens: 1200,
       total_output_tokens: 600,
+      avg_changed_files: 4,
+      avg_additions: 120,
+      avg_deletions: 30,
+      avg_total_churn: 150,
       verdicts: { approved: 3, changes_needed: 1, unclear: 0 },
     },
   ],
@@ -121,6 +125,12 @@ describe('toCsv', () => {
   it('includes a leaderboard table with a header and rows', () => {
     expect(csv).toContain('Leaderboard: model');
     expect(csv).toContain('group_by,key,label,task_count');
+  });
+
+  it('includes the PR churn columns in the leaderboard export', () => {
+    expect(csv).toContain('avg_changed_files,avg_additions,avg_deletions,avg_total_churn');
+    // The fixture row carries churn 4 files / +120 / -30 / 150 total.
+    expect(csv).toContain(',4,120,30,150,');
   });
 
   it('escapes fields containing commas by quoting them', () => {

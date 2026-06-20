@@ -59,6 +59,14 @@ export function formatTurns(n: number | null | undefined): string {
   return trim(n);
 }
 
+/** Code-churn line count (additions/deletions) → compact integer-ish with
+ *  thousands separators (e.g. 0, 850, 1,200). NULL/non-finite render as "—"
+ *  so "unknown" never shows as 0. Averages are rounded to whole lines. */
+export function formatChurn(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return EMPTY;
+  return Math.round(n).toLocaleString();
+}
+
 /** Signed relative change between two values, or null when it can't be
  *  computed (missing data or a zero baseline, which would divide by zero). */
 export function relativeDelta(

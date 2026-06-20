@@ -6,6 +6,8 @@ import {
   getTask,
   updateTask,
   getReviewFeedbackHistory,
+  getLatestAttempt,
+  updateAttempt,
 } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
@@ -584,6 +586,25 @@ export async function processReviewVerdict(
     'review_verdict',
     `Review verdict: ${review.verdict}${statsSuffix}${review.summary ? ' — ' + review.summary : ''}`
   );
+
+  // Promote the already-fetched PR diff stats to structured columns on the
+  // review attempt (#116) so churn is queryable per model/harness/repo in
+  // the reports. This reuses the very same `prStats` object that fed the
+  // verdict event above — no second Forgejo round-trip. The review attempt
+  // is the most-recently-inserted row at this point (completeAttempt just
+  // finalised it before processReviewVerdict ran). Best effort: when the
+  // fetch failed (prStats null) or no attempt row exists, the columns stay
+  // NULL (unknown), never 0.
+  if (prStats) {
+    const reviewAttempt = getLatestAttempt(task.id);
+    if (reviewAttempt) {
+      updateAttempt(reviewAttempt.id, {
+        changed_files: prStats.changed_files,
+        additions: prStats.additions,
+        deletions: prStats.deletions,
+      });
+    }
+  }
 
   // Guard: an "approved" verdict on a zero-diff PR is a model hallucination.
   // postDevAgent's PR-create check should have prevented us from ever
