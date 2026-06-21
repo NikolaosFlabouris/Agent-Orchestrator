@@ -90,6 +90,98 @@ export async function cancelTask(
   scheduler.triggerTick();
 }
 
+/**
+ * Close a task — resolve a task that needs no further orchestration (e.g. one
+ * that `failed` with "no changes produced" because the work was already done).
+ *
+ * Shares cancelTask's cleanup (stop container, delete branch, close PR) but
+ * ALSO closes the Forgejo issue, and — unlike cancel — works on terminal
+ * statuses such as `failed`. The orchestrator task lands in the existing
+ * `cancelled` terminal status: here "cancelled" means orchestration was
+ * stopped because there is no work to perform. No new TaskStatus is introduced.
+ *
+ * Idempotent/best-effort against Forgejo: closing an already-closed issue or a
+ * missing branch/PR is swallowed.
+ */
+export async function closeTask(
+  task: Task,
+  forgejo: ForgejoClient,
+  scheduler: Scheduler,
+  log: FastifyBaseLogger,
+  reason: string = 'Closed by human'
+): Promise<void> {
+  const repo = getRepo(task.repo_id);
+
+  // 1. Stop running container
+  if (task.container_id) {
+    try {
+      const container = getContainer(task.container_id);
+      await stopContainer(container);
+      await removeContainer(container);
+    } catch {
+      // Container may already be gone
+    }
+  }
+
+  // 2. Delete remote branch
+  if (task.branch_name && repo) {
+    try {
+      await forgejo.deleteBranch(repo, task.branch_name);
+    } catch {
+      // Branch may not exist on remote
+    }
+  }
+
+  // 3. Close PR if opened
+  if (task.pr_number && repo) {
+    try {
+      await forgejo.closePullRequest(repo, task.pr_number);
+    } catch {
+      // Best effort
+    }
+  }
+
+  // 4. Update + close the Forgejo issue. Closing the issue is the new
+  //    behaviour vs cancelTask — a closed task is fully resolved, not just
+  //    unqueued. Each step is best-effort so a Forgejo hiccup (or an
+  //    already-closed issue) doesn't block the local status transition.
+  if (repo) {
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Task closed by human: ${reason}. Branch and PR cleaned up; issue closed.`
+      );
+    } catch { /* best effort */ }
+
+    try {
+      await forgejo.replaceLabelByNames(repo, task.issue_id, [
+        'status/cancelled',
+      ]);
+    } catch { /* best effort */ }
+
+    try {
+      await forgejo.closeIssue(repo, task.issue_id);
+    } catch { /* best effort — issue may already be closed */ }
+  }
+
+  // 5. Update DB
+  recordTaskEvent(task.id, 'task_closed', `Closed: ${reason}`);
+  updateTaskWithSync(task.id, {
+    status: 'cancelled',
+    container_id: null,
+    completed_at: new Date().toISOString(),
+  });
+
+  log.info(
+    { event: 'task_closed', task_id: task.id, reason },
+    'Task closed'
+  );
+
+  // 6. Trigger fill to use freed slot
+  scheduler.triggerTick();
+}
+
 export interface ResetOptions {
   /** Human-readable reason, surfaced in the task timeline and the Forgejo
    *  issue comment. Defaults to "Reset by user". */
