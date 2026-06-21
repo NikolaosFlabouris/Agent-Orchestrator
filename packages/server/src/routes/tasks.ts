@@ -18,7 +18,7 @@ import {
 import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
-import { cancelTask, resetTask, requeueTask, extendTask } from '../actions.js';
+import { cancelTask, closeTask, resetTask, requeueTask, extendTask } from '../actions.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
@@ -505,6 +505,28 @@ export function createTaskRoutes(
               scheduler,
               log,
               (body.reason as string) ?? 'Cancelled by user'
+            );
+            break;
+          }
+
+          case 'close': {
+            // Human-driven resolution for a task that needs no further
+            // orchestration (e.g. a `failed` task whose work was already
+            // done). Available in ANY status except `merged` — closing a
+            // merged task would regress a real success. Unlike `cancel`,
+            // this also closes the Forgejo issue and works on terminal
+            // statuses such as `failed`.
+            if (task.status === 'merged') {
+              return reply.status(400).send({
+                error: 'Cannot close a merged task — it represents a completed success.',
+              });
+            }
+            await closeTask(
+              task,
+              forgejo,
+              scheduler,
+              log,
+              (body.reason as string) ?? 'Closed by human'
             );
             break;
           }

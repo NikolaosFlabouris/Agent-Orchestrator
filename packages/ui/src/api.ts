@@ -441,6 +441,7 @@ export interface QueueTaskRequest {
 export type TaskAction =
   | { action: 'reorder'; queue_position: number }
   | { action: 'cancel'; reason?: string }
+  | { action: 'close'; reason?: string }
   | { action: 'force_approve' }
   | { action: 'force_fail'; reason?: string }
   | { action: 'reset' }

@@ -93,6 +93,13 @@ export function TaskDetail() {
     // Confirmation for destructive actions
     if (actionName === 'cancel') {
       if (!confirm('Cancel this task? Container will be stopped and branch/PR cleaned up.')) return;
+    } else if (actionName === 'close') {
+      // An open PR means real changes are about to be discarded — warn
+      // explicitly. Without a PR, a lighter confirm is enough.
+      const message = task.pr_number != null
+        ? `Close this task? Its open PR #${task.pr_number} has changes that will be closed and discarded, the branch deleted, and the Forgejo issue closed. Continue?`
+        : 'Close this task? The Forgejo issue will be closed and the task marked cancelled.';
+      if (!confirm(message)) return;
     } else if (actionName === 'reset') {
       if (!confirm('This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?')) return;
     } else if (actionName === 'force_fail') {
@@ -536,6 +543,16 @@ export function TaskDetail() {
               className="text-sm px-3 py-1.5 rounded border border-red-800 text-red-400 hover:bg-red-950 disabled:opacity-50"
             >
               Cancel
+            </button>
+          )}
+          {task.status !== 'merged' && (
+            <button
+              onClick={() => handleAction({ action: 'close' })}
+              disabled={actionPending}
+              className="text-sm px-3 py-1.5 rounded border border-red-800 text-red-400 hover:bg-red-950 disabled:opacity-50"
+              title="Resolve this task: close the Forgejo issue and mark the task cancelled"
+            >
+              Close
             </button>
           )}
           {task.status === 'in-review' && (
