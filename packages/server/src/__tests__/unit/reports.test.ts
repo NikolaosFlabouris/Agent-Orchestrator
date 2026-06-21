@@ -2,12 +2,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { initDatabase, getDb } from '../../db.js';
-import { reportsRoutes } from '../../routes/reports.js';
+import { createReportsRoutes } from '../../routes/reports.js';
+import type { ForgejoClient } from '../../forgejo.js';
 import type {
   ReportsOverview,
   ReportsTimeseries,
   ReportsLeaderboard,
   ProfileGauge,
+  ReportsTasksPage,
 } from '@orchestrator/shared';
 
 /** Reports API aggregation tests.
@@ -101,7 +103,7 @@ async function buildApp(): Promise<FastifyInstance> {
   initDatabase(':memory:');
   seed();
   const app = Fastify({ logger: false });
-  await app.register(reportsRoutes);
+  await app.register(createReportsRoutes({} as unknown as ForgejoClient));
   await app.ready();
   return app;
 }
@@ -494,5 +496,69 @@ describe('GET /api/reports/profile-gauge', () => {
     const body = res.json() as ProfileGauge;
     expect(body.task_count).toBe(0);
     expect(body.success_rate).toBeNull();
+  });
+});
+
+describe('GET /api/reports/tasks', () => {
+  let app: FastifyInstance;
+  beforeEach(async () => {
+    app = await buildApp();
+  });
+
+  it('returns a paged, most-recent-first slice with a stable total', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/tasks?repos=1&${Q}&limit=2&offset=0`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as ReportsTasksPage;
+
+    // Cohort = T1..T6 (repo1, created in Jan); T7 (Feb)/T8 (repo2) excluded.
+    expect(body.total).toBe(6);
+    expect(body.limit).toBe(2);
+    expect(body.offset).toBe(0);
+    expect(body.tasks).toHaveLength(2);
+    // created_desc default: T6 (Jan 26) then T5 (Jan 25).
+    expect(body.tasks.map((t) => t.id)).toEqual([6, 5]);
+    // Page is enriched: derived status (falls back to stored with stub
+    // Forgejo) plus repo info and the issue-number title fallback.
+    expect(body.tasks[0].status).toBe('queued');
+    expect(body.tasks[0].repo).toEqual({ id: 1, owner: 'o', name: 'r1' });
+    expect(body.tasks[0].issue_title).toBe('Issue #6');
+  });
+
+  it('keeps the total constant across pages', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/tasks?repos=1&${Q}&limit=2&offset=4`,
+    });
+    const body = res.json() as ReportsTasksPage;
+    expect(body.total).toBe(6); // unchanged by offset
+    expect(body.tasks.map((t) => t.id)).toEqual([2, 1]);
+  });
+
+  it('filters by status and surfaces the model/harness snapshot', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/tasks?repos=1&${Q}&status=merged`,
+    });
+    const body = res.json() as ReportsTasksPage;
+    expect(body.total).toBe(2); // T1, T2
+    expect(body.tasks.map((t) => t.id)).toEqual([2, 1]);
+    const t1 = body.tasks.find((t) => t.id === 1)!;
+    expect(t1.model_id).toBe('claude-sonnet-4-6');
+    expect(t1.harness_id).toBe('claude-sdk');
+    expect(t1.attempts).toBe(1);
+  });
+
+  it('searches by issue number', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/tasks?${Q}&search=8`,
+    });
+    const body = res.json() as ReportsTasksPage;
+    // Issue #8 is repo 2, in window — reachable with no repo filter.
+    expect(body.total).toBe(1);
+    expect(body.tasks[0].issue_id).toBe(8);
   });
 });

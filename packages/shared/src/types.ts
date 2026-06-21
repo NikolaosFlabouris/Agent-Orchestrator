@@ -44,6 +44,24 @@ export type TaskStatus =
   | 'needs-human-review'
   | 'reset';
 
+/** Every TaskStatus as a runtime array (mirrors the union above). Used to
+ *  zero-fill status maps, validate a `status` query param, and populate the
+ *  Reports status filter. Keep in sync with the TaskStatus union. */
+export const TASK_STATUSES: TaskStatus[] = [
+  'queued',
+  'preparing',
+  'in-progress',
+  'in-review',
+  'changes-needed',
+  'merged',
+  'failed',
+  'cancelled',
+  'awaiting-human-merge',
+  'awaiting-human-review',
+  'needs-human-review',
+  'reset',
+];
+
 export interface Attempt {
   id: number;
   task_id: number;
@@ -699,4 +717,59 @@ export interface ReportsHeatmap {
   cells: HeatmapCell[];
   /** Largest single-cell count (0 when empty) — the UI's colour-scale max. */
   max: number;
+}
+
+// --- All Tasks browser (paginated task history) ---------------------------
+//
+// Unlike the aggregate endpoints above, `GET /api/reports/tasks` returns
+// individual task rows so the Reports page can offer a paginated, filterable
+// browser over the FULL task history (every task is reachable regardless of
+// age). It reuses the common ReportFilter (repos + from/to) and adds a
+// status filter, a free-text search, sorting, and offset/limit pagination.
+
+/** Sort orders for the All Tasks browser. The default is `created_desc`
+ *  (most-recent first). */
+export type ReportTasksSort =
+  | 'created_desc'
+  | 'created_asc'
+  | 'completed_desc'
+  | 'completed_asc';
+
+/** One row in the All Tasks browser. Base task columns plus the model/harness
+ *  snapshot from the task's most recent attempt and the develop-attempt count.
+ *  `status` is the Forgejo-derived status (resolved for the returned page
+ *  only); `runtime_status` preserves the stored orchestrator state. */
+export interface ReportTaskRow {
+  id: number;
+  issue_id: number;
+  issue_title: string;
+  repo: { id: number; owner: string; name: string } | null;
+  pr_number: number | null;
+  /** Forgejo-derived status — what the UI should show. */
+  status: TaskStatus;
+  /** Stored orchestrator status before derivation. */
+  runtime_status: TaskStatus;
+  /** Develop-attempt count (how many implementation passes ran). */
+  attempts: number;
+  max_attempts: number;
+  /** Model id snapshot from the most recent attempt (null = none ran). */
+  model_id: string | null;
+  /** Harness id snapshot from the most recent attempt (null = none ran). */
+  harness_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+/** Paged response for `GET /api/reports/tasks`. */
+export interface ReportsTasksPage {
+  range: { from: string; to: string };
+  repos: number[] | null;
+  /** Total rows matching the filter (ignoring offset/limit) — drives the
+   *  "showing X of N" count and the pager. */
+  total: number;
+  offset: number;
+  limit: number;
+  sort: ReportTasksSort;
+  tasks: ReportTaskRow[];
 }

@@ -23,10 +23,15 @@ import type {
   ReportsFunnel,
   ReportsReliability,
   ReportsHeatmap,
+  ReportsTasksPage,
+  ReportTaskRow,
+  ReportTasksSort,
   DurationMetric,
   LeaderboardRow,
   TaskStatus,
 } from '@orchestrator/shared';
+import { TASK_STATUSES } from '@orchestrator/shared';
+import { useStore } from '../store.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { KpiCard } from '../components/KpiCard.js';
 import { ChartCard } from '../components/ChartCard.js';
@@ -104,6 +109,12 @@ export function Reports() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Forgejo base URL for the per-row issue links. The Dashboard normally
+  // seeds this from a status poll; populate it here too so /reports works
+  // when opened directly (deep link / refresh).
+  const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+  const setForgejoBaseUrl = useStore((s) => s.setForgejoBaseUrl);
+
   // Repo list for the filter chips + per-row labels. Fetched once.
   useEffect(() => {
     api
@@ -111,6 +122,14 @@ export function Reports() {
       .then((res) => setRepos(res.repos))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (forgejoBaseUrl) return;
+    api
+      .getStatus()
+      .then((s) => setForgejoBaseUrl(s.forgejo_base_url))
+      .catch(() => {});
+  }, [forgejoBaseUrl, setForgejoBaseUrl]);
 
   const repoKey = selectedRepoIds.join(',');
 
@@ -318,6 +337,15 @@ export function Reports() {
             <RepoScorecard board={data.repoBoard} />
           </>
         ) : null}
+
+        {/* Full task history — independent of the aggregate bundle above so a
+            reporting hiccup doesn't hide the browser, and vice versa. */}
+        <AllTasksSection
+          selectedRepoIds={selectedRepoIds}
+          from={from}
+          to={to}
+          forgejoBaseUrl={forgejoBaseUrl}
+        />
       </main>
     </div>
   );
@@ -1102,6 +1130,310 @@ function ReliabilitySection({
         )}
       </div>
     </ChartCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// All Tasks browser (paginated task history)
+// ---------------------------------------------------------------------------
+
+const TASKS_PAGE_SIZE = 25;
+
+const TASK_STATUS_BADGE: Record<string, string> = {
+  'in-progress': 'bg-blue-900 text-blue-300',
+  'in-review': 'bg-purple-900 text-purple-300',
+  'changes-needed': 'bg-yellow-900 text-yellow-300',
+  preparing: 'bg-gray-700 text-gray-300',
+  queued: 'bg-yellow-900 text-yellow-300',
+  merged: 'bg-green-900 text-green-300',
+  failed: 'bg-red-900 text-red-300',
+  cancelled: 'bg-gray-700 text-gray-400',
+  reset: 'bg-gray-700 text-gray-400',
+  'awaiting-human-merge': 'bg-orange-900 text-orange-300',
+  'awaiting-human-review': 'bg-orange-900 text-orange-300',
+  'needs-human-review': 'bg-orange-900 text-orange-300',
+};
+
+function TaskStatusBadge({ status }: { status: string }) {
+  return (
+    <span
+      className={`whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ${
+        TASK_STATUS_BADGE[status] ?? 'bg-gray-700 text-gray-300'
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+/** Compact `YYYY-MM-DD HH:MM` (UTC) for the created/completed columns. */
+function formatTimestamp(ts: string | null): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)}`;
+}
+
+const TASK_SORTS: { value: ReportTasksSort; label: string }[] = [
+  { value: 'created_desc', label: 'Newest' },
+  { value: 'created_asc', label: 'Oldest' },
+  { value: 'completed_desc', label: 'Completed ↓' },
+  { value: 'completed_asc', label: 'Completed ↑' },
+];
+
+function AllTasksSection({
+  selectedRepoIds,
+  from,
+  to,
+  forgejoBaseUrl,
+}: {
+  selectedRepoIds: number[];
+  from: string;
+  to: string;
+  forgejoBaseUrl: string;
+}) {
+  const [status, setStatus] = useState<TaskStatus | ''>('');
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<ReportTasksSort>('created_desc');
+  const [offset, setOffset] = useState(0);
+
+  const [page, setPage] = useState<ReportsTasksPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const repoKey = selectedRepoIds.join(',');
+
+  // Debounce the search box so each keystroke doesn't fire a request.
+  useEffect(() => {
+    const id = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(id);
+  }, [searchInput]);
+
+  // Any filter change that alters the result set resets to the first page.
+  useEffect(() => {
+    setOffset(0);
+  }, [repoKey, from, to, status, search, sort]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api
+      .getReportTasks({
+        repos: selectedRepoIds.length > 0 ? selectedRepoIds : undefined,
+        from,
+        to,
+        status: status || undefined,
+        search: search || undefined,
+        sort,
+        offset,
+        limit: TASKS_PAGE_SIZE,
+      })
+      .then((res) => {
+        if (cancelled) return;
+        setPage(res);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : 'Failed to load tasks');
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // repoKey stands in for the selectedRepoIds array identity.
+  }, [repoKey, from, to, status, search, sort, offset]);
+
+  const total = page?.total ?? 0;
+  const limit = page?.limit ?? TASKS_PAGE_SIZE;
+  const shownFrom = total === 0 ? 0 : offset + 1;
+  const shownTo = Math.min(offset + (page?.tasks.length ?? 0), total);
+  const hasPrev = offset > 0;
+  const hasNext = offset + limit < total;
+
+  return (
+    <ChartCard
+      title={
+        <span>
+          All tasks
+          <span className="ml-2 text-xs font-normal text-gray-500">
+            {total > 0
+              ? `showing ${shownFrom}–${shownTo} of ${formatNumber(total)}`
+              : ''}
+          </span>
+        </span>
+      }
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search issue # or title…"
+            className="w-48 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 placeholder-gray-500"
+          />
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value as TaskStatus | '')}
+            className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200"
+          >
+            <option value="">All statuses</option>
+            {TASK_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as ReportTasksSort)}
+            className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200"
+          >
+            {TASK_SORTS.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      }
+    >
+      {error ? (
+        <div className="flex h-40 items-center justify-center text-sm text-red-400">
+          {error}
+        </div>
+      ) : !page || (loading && page.tasks.length === 0) ? (
+        <div className="flex h-40 items-center justify-center text-sm text-gray-600">
+          Loading tasks…
+        </div>
+      ) : page.tasks.length === 0 ? (
+        <div className="flex h-40 items-center justify-center text-sm text-gray-600">
+          No tasks match these filters
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th className="py-2 pr-4 font-medium">Issue</th>
+                  <th className="py-2 pr-4 font-medium">Title</th>
+                  <th className="py-2 pr-4 font-medium">Repo</th>
+                  <th className="py-2 pr-4 font-medium">Status</th>
+                  <th className="py-2 pr-4 font-medium">Model / harness</th>
+                  <th className="py-2 pr-4 text-right font-medium">Attempts</th>
+                  <th className="py-2 pr-4 font-medium">Created</th>
+                  <th className="py-2 pr-4 font-medium">Completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {page.tasks.map((t) => (
+                  <TaskRow key={t.id} task={t} forgejoBaseUrl={forgejoBaseUrl} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-4 flex items-center justify-between text-xs text-gray-400">
+            <span>
+              {total > 0
+                ? `Showing ${shownFrom}–${shownTo} of ${formatNumber(total)}`
+                : 'No tasks'}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setOffset((o) => Math.max(0, o - limit))}
+                disabled={!hasPrev}
+                className="rounded bg-gray-800 px-3 py-1 font-medium text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+              >
+                ← Prev
+              </button>
+              <span className="tabular-nums">
+                Page {Math.floor(offset / limit) + 1} of{' '}
+                {Math.max(1, Math.ceil(total / limit))}
+              </span>
+              <button
+                onClick={() => setOffset((o) => o + limit)}
+                disabled={!hasNext}
+                className="rounded bg-gray-800 px-3 py-1 font-medium text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </ChartCard>
+  );
+}
+
+function TaskRow({
+  task,
+  forgejoBaseUrl,
+}: {
+  task: ReportTaskRow;
+  forgejoBaseUrl: string;
+}) {
+  const issueHref =
+    forgejoBaseUrl && task.repo
+      ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
+      : null;
+
+  return (
+    <tr className="border-b border-gray-800/50 last:border-0 hover:bg-gray-800/30">
+      <td className="py-2 pr-4 font-mono">
+        {issueHref ? (
+          <a
+            href={issueHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-blue-400 hover:underline"
+          >
+            #{task.issue_id}
+          </a>
+        ) : (
+          <span className="text-gray-300">#{task.issue_id}</span>
+        )}
+      </td>
+      <td className="max-w-md py-2 pr-4">
+        <Link
+          to={`/tasks/${task.id}`}
+          className="text-gray-200 hover:text-blue-300"
+          title={task.issue_title}
+        >
+          <span className="block truncate">{task.issue_title}</span>
+        </Link>
+      </td>
+      <td className="py-2 pr-4 font-mono text-xs text-gray-400">
+        {task.repo ? `${task.repo.owner}/${task.repo.name}` : '—'}
+      </td>
+      <td className="py-2 pr-4">
+        <TaskStatusBadge status={task.status} />
+      </td>
+      <td className="py-2 pr-4 text-xs text-gray-400">
+        {task.model_id ? (
+          <span className="font-mono">
+            {task.model_id}
+            {task.harness_id && (
+              <span className="text-gray-600"> · {task.harness_id}</span>
+            )}
+          </span>
+        ) : (
+          '—'
+        )}
+      </td>
+      <td className="py-2 pr-4 text-right tabular-nums text-gray-300">
+        {task.attempts}
+      </td>
+      <td className="py-2 pr-4 whitespace-nowrap text-xs text-gray-400">
+        {formatTimestamp(task.created_at)}
+      </td>
+      <td className="py-2 pr-4 whitespace-nowrap text-xs text-gray-400">
+        {formatTimestamp(task.completed_at)}
+      </td>
+    </tr>
   );
 }
 
