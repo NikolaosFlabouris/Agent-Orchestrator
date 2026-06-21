@@ -86,6 +86,11 @@ export async function postDevAgent(
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
+      recordTaskEvent(
+        task.id,
+        'no_changes',
+        "No changes produced — the agent's branch matches base; nothing to implement."
+      );
       try {
         await forgejo.commentOnIssue(
           repo,
@@ -135,6 +140,11 @@ export async function postDevAgent(
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
+      recordTaskEvent(
+        task.id,
+        'no_changes',
+        'No changes produced — the agent pushed no branch and left no local work to salvage.'
+      );
       try {
         await forgejo.commentOnIssue(
           repo,
@@ -251,6 +261,11 @@ export async function postDevAgent(
         status: 'failed',
         completed_at: new Date().toISOString(),
       });
+      recordTaskEvent(
+        task.id,
+        'salvage_failed',
+        `Could not salvage local work: ${detail}. Local work preserved in workspace.`
+      );
       try {
         await forgejo.commentOnIssue(
           repo,
@@ -368,6 +383,11 @@ export async function postDevAgent(
             status: 'failed',
             completed_at: new Date().toISOString(),
           });
+          recordTaskEvent(
+            task.id,
+            'no_changes',
+            `No changes produced — PR #${createResult.pr_number} has an empty diff against ${repo.base_branch}; nothing to review or merge.`
+          );
           try {
             await forgejo.commentOnIssue(
               repo,
@@ -463,15 +483,21 @@ export async function postDevAgent(
       } catch { /* best effort */ }
     }
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     updateTaskWithSync(task.id, {
       status: 'failed',
       completed_at: new Date().toISOString(),
     });
+    recordTaskEvent(
+      task.id,
+      'pr_creation_failed',
+      `Failed to create pull request: ${detail}. Branch exists on remote — use Reset to retry.`
+    );
     try {
       await forgejo.commentOnIssue(
         repo,
         task.issue_id,
-        `Failed to create PR: ${err instanceof Error ? err.message : String(err)}. Branch exists on remote — use Reset to retry.`
+        `Failed to create PR: ${detail}. Branch exists on remote — use Reset to retry.`
       );
     } catch { /* best effort */ }
     log.error(

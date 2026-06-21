@@ -15,6 +15,11 @@ const EVENT_ICONS: Record<string, string> = {
   task_reset: 'refresh',
   task_requeued: 'play',
   recovery: 'alert',
+  // Known terminal-failure reasons recorded alongside status_failed so the
+  // timeline explains WHY a task failed instead of only "Task failed".
+  no_changes: 'empty',
+  salvage_failed: 'alert',
+  pr_creation_failed: 'alert',
 };
 
 const EVENT_COLORS: Record<string, string> = {
@@ -34,6 +39,11 @@ const EVENT_COLORS: Record<string, string> = {
   // also surfaces them as a dedicated banner above the timeline.
   agent_image_missing: 'bg-red-600',
   harness_entrypoint_exec_failed: 'bg-red-600',
+  // Known terminal-failure reasons. Amber for the benign "no work produced"
+  // case; red for the operational failures that need a retry.
+  no_changes: 'bg-amber-500',
+  salvage_failed: 'bg-red-600',
+  pr_creation_failed: 'bg-red-600',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {
