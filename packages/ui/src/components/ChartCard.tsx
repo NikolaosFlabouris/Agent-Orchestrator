@@ -7,6 +7,8 @@ export interface ChartCardProps {
   /** When true, render the empty-state placeholder instead of children. */
   empty?: boolean;
   emptyLabel?: string;
+  /** Optional DOM id on the card's <section>, for hash deep-links. */
+  id?: string;
   children: ReactNode;
 }
 
@@ -19,10 +21,14 @@ export function ChartCard({
   actions,
   empty = false,
   emptyLabel = 'No data in this range',
+  id,
   children,
 }: ChartCardProps) {
   return (
-    <section className="rounded-lg border border-gray-800 bg-gray-900 p-4">
+    <section
+      id={id}
+      className="rounded-lg border border-gray-800 bg-gray-900 p-4"
+    >
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-sm font-medium text-gray-200">{title}</h2>
         {actions && <div className="flex items-center gap-2">{actions}</div>}

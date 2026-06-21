@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -108,6 +108,20 @@ export function Reports() {
   const [data, setData] = useState<ReportBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Deep-link support: when arriving with a hash (e.g. /reports#all-tasks
+  // from the Dashboard's "View all" link), scroll that section into view.
+  // The targeted card renders independently of the report bundle, so the
+  // element is present on mount; a rAF lets layout settle first.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!hash) return;
+    const id = hash.slice(1);
+    const raf = requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [hash]);
 
   // Forgejo base URL for the per-row issue links. The Dashboard normally
   // seeds this from a status poll; populate it here too so /reports works
@@ -1255,6 +1269,7 @@ function AllTasksSection({
 
   return (
     <ChartCard
+      id="all-tasks"
       title={
         <span>
           All tasks
