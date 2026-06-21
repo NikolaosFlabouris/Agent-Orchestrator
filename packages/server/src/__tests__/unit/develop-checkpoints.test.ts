@@ -184,6 +184,43 @@ describe('postDevAgent — verify-push idempotency', () => {
   });
 });
 
+describe('postDevAgent — no-changes failure reason', () => {
+  it('records a no_changes task_event when the branch matches base', async () => {
+    const task = mkTask();
+
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      // Both the agent branch and the base branch resolve to the same SHA, so
+      // the agent produced no net changes.
+      getBranch: vi.fn().mockResolvedValue({
+        name: 'any',
+        commit: { id: 'samesha', message: 'base' },
+      }),
+      createPullRequest: vi.fn(),
+      getPullRequest: vi.fn(),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(task, forgejo, silentLog);
+
+    expect(result).toBe(false);
+    // Task stays in the failed terminal state.
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({ status: 'failed' })
+    );
+    // A distinct, greppable no_changes event is recorded with the reason.
+    const noChangesCalls = mocks.recordTaskEvent.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'no_changes'
+    );
+    expect(noChangesCalls).toHaveLength(1);
+    expect(noChangesCalls[0][0]).toBe(task.id);
+    expect(noChangesCalls[0][2]).toMatch(/no changes/i);
+    // PR creation must not happen on the no-changes path.
+    expect(forgejo.createPullRequest).not.toHaveBeenCalled();
+  });
+});
+
 describe('postDevAgent — create-pr idempotency', () => {
   it('does not re-create the PR on a second invocation with the same (task_id, attempt)', async () => {
     const task = mkTask();
