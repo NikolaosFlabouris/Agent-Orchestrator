@@ -20,6 +20,11 @@ const ACTIVE_STATUSES = new Set([
   'changes-needed',
 ]);
 
+// Cap on the homepage Recent list. The full, paginated history lives on the
+// Reports "All tasks" browser (linked via "View all"); the Active and Queue
+// sections stay unbounded as they're operationally important. Tune freely.
+const RECENT_LIMIT = 10;
+
 export function Dashboard() {
   // Selector-based subscriptions: each call subscribes only to its
   // slice, so Dashboard re-renders only when a slice it actually
@@ -155,6 +160,7 @@ export function Dashboard() {
       if (bNull) return 1;
       return b.completed_at!.localeCompare(a.completed_at!);
     });
+  const recentTasks = completedTasks.slice(0, RECENT_LIMIT);
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -302,16 +308,30 @@ export function Dashboard() {
           )}
         </section>
 
-        {/* Recent completions */}
+        {/* Recent completions — capped at RECENT_LIMIT; the full history
+            lives on the Reports "All tasks" browser. */}
         <section>
-          <h2 className="text-lg font-medium mb-3">
-            Recent ({completedTasks.length})
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-medium">
+              Recent
+              {completedTasks.length > RECENT_LIMIT
+                ? ` (${recentTasks.length} of ${completedTasks.length})`
+                : ` (${completedTasks.length})`}
+            </h2>
+            {completedTasks.length > 0 && (
+              <Link
+                to="/reports#all-tasks"
+                className="text-sm text-blue-400 hover:text-blue-300"
+              >
+                View all →
+              </Link>
+            )}
+          </div>
           {completedTasks.length === 0 ? (
             <p className="text-gray-500 text-sm">No completed tasks</p>
           ) : (
             <div className="space-y-2">
-              {completedTasks.map((task) => (
+              {recentTasks.map((task) => (
                 <CompletedItem key={task.id} task={task} />
               ))}
             </div>
