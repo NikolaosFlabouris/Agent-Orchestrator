@@ -36,7 +36,9 @@ import type {
   HeatmapMetric,
   HeatmapCell,
   ReportsHeatmap,
+  ReportTasksSort,
 } from '@orchestrator/shared';
+import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
 const CURRENT_SCHEMA_VERSION = 30;
@@ -1986,20 +1988,7 @@ export function getAllSettings(): Record<string, string> {
 
 /** All TaskStatus values, used to zero-fill the overview status map so the
  *  UI always sees every bucket. Kept in sync with the TaskStatus union. */
-const ALL_TASK_STATUSES: TaskStatus[] = [
-  'queued',
-  'preparing',
-  'in-progress',
-  'in-review',
-  'changes-needed',
-  'merged',
-  'failed',
-  'cancelled',
-  'awaiting-human-merge',
-  'awaiting-human-review',
-  'needs-human-review',
-  'reset',
-];
+const ALL_TASK_STATUSES: TaskStatus[] = TASK_STATUSES;
 
 /** Normalize a stored timestamp to canonical ISO-8601 UTC ("…Z"),
  *  tolerating both the space-separated datetime('now') form and the
@@ -2949,4 +2938,133 @@ export function getReportHeatmap(
   });
 
   return { range: { from: filter.from, to: filter.to }, metric, cells, max };
+}
+
+/** Pagination + filtering options for {@link getReportTasks}. */
+export interface ReportTasksOptions {
+  /** Narrow to a single stored task status. */
+  status?: TaskStatus;
+  /** Free-text match against the issue number or issue title. A leading
+   *  '#' is stripped so "#42" and "42" behave the same. */
+  search?: string;
+  /** Sort order; defaults to most-recent-created first. */
+  sort?: ReportTasksSort;
+  /** Zero-based row offset (clamped to ≥ 0). */
+  offset?: number;
+  /** Page size (clamped to [1, MAX_REPORT_TASKS_LIMIT]). */
+  limit?: number;
+}
+
+/** A task row plus the model/harness snapshot from its most recent attempt
+ *  and its develop-attempt count. Returned by {@link getReportTasks}; the
+ *  route overlays the Forgejo-derived status for the page. */
+export interface ReportTaskDbRow extends Task {
+  /** Develop-attempt count (implementation passes run). */
+  attempts: number;
+  /** model_id snapshot of the latest develop attempt (null = none ran). */
+  model_id: string | null;
+  /** harness_id snapshot of the latest develop attempt (null = none ran). */
+  harness_id: string | null;
+}
+
+const MAX_REPORT_TASKS_LIMIT = 200;
+const DEFAULT_REPORT_TASKS_LIMIT = 25;
+
+/** Paginated task history for the Reports "All Tasks" browser.
+ *
+ *  Filtering, sorting, and pagination all run in SQL — the route never loads
+ *  the whole history into memory. Returns the requested page plus the TOTAL
+ *  count matching the filter (ignoring offset/limit) so the UI can render
+ *  "showing X of N" and page. The model/harness columns come from the task's
+ *  most recent attempt via correlated subqueries (no per-row round-trip), and
+ *  develop attempts are counted in the same pass.
+ *
+ *  The cohort is tasks CREATED within [from, to) (optionally narrowed to
+ *  `repos`), mirroring the other report endpoints. Forgejo-derived status is
+ *  NOT resolved here — that is the route's job, and only for the page. */
+export function getReportTasks(
+  filter: ReportFilter,
+  opts: ReportTasksOptions = {}
+): { total: number; offset: number; limit: number; tasks: ReportTaskDbRow[] } {
+  const db = getDb();
+
+  const range = rangeClause('t.created_at', filter);
+  const conditions = [range.clause];
+  const params: unknown[] = [...range.params];
+
+  if (opts.status) {
+    conditions.push('t.status = ?');
+    params.push(opts.status);
+  }
+
+  const search = opts.search?.trim().replace(/^#/, '') ?? '';
+  if (search !== '') {
+    conditions.push(
+      `(CAST(t.issue_id AS TEXT) LIKE ? OR t.issue_title LIKE ?)`
+    );
+    const like = `%${search}%`;
+    params.push(like, like);
+  }
+
+  const where = conditions.join(' AND ');
+
+  const total = (
+    db
+      .prepare(`SELECT COUNT(*) AS c FROM tasks t WHERE ${where}`)
+      .get(...params) as { c: number }
+  ).c;
+
+  // Sort. created_at is always present; completed_at may be null, so push
+  // null completions to the bottom regardless of direction. julianday()
+  // normalization keeps the order correct across the two stored timestamp
+  // formats.
+  const created = juld('t.created_at');
+  const completed = juld('t.completed_at');
+  const completedNullsLast = '(t.completed_at IS NULL) ASC';
+  let orderBy: string;
+  switch (opts.sort) {
+    case 'created_asc':
+      orderBy = `${created} ASC, t.id ASC`;
+      break;
+    case 'completed_desc':
+      orderBy = `${completedNullsLast}, ${completed} DESC, t.id DESC`;
+      break;
+    case 'completed_asc':
+      orderBy = `${completedNullsLast}, ${completed} ASC, t.id ASC`;
+      break;
+    case 'created_desc':
+    default:
+      orderBy = `${created} DESC, t.id DESC`;
+      break;
+  }
+
+  const limit = Math.min(
+    Math.max(1, Math.trunc(opts.limit ?? DEFAULT_REPORT_TASKS_LIMIT)),
+    MAX_REPORT_TASKS_LIMIT
+  );
+  const offset = Math.max(0, Math.trunc(opts.offset ?? 0));
+
+  // The model/harness subqueries prefer the latest DEVELOP attempt (the
+  // implementation that ran), falling back to any attempt with a snapshot.
+  const pickAttempt = (col: 'model_id' | 'harness_id'): string =>
+    `(SELECT a.${col} FROM attempts a
+        WHERE a.task_id = t.id AND a.${col} IS NOT NULL AND a.${col} != ''
+        ORDER BY (a.role = 'develop') DESC, a.attempt_number DESC, a.id DESC
+        LIMIT 1)`;
+
+  const tasks = db
+    .prepare(
+      `SELECT t.*,
+         (SELECT COUNT(*) FROM attempts a
+            WHERE a.task_id = t.id AND a.role = 'develop') AS attempts,
+         ${pickAttempt('model_id')} AS model_id,
+         ${pickAttempt('harness_id')} AS harness_id
+       FROM tasks t
+       WHERE ${where}
+       ORDER BY ${orderBy}
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as ReportTaskDbRow[];
+
+  return { total, offset, limit, tasks };
 }

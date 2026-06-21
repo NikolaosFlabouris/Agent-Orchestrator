@@ -809,7 +809,7 @@ export function hasHumanReviewLabel(snapshot: Snapshot | null): boolean | null {
  * field — POST/PATCH responses (plain `enrichTask`) omit it, and the UI
  * re-fetches via GET after mutations anyway.
  */
-async function enrichTaskWithDerivation(
+export async function enrichTaskWithDerivation(
   task: Task,
   forgejo: ForgejoClient,
   ctx: EnrichContext = {}
@@ -856,7 +856,7 @@ function deriveHealthWithoutDocker(
   return 'healthy';
 }
 
-async function loadManagedContainerIds(
+export async function loadManagedContainerIds(
   log: Parameters<typeof getContainerDisplayName>[1]
 ): Promise<Set<string> | undefined> {
   // Returns undefined on Docker failure so callers propagate the "unknown"

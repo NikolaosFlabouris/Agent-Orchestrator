@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { initDatabase, getDb } from '../../db.js';
-import { reportsRoutes } from '../../routes/reports.js';
+import { createReportsRoutes } from '../../routes/reports.js';
+import type { ForgejoClient } from '../../forgejo.js';
 import type {
   ReportsDurations,
   ReportsFunnel,
@@ -96,7 +97,7 @@ async function buildApp(): Promise<FastifyInstance> {
   initDatabase(':memory:');
   seed();
   const app = Fastify({ logger: false });
-  await app.register(reportsRoutes);
+  await app.register(createReportsRoutes({} as unknown as ForgejoClient));
   await app.ready();
   return app;
 }

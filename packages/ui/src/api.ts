@@ -11,6 +11,9 @@ import type {
   ReportsHeatmap,
   HeatmapMetric,
   ProfileGauge,
+  ReportsTasksPage,
+  ReportTasksSort,
+  TaskStatus,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -45,6 +48,18 @@ export interface ReportQuery {
   repos?: number[];
   from?: string;
   to?: string;
+}
+
+/** Query for the paginated All Tasks browser (`GET /api/reports/tasks`).
+ *  Extends the common ReportQuery with a status filter, free-text search,
+ *  sort, and pagination. Empty fields are omitted so the server applies its
+ *  defaults. */
+export interface ReportTasksQuery extends ReportQuery {
+  status?: TaskStatus;
+  search?: string;
+  sort?: ReportTasksSort;
+  offset?: number;
+  limit?: number;
 }
 
 /** Serialise a ReportQuery (plus the endpoint-specific `bucket`/`groupBy`)
@@ -196,6 +211,27 @@ export const api = {
       'GET',
       `/api/reports/heatmap${reportQuery(filter, { metric })}`
     ),
+  /** Paginated "All Tasks" browser over the full task history. Combines the
+   *  common report filter (repos + from/to) with a status filter, free-text
+   *  search, sort, and offset/limit pagination. */
+  getReportTasks: (params?: ReportTasksQuery) => {
+    const qs = new URLSearchParams();
+    if (params?.repos && params.repos.length > 0) {
+      qs.set('repos', params.repos.join(','));
+    }
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.offset != null) qs.set('offset', String(params.offset));
+    if (params?.limit != null) qs.set('limit', String(params.limit));
+    const query = qs.toString();
+    return request<ReportsTasksPage>(
+      'GET',
+      `/api/reports/tasks${query ? '?' + query : ''}`
+    );
+  },
   /** Inline Create-Task performance gauge for one (repo, model, harness)
    *  combination. Advisory only — callers must tolerate the loading/empty/
    *  error states without blocking task creation. */
