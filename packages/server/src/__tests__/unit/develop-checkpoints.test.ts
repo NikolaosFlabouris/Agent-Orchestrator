@@ -242,6 +242,8 @@ describe('postDevAgent — create-pr idempotency', () => {
         }
         return { name: branch, commit: { id: 'base000', message: 'base' } };
       }),
+      // No pre-existing PR on the branch → the orchestrator creates one.
+      listPullRequests: vi.fn().mockResolvedValue([]),
       createPullRequest,
       getPullRequest,
       commentOnIssue: vi.fn().mockResolvedValue(undefined),
@@ -266,5 +268,147 @@ describe('postDevAgent — create-pr idempotency', () => {
       (call: unknown[]) => call[1] === 'pr_created'
     ).length;
     expect(prCreatedCallsAfterSecond).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR reconciliation matrix — Accept / Repair / Recreate / Surface.
+// The dev agent (or a prior run) may already have a PR on the branch; the
+// orchestrator reconciles instead of blindly POSTing a duplicate (which 409s).
+// ---------------------------------------------------------------------------
+
+import { ForgejoApiError } from '../../forgejo.js';
+
+const BRANCH = 'agent/issue-10-test';
+
+// Drives verify-push to "branch exists and is ahead of base" so flow reaches
+// the create-pr step. Mirrors the create-pr idempotency test's setup.
+function aheadBranch() {
+  return vi.fn().mockImplementation(async (_repo: unknown, branch: string) =>
+    branch === BRANCH
+      ? { name: branch, commit: { id: 'abc123', message: 'feat' } }
+      : { name: branch, commit: { id: 'base000', message: 'base' } }
+  );
+}
+
+function eventTypes() {
+  return mocks.recordTaskEvent.mock.calls.map((c: unknown[]) => c[1]);
+}
+
+describe('postDevAgent — PR reconciliation', () => {
+  it('ADOPTS a pre-existing open PR that already targets the correct base', async () => {
+    const task = mkTask();
+    const createPullRequest = vi.fn();
+    const closePullRequest = vi.fn();
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: aheadBranch(),
+      listPullRequests: vi.fn().mockResolvedValue([
+        { number: 7, body: 'Closes #10', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'main' } },
+      ]),
+      createPullRequest,
+      closePullRequest,
+      getPullRequest: vi.fn().mockResolvedValue({
+        number: 7, body: 'Closes #10', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'main' },
+      }),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(task, forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expect(createPullRequest).not.toHaveBeenCalled();
+    expect(closePullRequest).not.toHaveBeenCalled();
+    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 7 });
+    expect(eventTypes()).toContain('pr_adopted');
+  });
+
+  it('RECREATES a mis-targeted PR: closes the wrong one and opens against the correct base', async () => {
+    const task = mkTask();
+    const createPullRequest = vi.fn().mockResolvedValue({ number: 99, body: 'Closes #10' });
+    const closePullRequest = vi.fn().mockResolvedValue(undefined);
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: aheadBranch(),
+      listPullRequests: vi.fn().mockResolvedValue([
+        { number: 8, body: 'x', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'develop' } },
+      ]),
+      createPullRequest,
+      closePullRequest,
+      getPullRequest: vi.fn().mockResolvedValue({
+        number: 99, body: 'Closes #10', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'main' },
+      }),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(task, forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expect(closePullRequest).toHaveBeenCalledWith(expect.anything(), 8);
+    expect(createPullRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 99 });
+    expect(eventTypes()).toContain('pr_recreated');
+  });
+
+  it('SURFACES (fails) when multiple open PRs exist on the branch and none target the base', async () => {
+    const task = mkTask();
+    const createPullRequest = vi.fn();
+    const closePullRequest = vi.fn();
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: aheadBranch(),
+      listPullRequests: vi.fn().mockResolvedValue([
+        { number: 8, body: 'x', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'develop' } },
+        { number: 9, body: 'y', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'release' } },
+      ]),
+      createPullRequest,
+      closePullRequest,
+      getPullRequest: vi.fn(),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(task, forgejo, silentLog);
+
+    expect(result).toBe(false);
+    expect(createPullRequest).not.toHaveBeenCalled();
+    expect(closePullRequest).not.toHaveBeenCalled();
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(eventTypes()).toContain('pr_creation_failed');
+  });
+
+  it('on a 409 create race, re-reads and ADOPTS the PR that beat it (no failure)', async () => {
+    const task = mkTask();
+    const createPullRequest = vi
+      .fn()
+      .mockRejectedValue(new ForgejoApiError('conflict', 409, 'pull request already exists'));
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: aheadBranch(),
+      // First lookup: empty → we attempt create. Create 409s. Second lookup
+      // (the fallback) now sees the PR the agent opened in the gap.
+      listPullRequests: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { number: 14, body: 'Closes #10', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'main' } },
+        ]),
+      createPullRequest,
+      closePullRequest: vi.fn(),
+      getPullRequest: vi.fn().mockResolvedValue({
+        number: 14, body: 'Closes #10', changed_files: 5, head: { ref: BRANCH, sha: 'abc123' }, base: { ref: 'main' },
+      }),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(task, forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expect(createPullRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 14 });
+    expect(eventTypes()).toContain('pr_adopted');
+    expect(eventTypes()).not.toContain('pr_creation_failed');
   });
 });

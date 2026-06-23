@@ -1957,6 +1957,7 @@ ${stripDependencySection(issue.body)}
 - Do not modify files unrelated to the task
 - If the task is unclear, make reasonable assumptions and document them
 - Always push your work before exiting
+- Do not open a pull request — just push your branch; the orchestrator opens the PR
 - If the repo has pre-commit hooks, all hooks must pass before pushing
 `;
 

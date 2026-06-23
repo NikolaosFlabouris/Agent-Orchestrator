@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Task } from '@orchestrator/shared';
+import type { Task, Repo } from '@orchestrator/shared';
 
 const execFileP = promisify(execFile);
 import { getRepo, getTask, updateTask } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
-import type { ForgejoClient } from '../forgejo.js';
+import { ForgejoApiError } from '../forgejo.js';
+import type { ForgejoClient, ForgejoPullRequest } from '../forgejo.js';
 import {
   buildPullRequestBody,
   ensureIssueLink,
@@ -19,6 +20,157 @@ import {
 import { runStep, getStep } from '../checkpoints.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import type { FastifyBaseLogger } from 'fastify';
+
+/**
+ * Outcome of resolving the PR for a task's branch.
+ *  - `created`   : no PR existed; the orchestrator opened one.
+ *  - `adopted`   : a correctly-targeted PR already existed on the branch
+ *                  (e.g. the agent opened it) and was taken over as-is.
+ *  - `recreated` : a mis-targeted PR on the branch was closed and replaced
+ *                  with one against the correct base.
+ */
+type PrResolution = {
+  pr_number: number;
+  action: 'created' | 'adopted' | 'recreated';
+};
+
+/**
+ * Collect every OPEN pull request whose head is exactly `branch`. Forgejo's
+ * list endpoint has no head filter, so we page through open PRs and match
+ * client-side. Open PRs are bounded by in-flight work, so this stays cheap;
+ * the page cap is a runaway guard, not an expected limit.
+ */
+async function findOpenPullRequestsForBranch(
+  forgejo: ForgejoClient,
+  repo: Repo,
+  branch: string
+): Promise<ForgejoPullRequest[]> {
+  const LIMIT = 50;
+  const MAX_PAGES = 20;
+  const matches: ForgejoPullRequest[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const batch = await forgejo.listPullRequests(repo, {
+      state: 'open',
+      page,
+      limit: LIMIT,
+    });
+    for (const pr of batch) {
+      if (pr.head?.ref === branch) matches.push(pr);
+    }
+    if (batch.length < LIMIT) break;
+  }
+  return matches;
+}
+
+/**
+ * Resolve the pull request for `task.branch_name`, reconciling against any PR
+ * that already exists on that branch instead of blindly POSTing a second one.
+ *
+ * The dev agent runs with a tokenised git remote and can open its own PR; a
+ * prior run can also leave a PR behind (e.g. it created the PR server-side but
+ * died before recording it). Either way the branch — not the PR author — is
+ * the unit of ownership: a PR whose head is the orchestrator-generated
+ * `task.branch_name` is machine-owned, and authorship is not even a reliable
+ * signal here (agent, orchestrator and human can share one Forgejo account).
+ *
+ * Decision table (only PRs on our head branch are ever considered):
+ *  - one targeting the correct base                 → ADOPT
+ *  - exactly one, mis-targeted base                 → RECREATE (close + open)
+ *  - several, none correct                          → SURFACE (ambiguous)
+ *  - none                                           → CREATE, with a 409
+ *    fallback that re-reads and reconciles if someone opened one in the gap
+ */
+async function reconcilePullRequest(
+  forgejo: ForgejoClient,
+  repo: Repo,
+  task: Task,
+  issueTitle: string,
+  log: FastifyBaseLogger
+): Promise<PrResolution> {
+  const head = task.branch_name!;
+  const base = repo.base_branch;
+
+  // Create the PR, adopting instead if a concurrent opener (the agent wrapping
+  // up, or a retried prior run) wins the race. Forgejo only 409s a duplicate
+  // when a PR for this exact head→base already exists, so on conflict the
+  // existing PR necessarily targets `base` and is safe to adopt. Shared by the
+  // plain-create and the post-close recreate paths so both get the fallback.
+  // The body is built here, lazily, so the ADOPT path never computes it.
+  const createOrAdoptOnConflict = async (
+    successAction: 'created' | 'recreated'
+  ): Promise<PrResolution> => {
+    try {
+      const pr = await forgejo.createPullRequest(repo, {
+        title: issueTitle,
+        body: buildPullRequestBody({
+          issue_id: task.issue_id,
+          attempt: task.attempt,
+        }),
+        head,
+        base,
+      });
+      return { pr_number: pr.number, action: successAction };
+    } catch (err) {
+      if (err instanceof ForgejoApiError && err.status === 409) {
+        const raced = await findOpenPullRequestsForBranch(forgejo, repo, head);
+        const correct = raced.find((p) => p.base?.ref === base);
+        if (correct) {
+          log.info(
+            { event: 'pr_adopt', task_id: task.id, pr_number: correct.number },
+            'Adopting PR that won a concurrent-create race'
+          );
+          return { pr_number: correct.number, action: 'adopted' };
+        }
+      }
+      throw err;
+    }
+  };
+
+  const matches = await findOpenPullRequestsForBranch(forgejo, repo, head);
+
+  // ADOPT: a PR already targets the correct base — take it over as-is.
+  // If the branch ALSO carries a mis-targeted PR, we adopt the correct one and
+  // intentionally leave the stray open: it self-resolves when the branch is
+  // deleted on merge, and closing an extra PR here would be overreach. (The
+  // RECREATE branch below only runs when NO correctly-based PR exists.)
+  const correct = matches.find((p) => p.base?.ref === base);
+  if (correct) {
+    log.info(
+      { event: 'pr_adopt', task_id: task.id, pr_number: correct.number },
+      'Adopting pre-existing PR on the task branch'
+    );
+    return { pr_number: correct.number, action: 'adopted' };
+  }
+
+  // RECREATE: exactly one PR on our branch, mis-targeted. It lives in our own
+  // branch namespace (the ownership signal, not the author), so replacing it is
+  // safe — close it and open one against the correct base.
+  if (matches.length === 1) {
+    const wrong = matches[0];
+    log.warn(
+      {
+        event: 'pr_recreate',
+        task_id: task.id,
+        pr_number: wrong.number,
+        found_base: wrong.base?.ref,
+        want_base: base,
+      },
+      'Closing mis-targeted PR and opening one against the correct base'
+    );
+    await forgejo.closePullRequest(repo, wrong.number);
+    return createOrAdoptOnConflict('recreated');
+  }
+
+  // SURFACE: several PRs on the branch, none correct → ambiguous, don't guess.
+  if (matches.length > 1) {
+    throw new Error(
+      `${matches.length} open pull requests already exist on branch ${head}, none targeting ${base}; refusing to choose automatically`
+    );
+  }
+
+  // CREATE: nothing on the branch yet.
+  return createOrAdoptOnConflict('created');
+}
 
 /**
  * Post-dev-agent verification.
@@ -304,35 +456,25 @@ export async function postDevAgent(
   }
 
   // ── Step 3: create-pr ───────────────────────────────────────────────────
-  // Create the pull request when task.pr_number is null, otherwise handle
-  // the rework path.  The create is wrapped in a checkpoint so a restart
-  // after push but before PR creation skips the branch-check and goes
-  // straight to creating the PR.
+  // Resolve the PR for the branch when task.pr_number is null, otherwise handle
+  // the rework path. Resolution (reconcilePullRequest) adopts/repairs/recreates
+  // any PR already on the branch rather than blindly creating a duplicate, and
+  // is wrapped in a checkpoint so a restart after push but before PR resolution
+  // replays straight to it.
   try {
     if (task.pr_number === null || task.pr_number === undefined) {
       // Pre-check before runStep so we can skip side-effects on replay.
-      const alreadyCreated = getStep<{ pr_number: number; created: boolean }>(
+      const alreadyCreated = getStep<PrResolution>(
         task.id,
         task.attempt,
         'create-pr'
       );
 
-      const createResult = await runStep<{ pr_number: number; created: boolean }>(
+      const createResult = await runStep<PrResolution>(
         task.id,
         task.attempt,
         'create-pr',
-        async () => {
-          const pr = await forgejo.createPullRequest(repo, {
-            title: issueTitle,
-            body: buildPullRequestBody({
-              issue_id: task.issue_id,
-              attempt: task.attempt,
-            }),
-            head: task.branch_name!,
-            base: repo.base_branch,
-          });
-          return { pr_number: pr.number, created: true };
-        }
+        async () => reconcilePullRequest(forgejo, repo, task, issueTitle, log)
       );
 
       // Always persist pr_number when the task row doesn't have it yet — this
@@ -345,19 +487,32 @@ export async function postDevAgent(
       // Record side-effect events only when this run freshly executed the
       // create step (not on replay of a cached checkpoint).
       if (!alreadyCreated) {
-        recordTaskEvent(task.id, 'pr_created', `Pull request #${createResult.pr_number} created`);
+        const action = createResult.action ?? 'created';
+        const prNum = createResult.pr_number;
+        const { eventType, summary } =
+          action === 'adopted'
+            ? {
+                eventType: 'pr_adopted',
+                summary: `Adopted existing pull request #${prNum} found on the task branch`,
+              }
+            : action === 'recreated'
+              ? {
+                  eventType: 'pr_recreated',
+                  summary: `Replaced a mis-targeted pull request; opened #${prNum}`,
+                }
+              : {
+                  eventType: 'pr_created',
+                  summary: `Pull request #${prNum} created`,
+                };
+        recordTaskEvent(task.id, eventType, summary);
         try {
-          await forgejo.commentOnIssue(
-            repo,
-            task.issue_id,
-            `Pull request #${createResult.pr_number} opened.`
-          );
+          await forgejo.commentOnIssue(repo, task.issue_id, `${summary}.`);
         } catch {
           /* best effort */
         }
         log.info(
-          { event: 'pr_created', task_id: task.id, pr_number: createResult.pr_number },
-          'Pull request created'
+          { event: eventType, task_id: task.id, pr_number: prNum },
+          summary
         );
 
         // Fetch the PR once to drive both the empty-diff check and the link
@@ -491,13 +646,13 @@ export async function postDevAgent(
     recordTaskEvent(
       task.id,
       'pr_creation_failed',
-      `Failed to create pull request: ${detail}. Branch exists on remote — use Reset to retry.`
+      `Could not resolve a pull request for this branch: ${detail}. Use Reset to retry.`
     );
     try {
       await forgejo.commentOnIssue(
         repo,
         task.issue_id,
-        `Failed to create PR: ${detail}. Branch exists on remote — use Reset to retry.`
+        `Could not resolve a pull request for this branch: ${detail}. Use Reset to retry.`
       );
     } catch { /* best effort */ }
     log.error(

@@ -8,6 +8,8 @@ const EVENT_ICONS: Record<string, string> = {
   container_exited: 'stop',
   work_salvaged: 'save',
   pr_created: 'pull-request',
+  pr_adopted: 'pull-request',
+  pr_recreated: 'pull-request',
   pr_merged: 'merge',
   review_verdict: 'check',
   task_cancelled: 'x',
@@ -34,6 +36,9 @@ const EVENT_COLORS: Record<string, string> = {
   recovery: 'bg-orange-500',
   container_started: 'bg-blue-500',
   container_exited: 'bg-blue-400',
+  // Orchestrator took over a PR the agent had already opened (neutral, like
+  // pr_created); amber when it had to close a mis-targeted PR and reopen.
+  pr_recreated: 'bg-amber-500',
   // Structural / operator-actionable prep failures. Same red as a
   // status_failed so they pop in the timeline; the TaskDetail page
   // also surfaces them as a dedicated banner above the timeline.
