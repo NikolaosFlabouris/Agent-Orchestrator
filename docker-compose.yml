@@ -1,21 +1,30 @@
-# Near-out-of-the-box single-machine package: bundles Forgejo, defaults every
-# URL to localhost / compose service names (no IP editing), auto-generates the
-# cookie secret on first boot, and auto-registers webhooks.
+# Single-machine package for the Agent Orchestrator. A bundled Forgejo is
+# included but is OPT-IN behind the `bundled-forgejo` compose profile, so the
+# default `docker compose up -d` runs only the orchestrator and points it at an
+# external Forgejo via FORGEJO_URL / FORGEJO_PUBLIC_URL in `.env`.
 #
-# Before first boot:
+# --- Default: external Forgejo -----------------------------------------------
+#   1. cp .env.example .env   (set FORGEJO_URL + FORGEJO_PUBLIC_URL to your
+#                              external instance, e.g. http://<lan-ip>:3000,
+#                              create the OAuth2 app there with redirect
+#                              ${ORCHESTRATOR_URL}/auth/callback, and drop the
+#                              two service-account tokens + one LLM key in)
+#   2. docker compose up -d --build   (builds the orchestrator + agent
+#                                      `orchestrator-agent:latest` images,
+#                                      creates the `agent-network` bridge, and
+#                                      starts the orchestrator — first boot
+#                                      seeds providers/models/default profile)
+#
+# --- Opt-in: bundled Forgejo -------------------------------------------------
+# To run the self-contained bundled Forgejo instead, add the profile flag (it
+# can be left out of FORGEJO_URL/PUBLIC_URL so the compose defaults apply):
 #   1. cp .env.example .env
-#   2. docker compose up -d --build forgejo   (bring up the bundled Forgejo at
-#                                              http://localhost:3000), then in
-#                                              Forgejo create the OAuth2 app
-#                                              (redirect http://localhost:8081/auth/callback)
-#                                              + two service-account tokens and
-#                                              drop them + one LLM key into .env
-#   3. docker compose up -d --build           (builds the orchestrator + agent
-#                                              `orchestrator-agent:latest` images,
-#                                              creates the `agent-network` bridge,
-#                                              and starts Forgejo + orchestrator —
-#                                              first boot seeds providers/models/
-#                                              default profile)
+#   2. docker compose --profile bundled-forgejo up -d --build forgejo
+#                              (bundled Forgejo at http://localhost:3000; create
+#                              the OAuth2 app, redirect
+#                              http://localhost:8081/auth/callback, tokens + key
+#                              into .env)
+#   3. docker compose --profile bundled-forgejo up -d --build
 # See docs/quick-start.md for the full bring-up procedure.
 
 services:
@@ -66,11 +75,15 @@ services:
     # boots. If we didn't, the orchestrator could come up and accept task
     # creations before the agent image was tagged, and the first task to
     # try to launch would 404 on the missing image.
+    # The bundled `forgejo` service is gated behind the `bundled-forgejo`
+    # compose profile (see below), so it is intentionally NOT listed as a
+    # depends_on here — a plain `docker compose up -d` brings up only the
+    # orchestrator (pointed at an external Forgejo via FORGEJO_URL in .env).
+    # To run the bundled Forgejo instead, enable the profile:
+    #   docker compose --profile bundled-forgejo up -d
     depends_on:
       agent-image:
         condition: service_completed_successfully
-      forgejo:
-        condition: service_started
     # Two-tier URL defaults wired in here so a `git clone` + `docker compose
     # up` works with NO IP/URL editing. Each is overridable from `.env` (the
     # same file backs both `env_file` below and compose interpolation), so an
@@ -113,14 +126,23 @@ services:
   #
   # External-Forgejo escape hatch: to point at a Forgejo you run elsewhere,
   # set FORGEJO_URL / FORGEJO_PUBLIC_URL in `.env` (use
-  # http://host.docker.internal:3000 for a host-run Forgejo on Docker Desktop)
-  # and start only the orchestrator: `docker compose up -d orchestrator`
-  # without `forgejo` — but note the orchestrator `depends_on: forgejo`, so to
-  # fully skip the bundled instance run `docker compose up -d --no-deps orchestrator`.
+  # http://host.docker.internal:3000 for a host-run Forgejo on Docker Desktop).
+  # The bundled instance below is gated behind the `bundled-forgejo` profile,
+  # so a plain `docker compose up -d` already skips it — no `--no-deps` needed.
+  # Enable the bundled instance only when you want it:
+  #   docker compose --profile bundled-forgejo up -d
   forgejo:
     image: codeberg.org/forgejo/forgejo:14
     container_name: forgejo
     restart: unless-stopped
+    # Gated behind a compose profile so the default `docker compose up -d`
+    # does NOT start the bundled Forgejo — the orchestrator then uses the
+    # external instance configured via FORGEJO_URL / FORGEJO_PUBLIC_URL in
+    # .env. To bring the bundled Forgejo up (e.g. for a self-contained
+    # single-machine install), enable the profile:
+    #   docker compose --profile bundled-forgejo up -d
+    profiles:
+      - bundled-forgejo
     environment:
       - USER_UID=1000
       - USER_GID=1000
