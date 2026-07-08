@@ -98,7 +98,7 @@ hand the orchestrator a fully-formed `agent_command` string.
 
 ### progress.log Format
 
-Each line is a JSON object emitted by the agent during execution. The shape varies by harness — the SDK harness writes Agent SDK message objects, the CLI harnesses write whatever stream-json shape the underlying CLI produces. The orchestrator and UI treat these as **opaque text lines**:
+Each line is a JSON object emitted by the agent during execution. The shape varies by harness — the SDK harness writes Agent SDK message objects, the CLI harnesses write whatever stream-json shape the underlying CLI produces. The CLI harness additionally appends timestamped plain-text `[harness ...]` marker lines around usage-limit retries (see below). The orchestrator and UI treat all of these as **opaque text lines**:
 
 - The WebSocket agent output stream (`/ws/tasks/:id/output`) sends each line as-is
 - The UI's agent output panel displays lines in a terminal-like scrolling view
@@ -355,15 +355,78 @@ AGENT_COMMAND=$(jq -r '.agent_command' "$META")
 MAX_MINUTES=$(jq -r '.max_runtime_minutes' "$META")
 ROLE=$(jq -r '.role' "$META")
 
-AGENT_EXIT=0
-timeout --foreground --kill-after=30s "${MAX_MINUTES}m" \
-  bash -c "$AGENT_COMMAND" \
-  > /output/progress.log 2>&1 \
-  || AGENT_EXIT=$?
+# Usage-limit retry loop (see next section): the whole container shares one
+# wall-clock deadline; a usage-limit failure sleeps and relaunches a fresh
+# agent instead of exiting the container.
+DEADLINE=$(( $(date +%s) + MAX_MINUTES * 60 ))
+while :; do
+  AGENT_EXIT=0
+  timeout --foreground --kill-after=30s "$(( DEADLINE - $(date +%s) ))s" \
+    bash -c "$AGENT_COMMAND" \
+    >> /output/progress.log 2>&1 \
+    || AGENT_EXIT=$?
+  # success / timeout / non-usage-limit failure → exit loop
+  # usage-limit failure → WIP-commit dirty work, append interruption note
+  # to prompt.md, sleep 10 minutes (budget permitting), relaunch
+done
 
 # Status from exit code + review.json check (review role only) →
 # /output/result.json, always with exit_code 0 from the harness itself.
+# Usage counts are summed across every run this container performed.
 ```
+
+### Usage-Limit Retries (CLI Harness)
+
+When the agent CLI exits because the provider's usage limit is exhausted
+(e.g. a Claude Pro/Max 5-hour window), exiting the container would hand the
+orchestrator a failure it can only answer by burning a task attempt on an
+error no retry fixes until the limit window resets — tasks would churn
+through `max_attempts` in minutes. Instead, the CLI harness keeps the
+container alive and retries internally:
+
+1. **Detect** — after a non-zero agent exit, the harness inspects the final
+   `{"type":"result"}` stream-json event of the *current* run only. It
+   classifies the failure as a usage limit when `is_error` is set and either
+   `api_error_status` is 429 or the result text contains "usage limit"
+   (Claude Code's subscription-limit phrasing). Detection is deliberately
+   Claude Code-specific and narrow — a false positive would park the task
+   until its deadline; other CLIs' phrasings get added as they are observed.
+2. **Preserve** — uncommitted work is committed as a
+   `WIP: auto-checkpoint` commit (dev role only), so the next run cannot
+   destroy it and will find it in `git log`. A one-time note is appended to
+   `/task/prompt.md` telling the next agent to review `git log`/`git status`
+   and continue the existing work rather than restart it.
+3. **Wait and relaunch** — the harness sleeps a fixed 10 minutes
+   (`HARNESS_USAGE_RETRY_SECONDS` overrides this for tests) and re-runs the
+   same `agent_command` as a fresh agent against the intact workspace. No
+   session resume: resume flags are vendor-specific, and files/commits are
+   the durable state a new run reorients from. Polling is deliberate — the
+   CLI's "resets at ..." phrasing varies across versions, while a failed
+   probe costs seconds and ~no tokens.
+4. **Stay observable** — every wait and relaunch appends a timestamped
+   `[harness ...]` marker line to `progress.log`, which the task page
+   live-streams. The task simply stays `in-progress`; the operator can see
+   it is waiting on a usage limit and intervene (cancel, reset) if desired.
+
+The orchestrator needs no changes for this: the container just looks
+long-running. Every retry and sleep is bounded by the single wall-clock
+deadline (`max_runtime_minutes`); when the remaining budget cannot fit
+another wait-plus-run, the harness stops retrying and reports the failure
+normally, and the orchestrator's timeout sweep remains the backstop. A
+parked container intentionally holds its scheduler slot and its provider's
+concurrency slot — which also stops the scheduler from launching more tasks
+against the exhausted provider beyond its `concurrency_limit`.
+
+Non-usage failures are unaffected: the harness exits after the first
+failure exactly as before, and the orchestrator's attempt handling owns the
+retry. Because retries append multiple result events to one `progress.log`,
+the `usage` block in `result.json` sums turn/token counts across every run
+in the container.
+
+The real-harness contract (including this retry loop) is covered by the
+Docker-gated `harness-usage-limit.test.ts`, which runs the actual
+`harness-cli.sh` in a container (image: `images/test-harness/`) against
+scripted agent commands.
 
 ### Entrypoint Selection
 
