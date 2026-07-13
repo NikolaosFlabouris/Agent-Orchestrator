@@ -101,10 +101,18 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     meta: Record<string, unknown>,
     env: string[] = []
   ): Promise<{ exitCode: number }> {
-    fs.writeFileSync(path.join(dirs.taskDir, 'meta.json'), JSON.stringify(meta));
-    fs.writeFileSync(path.join(dirs.taskDir, 'prompt.md'), '# Test prompt\nDo something.\n');
-    fs.chmodSync(path.join(dirs.taskDir, 'meta.json'), 0o666);
-    fs.chmodSync(path.join(dirs.taskDir, 'prompt.md'), 0o666);
+    const metaPath = path.join(dirs.taskDir, 'meta.json');
+    const promptPath = path.join(dirs.taskDir, 'prompt.md');
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+    fs.writeFileSync(promptPath, '# Test prompt\nDo something.\n');
+    // Reproduce production ownership: writeTaskFiles() chowns prompt.md and
+    // meta.json to the agent user (uid 1000) so the container (which runs as
+    // uid 1000) can append the usage-limit interruption note. Do NOT chmod
+    // these world-writable — that masked issue #136, where root-owned mode
+    // 0644 prompt.md blocked the append. Chowning to a foreign uid requires
+    // the test to run as root, which the docker-gated CI/dev context does.
+    fs.chownSync(metaPath, 1000, 1000);
+    fs.chownSync(promptPath, 1000, 1000);
 
     const toDockerPath = (p: string) => p.replace(/\\/g, '/');
 
