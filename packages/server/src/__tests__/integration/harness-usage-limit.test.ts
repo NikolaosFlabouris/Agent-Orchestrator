@@ -140,20 +140,23 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
   // uid 1000 — so it belongs to the scripted agent, not the harness.
   const TRUST_REPO = 'git config --global --add safe.directory /repo >/dev/null 2>&1 || true';
 
-  const USAGE_LIMIT_LINE =
+  // Usage-limit result whose text carries NO parseable reset time — the
+  // harness must fall back to the fixed HARNESS_USAGE_RETRY_SECONDS poll.
+  const UNPARSEABLE_LIMIT_LINE =
     '{"type":"result","subtype":"error_during_execution","is_error":true,' +
-    '"result":"Claude AI usage limit reached|1751234567","num_turns":1,' +
+    '"result":"Claude AI usage limit reached","num_turns":1,' +
     '"usage":{"input_tokens":10,"output_tokens":5}}';
 
   const SUCCESS_LINE =
     '{"type":"result","subtype":"success","is_error":false,"result":"done",' +
     '"num_turns":3,"usage":{"input_tokens":100,"output_tokens":50}}';
 
-  it('retries in-container after a usage-limit failure and succeeds on the second run', async () => {
+  it('retries in-container after an unparseable usage-limit failure — falls back to the fixed poll and succeeds', async () => {
     const dirs = setupDirs('usage-retry-success');
 
-    // First run: leave uncommitted work, emit a usage-limit result, die.
-    // Second run (marked by the state file): emit success.
+    // First run: leave uncommitted work, emit a usage-limit result whose text
+    // has no reset time (forcing the fixed-poll fallback), die. Second run
+    // (marked by the state file): emit success.
     const agentCommand = [
       TRUST_REPO,
       'if [ -f /output/.mock-second-run ]; then',
@@ -162,7 +165,7 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
       'fi',
       'touch /output/.mock-second-run',
       'echo "partial work" > /repo/partial.txt',
-      `echo '${USAGE_LIMIT_LINE}'`,
+      `echo '${UNPARSEABLE_LIMIT_LINE}'`,
       'exit 1',
     ].join('\n');
 
@@ -192,6 +195,7 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     // Observability: markers for the wait and the relaunch, both runs' output kept
     const log = fs.readFileSync(path.join(dirs.outputDir, 'progress.log'), 'utf-8');
     expect(log).toContain('Provider usage limit detected');
+    expect(log).toContain('fixed poll'); // unparseable text → fallback path
     expect(log).toContain('usage-limit retry 1');
     expect(log).toContain('Usage-limit wait over');
     expect(log).toContain('usage limit reached'); // first run's output preserved
@@ -208,6 +212,95 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     const prompt = fs.readFileSync(path.join(dirs.taskDir, 'prompt.md'), 'utf-8');
     expect(prompt).toContain('Interrupted Earlier Run');
     expect(prompt.match(/usage-limit-interruption-note/g)).toHaveLength(1);
+  });
+
+  it('epoch-format message → reset-aware wait until the stated epoch (deadline-aware give-up)', async () => {
+    const dirs = setupDirs('reset-epoch');
+
+    // Emit "usage limit reached|<epoch>" with a reset 1h out. Against a
+    // 1-minute budget the harness must compute a reset-aware wait (not the
+    // fixed poll) and then give up because that wait cannot be followed by a
+    // meaningful run — proving it parsed the epoch rather than blind-polling.
+    const agentCommand = [
+      TRUST_REPO,
+      'echo run >> /output/.mock-run-count',
+      'RESET=$(( $(date +%s) + 3600 ))',
+      `printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|%s","num_turns":1}\\n' "$RESET"`,
+      'exit 1',
+    ].join('\n');
+
+    const { exitCode } = await runHarness(dirs, {
+      role: 'develop',
+      issue_id: 5,
+      branch_name: 'main',
+      attempt: 1,
+      max_runtime_minutes: 1,
+      agent_command: agentCommand,
+      install_commands: [],
+    });
+
+    expect(exitCode).toBe(0);
+
+    const result = JSON.parse(
+      fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
+    );
+    expect(result.status).toBe('failure');
+
+    const log = fs.readFileSync(path.join(dirs.outputDir, 'progress.log'), 'utf-8');
+    expect(log).toContain('usage limit resets at'); // reset-aware wait computed
+    expect(log).toContain('includes 60s buffer');
+    expect(log).not.toContain('fixed poll'); // NOT the fallback poll
+    expect(log).toContain('runtime budget nearly exhausted'); // deadline give-up preserved
+
+    // Exactly one run — the harness gave up rather than sleeping until the reset
+    const runs = fs.readFileSync(path.join(dirs.outputDir, '.mock-run-count'), 'utf-8');
+    expect(runs.trim().split('\n')).toHaveLength(1);
+  });
+
+  it('wall-clock "session limit ... resets Xpm (UTC)" → reset-aware wait with next-day rollover, classified without a 429', async () => {
+    const dirs = setupDirs('reset-wallclock');
+
+    // "session limit" phrasing (no api_error_status 429) with a wall-clock
+    // reset stated as the clock time 18h ago — whichever side of midnight
+    // "now" is on, that resolves (with next-day rollover) to ~6h ahead, a
+    // valid reset-aware wait. Against a 1-minute budget the harness computes
+    // that wait and gives up, proving both the session-limit classification
+    // and the wall-clock/rollover parse.
+    const agentCommand = [
+      TRUST_REPO,
+      'echo run >> /output/.mock-run-count',
+      "T=$(date -u -d '18 hours ago' +'%-I:%M%p')",
+      `printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"session limit reached, resets %s (UTC)","num_turns":1}\\n' "$T"`,
+      'exit 1',
+    ].join('\n');
+
+    const { exitCode } = await runHarness(dirs, {
+      role: 'develop',
+      issue_id: 6,
+      branch_name: 'main',
+      attempt: 1,
+      max_runtime_minutes: 1,
+      agent_command: agentCommand,
+      install_commands: [],
+    });
+
+    expect(exitCode).toBe(0);
+
+    const result = JSON.parse(
+      fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
+    );
+    expect(result.status).toBe('failure');
+
+    const log = fs.readFileSync(path.join(dirs.outputDir, 'progress.log'), 'utf-8');
+    // Classified as a usage limit despite no 429 (session-limit phrasing)
+    expect(log).toContain('Provider usage limit detected');
+    expect(log).toContain('usage limit resets at'); // wall-clock parse succeeded
+    expect(log).toContain('includes 60s buffer');
+    expect(log).not.toContain('fixed poll'); // NOT the fallback poll
+    expect(log).toContain('runtime budget nearly exhausted');
+
+    const runs = fs.readFileSync(path.join(dirs.outputDir, '.mock-run-count'), 'utf-8');
+    expect(runs.trim().split('\n')).toHaveLength(1);
   });
 
   it('does NOT retry a non-usage failure — exits immediately with the structured error', async () => {
@@ -265,7 +358,7 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     const agentCommand = [
       TRUST_REPO,
       'echo run >> /output/.mock-run-count',
-      `echo '${USAGE_LIMIT_LINE}'`,
+      `echo '${UNPARSEABLE_LIMIT_LINE}'`,
       'exit 1',
     ].join('\n');
 
@@ -306,7 +399,7 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
       '  exit 0',
       'fi',
       'touch /output/.mock-second-run',
-      `echo '${USAGE_LIMIT_LINE}'`,
+      `echo '${UNPARSEABLE_LIMIT_LINE}'`,
       'exit 1',
     ].join('\n');
 

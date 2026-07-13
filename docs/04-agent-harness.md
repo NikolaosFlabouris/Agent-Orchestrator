@@ -367,7 +367,8 @@ while :; do
     || AGENT_EXIT=$?
   # success / timeout / non-usage-limit failure → exit loop
   # usage-limit failure → WIP-commit dirty work, append interruption note
-  # to prompt.md, sleep 10 minutes (budget permitting), relaunch
+  # to prompt.md, sleep until the stated reset time + a 60s buffer (or a
+  # fixed poll when that time can't be parsed), budget permitting, relaunch
 done
 
 # Status from exit code + review.json check (review role only) →
@@ -387,35 +388,51 @@ container alive and retries internally:
 1. **Detect** — after a non-zero agent exit, the harness inspects the final
    `{"type":"result"}` stream-json event of the *current* run only. It
    classifies the failure as a usage limit when `is_error` is set and either
-   `api_error_status` is 429 or the result text contains "usage limit"
-   (Claude Code's subscription-limit phrasing). Detection is deliberately
-   Claude Code-specific and narrow — a false positive would park the task
-   until its deadline; other CLIs' phrasings get added as they are observed.
+   `api_error_status` is 429 or the result text contains "usage limit" or
+   "session limit" (case-insensitive). Both phrasings are matched because
+   Claude Code emits both — the older `Claude AI usage limit reached|<epoch>`
+   and the newer `You've hit your session limit · resets 2am (UTC)`; the
+   latter was previously classified only because it also carried a 429.
+   Detection is deliberately Claude Code-specific and narrow — a false
+   positive would park the task until its deadline; other CLIs' phrasings get
+   added as they are observed.
 2. **Preserve** — uncommitted work is committed as a
    `WIP: auto-checkpoint` commit (dev role only), so the next run cannot
    destroy it and will find it in `git log`. A one-time note is appended to
    `/task/prompt.md` telling the next agent to review `git log`/`git status`
    and continue the existing work rather than restart it.
-3. **Wait and relaunch** — the harness sleeps a fixed 10 minutes
-   (`HARNESS_USAGE_RETRY_SECONDS` overrides this for tests) and re-runs the
-   same `agent_command` as a fresh agent against the intact workspace. No
-   session resume: resume flags are vendor-specific, and files/commits are
-   the durable state a new run reorients from. Polling is deliberate — the
-   CLI's "resets at ..." phrasing varies across versions, while a failed
-   probe costs seconds and ~no tokens.
+3. **Wait and relaunch** — the harness parses the reset time the limit
+   message states and sleeps until then plus a 60-second buffer, so the fresh
+   agent starts just after the window resets instead of blind-polling into the
+   still-closed window. It handles three phrasings: the inline epoch
+   (`...reached|<unix-epoch>`), a wall-clock UTC time (`resets 2am (UTC)`,
+   rolled to the next day when that time has already passed today), and a
+   relative offset (`resets in 3 hours`). Safety clamps keep a mis-parse from
+   ever parking the container: the wait has a 60-second floor, and if parsing
+   fails or yields a nonsensical instant (well in the past, or more than 12h
+   ahead) the harness falls back to a fixed poll (`HARNESS_USAGE_RETRY_SECONDS`,
+   default 600s; the env override exists for tests). Either way it re-runs the
+   same `agent_command` as a fresh agent against the intact workspace — no
+   session resume, because resume flags are vendor-specific and files/commits
+   are the durable state a new run reorients from. This replaced the original
+   fixed 10-minute poll, which in production burned 17 futile relaunches over
+   a ~3-hour reset window, each dying within seconds of starting.
 4. **Stay observable** — every wait and relaunch appends a timestamped
    `[harness ...]` marker line to `progress.log`, which the task page
-   live-streams. The task simply stays `in-progress`; the operator can see
-   it is waiting on a usage limit and intervene (cancel, reset) if desired.
+   live-streams. The wait marker records the parsed reset time and the chosen
+   wait (e.g. `usage limit resets at 02:00 UTC — waiting 3h11m (includes 60s
+   buffer)`), or notes the fixed-poll fallback, so an operator can see why the
+   harness picked its wait. The task simply stays `in-progress`; the operator
+   can intervene (cancel, reset) if desired.
 
 The orchestrator needs no changes for this: the container just looks
 long-running. Every retry and sleep is bounded by the single wall-clock
-deadline (`max_runtime_minutes`); when the remaining budget cannot fit
-another wait-plus-run, the harness stops retrying and reports the failure
-normally, and the orchestrator's timeout sweep remains the backstop. A
-parked container intentionally holds its scheduler slot and its provider's
-concurrency slot — which also stops the scheduler from launching more tasks
-against the exhausted provider beyond its `concurrency_limit`.
+deadline (`max_runtime_minutes`); when the remaining budget cannot fit the
+computed wait plus a meaningful run, the harness stops retrying and reports
+the failure normally, and the orchestrator's timeout sweep remains the
+backstop. A parked container intentionally holds its scheduler slot and its
+provider's concurrency slot — which also stops the scheduler from launching
+more tasks against the exhausted provider beyond its `concurrency_limit`.
 
 Non-usage failures are unaffected: the harness exits after the first
 failure exactly as before, and the orchestrator's attempt handling owns the
