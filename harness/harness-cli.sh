@@ -58,11 +58,18 @@ fi
 # waits, retries. Replaces the old single-run `timeout ${MAX_MINUTES}m` budget.
 DEADLINE=$(( $(date +%s) + MAX_MINUTES * 60 ))
 
-# Fixed wait between usage-limit retries. Deliberately a dumb poll rather than
-# parsing the CLI's "resets at ..." phrasing: the phrasing varies across
-# Claude Code versions, while a failed probe costs seconds and ~no tokens.
-# The env override exists for tests; production containers don't set it.
+# Fallback wait between usage-limit retries. The harness prefers the reset time
+# the CLI states in its limit message (parsed by parse_reset_epoch below) and
+# sleeps until then + a small buffer; this fixed poll is the fallback used only
+# when that message can't be parsed or the parsed time is nonsensical. Blind
+# polling was the old default — in production it cost 17 futile relaunches over
+# a ~3h reset window — so it survives only as the safe fallback. The env
+# override exists for tests; production containers don't set it.
 USAGE_RETRY_INTERVAL="${HARNESS_USAGE_RETRY_SECONDS:-600}"
+
+# Buffer added on top of the parsed reset instant so the fresh agent starts
+# comfortably AFTER the window has actually reset, never a hair before it.
+USAGE_RESET_BUFFER=60
 
 # Timestamped harness marker appended to the same progress.log the UI
 # live-streams — this is how operators see "waiting on a usage limit" on the
@@ -76,17 +83,111 @@ marker() {
 # positive here parks the task until the deadline, so the patterns stay
 # narrow. Input: the CURRENT run's final stream-json result event. Matches:
 #   - api_error_status 429 (Anthropic API rate/usage limit), or
-#   - "usage limit" in the result text (subscription limits surface as e.g.
-#     "Claude AI usage limit reached|<reset-epoch>").
+#   - "usage limit" / "session limit" in the result text. Subscription limits
+#     surface as either "Claude AI usage limit reached|<reset-epoch>" (older)
+#     or "You've hit your session limit · resets 2am (UTC)" (observed in
+#     production) — the latter only classified before because it also carried a
+#     429, so both phrasings are matched here to close that gap.
 is_usage_limit_result() {
   [ -n "$1" ] || return 1
   printf '%s' "$1" | jq -e '
     (.is_error == true) and (
       ((.api_error_status // 0) == 429)
       or ((.api_error_status // "") == "429")
-      or ((.result // "") | test("usage limit"; "i"))
+      or ((.result // "") | test("session limit|usage limit"; "i"))
     )
   ' > /dev/null 2>&1
+}
+
+# Parse the usage-limit reset time from the agent's result text, printing it as
+# a unix epoch on stdout (nothing, exit 1, when no supported phrasing is
+# found). Containers run in UTC, so no timezone juggling is needed. Handles:
+#   1. "Claude AI usage limit reached|<unix-epoch>" — the epoch IS the reset.
+#   2. "...resets 2am (UTC)" — wall-clock UTC. GNU `date -d "2am"` yields
+#      TODAY's 2am, which may already be in the past, so roll forward one day
+#      when the parsed instant is not in the future.
+#   3. "...resets in 3 hours" / "in 45 minutes" — a relative offset from now.
+# Callers sanity-clamp the result (see compute_usage_wait), so a wild parse
+# here can never park the container until its deadline.
+parse_reset_epoch() {
+  local text="$1" now match epoch n unit
+  now=$(date +%s)
+
+  # Format 1: explicit epoch after a pipe.
+  match=$(printf '%s' "$text" | grep -oiE 'reached\|[0-9]+' | grep -oE '[0-9]+' | head -1)
+  if [ -n "$match" ]; then
+    printf '%s\n' "$match"
+    return 0
+  fi
+
+  # Format 3: "resets in N hour(s)/minute(s)".
+  match=$(printf '%s' "$text" | grep -oiE 'resets in [0-9]+ (hour|minute)' | head -1)
+  if [ -n "$match" ]; then
+    n=$(printf '%s' "$match" | grep -oE '[0-9]+')
+    unit=$(printf '%s' "$match" | grep -oiE '(hour|minute)')
+    epoch=$(date -d "$n $unit" +%s 2>/dev/null || true)
+    if [ -n "$epoch" ]; then printf '%s\n' "$epoch"; return 0; fi
+  fi
+
+  # Format 2: "resets [at] 2am / 11:30pm (UTC)".
+  match=$(printf '%s' "$text" \
+    | grep -oiE 'resets (at )?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' \
+    | grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' | head -1)
+  if [ -n "$match" ]; then
+    epoch=$(date -u -d "$match" +%s 2>/dev/null || true)
+    if [ -n "$epoch" ]; then
+      # date -d "2am" resolves to TODAY's 2am; roll to tomorrow when it has
+      # already passed. UTC has no DST, so +86400s is exactly the next day.
+      if [ "$epoch" -le "$now" ]; then
+        epoch=$(( epoch + 86400 ))
+      fi
+      printf '%s\n' "$epoch"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Format a whole number of seconds as a compact human duration: "3h11m",
+# "10m", or "45s". Used only for the progress.log marker lines.
+fmt_duration() {
+  local s=$1 h m
+  h=$(( s / 3600 ))
+  m=$(( (s % 3600) / 60 ))
+  if [ "$h" -gt 0 ]; then
+    printf '%dh%dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then
+    printf '%dm' "$m"
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# Decide how long to wait before relaunching, given the current run's result
+# text. Sets two globals: USAGE_WAIT_SECONDS (the sleep) and USAGE_WAIT_REASON
+# (a human clause for the marker line). Prefers the reset time stated in the
+# message (parse_reset_epoch); falls back to the fixed USAGE_RETRY_INTERVAL
+# poll when no time is parseable OR the parsed wait is nonsensical — a reset
+# well in the past (>5m) or absurdly far ahead (>12h) means a mis-parse, and a
+# fallback poll is always safer than parking the container for hours on a bad
+# read. The +USAGE_RESET_BUFFER lands the fresh agent just after the reset; a
+# 60s floor guards against a zero/negative sleep.
+compute_usage_wait() {
+  local text="$1" reset now wait
+  reset=$(parse_reset_epoch "$text" || true)
+  if [ -n "$reset" ]; then
+    now=$(date +%s)
+    if [ "$reset" -ge $(( now - 300 )) ] && [ "$reset" -le $(( now + 12 * 3600 )) ]; then
+      wait=$(( reset - now + USAGE_RESET_BUFFER ))
+      [ "$wait" -lt 60 ] && wait=60
+      USAGE_WAIT_SECONDS=$wait
+      USAGE_WAIT_REASON="usage limit resets at $(date -u -d "@$reset" +%H:%M) UTC — waiting $(fmt_duration "$wait") (includes ${USAGE_RESET_BUFFER}s buffer)"
+      return 0
+    fi
+  fi
+  USAGE_WAIT_SECONDS=$USAGE_RETRY_INTERVAL
+  USAGE_WAIT_REASON="reset time not parseable — waiting $(fmt_duration "$USAGE_RETRY_INTERVAL") (fixed poll)"
 }
 
 # Before sleeping, commit any uncommitted work as a WIP checkpoint. Two
@@ -177,8 +278,16 @@ while :; do
     break # real failure → the orchestrator's retry/attempt path owns it
   fi
 
+  # Decide how long to wait: reset-aware if the limit message states a reset
+  # time, otherwise the fixed poll. Logged before the give-up check so
+  # progress.log records why the harness chose its wait even when it then
+  # decides the budget is too tight to follow through.
+  RUN_RESULT_TEXT=$(printf '%s' "$RUN_RESULT_LINE" | jq -r '.result // empty' 2>/dev/null || true)
+  compute_usage_wait "$RUN_RESULT_TEXT"
+  marker "Provider usage limit detected (agent exit ${AGENT_EXIT}) — ${USAGE_WAIT_REASON}."
+
   # Don't start a wait that can't be followed by a meaningful run (60s floor).
-  if [ $(( $(date +%s) + USAGE_RETRY_INTERVAL + 60 )) -ge "$DEADLINE" ]; then
+  if [ $(( $(date +%s) + USAGE_WAIT_SECONDS + 60 )) -ge "$DEADLINE" ]; then
     marker "Usage limit still active with the runtime budget nearly exhausted — reporting failure to the orchestrator."
     break
   fi
@@ -186,8 +295,8 @@ while :; do
   USAGE_RETRIES=$(( USAGE_RETRIES + 1 ))
   checkpoint_workspace
   append_prompt_note
-  marker "Provider usage limit detected (agent exit ${AGENT_EXIT}). Waiting $(( USAGE_RETRY_INTERVAL / 60 ))m, then relaunching a fresh agent (usage-limit retry ${USAGE_RETRIES}). Workspace is preserved; the task stays in progress."
-  sleep "$USAGE_RETRY_INTERVAL"
+  marker "Waiting before relaunching a fresh agent (usage-limit retry ${USAGE_RETRIES}). Workspace is preserved; the task stays in progress."
+  sleep "$USAGE_WAIT_SECONDS"
   marker "Usage-limit wait over — relaunching agent (usage-limit retry ${USAGE_RETRIES})."
 done
 
