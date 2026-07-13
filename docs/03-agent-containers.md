@@ -44,7 +44,8 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Go toolchain
+# Go toolchain. GOPATH is /home/agent/go; GOMODCACHE stays at its default
+# ($GOPATH/pkg/mod), which is the persistent bind-mounted module cache.
 RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
 ENV GOPATH="/home/agent/go"
@@ -62,6 +63,12 @@ RUN chmod +x /usr/local/bin/harness-cli
 # Non-root agent user (UID/GID 1000)
 RUN groupadd -g 1000 agent && \
     useradd -u 1000 -g agent -m -s /bin/bash agent
+# Pre-create the Go tree and cache root, agent-owned. Otherwise Docker
+# auto-creates the missing parents of the bind-mounted caches
+# (/home/agent/go, /home/agent/go/pkg, /home/agent/.cache) as root:root,
+# and uid 1000 can't create siblings like Go's pkg/sumdb checksum-db dir.
+RUN mkdir -p /home/agent/go/pkg/mod /home/agent/go/bin /home/agent/.cache/go-build \
+    && chown -R agent:agent /home/agent/go /home/agent/.cache
 USER agent
 WORKDIR /repo
 # No ENTRYPOINT — the orchestrator sets the entrypoint at container creation
@@ -81,8 +88,10 @@ The agent user needs write access to the following paths:
 | `/task` | Read task prompt and metadata; append usage-limit interruption note to `prompt.md` | Bind mount (read-write). Orchestrator chowns `prompt.md`/`meta.json` to UID 1000 so the agent can append the interruption note on a usage-limit retry. |
 | `/output` | Write result.json, progress.log, review.json | Bind mount. Directory created with UID 1000 by orchestrator. |
 | `/cache` | Shared cache root (lock file) | Bind mount. Directory created with UID 1000 by orchestrator. |
-| `/home/agent/.npm` | npm download cache | Bind mount from shared cache volume. |
-| `/home/agent/.cache/pip` | pip download cache | Bind mount from shared cache volume. |
+| `/home/agent/.npm` | npm download cache | Bind mount from shared cache volume. Parent `/home/agent` is agent-owned via `useradd -m`. |
+| `/home/agent/.cache/pip` | pip download cache | Bind mount from shared cache volume. Parent `/home/agent/.cache` is pre-created agent-owned in the image. |
+| `/home/agent/go/pkg/mod` | Go module cache | Bind mount from shared cache volume. Parents `/home/agent/go` and `/home/agent/go/pkg` are pre-created agent-owned so Go can create siblings like `pkg/sumdb`. |
+| `/home/agent/.cache/go-build` | Go build cache | Bind mount from shared cache volume. Parent `/home/agent/.cache` is pre-created agent-owned in the image. |
 | `/tmp` | Temporary files during builds/tests | Container-local tmpfs, writable by default. |
 | Global tool binaries | `claude`, `opencode`, `node`, `git`, etc. | Installed as root during image build, readable + executable by all users. |
 

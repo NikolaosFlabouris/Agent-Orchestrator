@@ -75,6 +75,20 @@ RUN userdel -r ubuntu 2>/dev/null; groupdel ubuntu 2>/dev/null; \
     groupadd -g 1000 agent && \
     useradd -u 1000 -g agent -m -s /bin/bash agent
 
+# Pre-create the Go tree and cache root, owned by the agent user.
+#
+# The orchestrator bind-mounts persistent caches at /home/agent/go/pkg/mod and
+# /home/agent/.cache/go-build (see docker.ts). If the parent chain doesn't
+# already exist in the image, Docker auto-creates the missing parents
+# (/home/agent/go, /home/agent/go/pkg, /home/agent/.cache) as root:root. The
+# mounted leaf is agent-writable (host side is chowned 1000:1000), but a
+# root-owned parent stops uid 1000 from creating siblings — e.g. Go's
+# pkg/sumdb checksum-database dir, which fails with a Permission denied.
+# Creating the parents here, agent-owned, means Docker mounts the leaves inside
+# them without recreating root-owned parents.
+RUN mkdir -p /home/agent/go/pkg/mod /home/agent/go/bin /home/agent/.cache/go-build \
+    && chown -R agent:agent /home/agent/go /home/agent/.cache
+
 USER agent
 WORKDIR /repo
 # No ENTRYPOINT — the orchestrator sets the entrypoint at container creation
