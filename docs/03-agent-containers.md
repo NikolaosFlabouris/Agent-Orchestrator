@@ -78,7 +78,7 @@ The agent user needs write access to the following paths:
 |---|---|---|
 | `/repo` | Git workspace — read code, write changes, run git | Bind mount. Orchestrator creates the workspace as UID 1000, or the mount is chowned at container creation. |
 | `/repo/node_modules` | npm dependencies (cache mount) | Bind mount from shared cache volume. Directory created with UID 1000 by orchestrator. |
-| `/task` | Read task prompt and metadata | Bind mount (read-only is sufficient). |
+| `/task` | Read task prompt and metadata; append usage-limit interruption note to `prompt.md` | Bind mount (read-write). Orchestrator chowns `prompt.md`/`meta.json` to UID 1000 so the agent can append the interruption note on a usage-limit retry. |
 | `/output` | Write result.json, progress.log, review.json | Bind mount. Directory created with UID 1000 by orchestrator. |
 | `/cache` | Shared cache root (lock file) | Bind mount. Directory created with UID 1000 by orchestrator. |
 | `/home/agent/.npm` | npm download cache | Bind mount from shared cache volume. |

@@ -110,9 +110,10 @@ checkpoint_workspace() {
 
 # One-time note appended to the prompt so the next (fresh, context-free) agent
 # reliably discovers the partial work instead of restarting it — weak models
-# don't dependably run git log/status unprompted. /task is mounted read-write,
-# and the orchestrator reassembles prompt.md from scratch at every container
-# launch, so the note never leaks across attempts.
+# don't dependably run git log/status unprompted. /task is mounted read-write
+# and the orchestrator chowns prompt.md to the agent user (uid 1000) so this
+# append succeeds; it also reassembles prompt.md from scratch at every
+# container launch, so the note never leaks across attempts.
 PROMPT_NOTE_MARKER='<!-- harness:usage-limit-interruption-note -->'
 append_prompt_note() {
   if [ "$ROLE" != "develop" ]; then return 0; fi
@@ -129,7 +130,7 @@ limit. Partial work may already exist as uncommitted changes and/or
 that work — do not discard, revert, or restart it.
 NOTE
   } >> "$PROMPT_FILE" 2>/dev/null \
-    || marker "Could not append interruption note to prompt.md (read-only /task?)."
+    || marker "Could not append interruption note to prompt.md (check /task/prompt.md ownership/permissions)."
 }
 
 # progress.log is truncated once per container (the output dir persists across

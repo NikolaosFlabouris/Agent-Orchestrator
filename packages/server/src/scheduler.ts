@@ -67,6 +67,8 @@ import {
   getCacheDir,
   generateBranchName,
   writeHarnessConfigFiles,
+  AGENT_UID,
+  AGENT_GID,
 } from './workspace.js';
 import { postDevAgent, handleDevFailure } from './agents/develop.js';
 import {
@@ -1846,6 +1848,22 @@ export class Scheduler {
       agent_command: ctx.invocation.agent_command ?? '',
     };
     await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+
+    // prepareWorkspace() already chowned the task dir tree to the agent user,
+    // but that runs *before* these files exist, so the orchestrator (root)
+    // recreates them root-owned and mode 0644 — readable but not writable by
+    // the agent (uid 1000). The harness appends a usage-limit interruption
+    // note to prompt.md on retry, so it must be agent-writable; chown both
+    // files here (mirroring writeHarnessConfigFiles). No-op on non-Linux dev
+    // hosts, where fs.chown is a no-op and the agent user mapping doesn't apply.
+    if (process.platform === 'linux') {
+      try {
+        await fsp.chown(promptPath, AGENT_UID, AGENT_GID);
+        await fsp.chown(metaPath, AGENT_UID, AGENT_GID);
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   private async archivePreviousOutput(task: Task): Promise<void> {

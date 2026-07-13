@@ -20,8 +20,8 @@ const AGENT_TOKEN = process.env.FORGEJO_AGENT_TOKEN ?? '';
 // The orchestrator runs as root, so any file/dir it creates inside the shared
 // /workspaces, /caches volumes is root-owned and unwritable by the agent.
 // Chown everything we create to 1000:1000 so the agent can read/write.
-const AGENT_UID = 1000;
-const AGENT_GID = 1000;
+export const AGENT_UID = 1000;
+export const AGENT_GID = 1000;
 
 /** chown a directory tree to the agent user. No-op on non-Linux platforms —
  *  fs.chown is a no-op on Windows and the agent user mapping doesn't apply
