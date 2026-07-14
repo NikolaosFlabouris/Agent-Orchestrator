@@ -119,11 +119,16 @@ if (!meta.model || typeof meta.model !== 'string') {
 // the dependency cache. Each step runs in its declared cwd. The orchestrator
 // pre-resolves typed install_steps into literal commands; the harness never
 // sees free-text input from operators.
+// The lock wait is sized for the slowest realistic cold-cache install holding
+// the lock (10-15 minutes for multi-step npm ci + go mod download + tool
+// provisioning) so queued siblings aren't failed for waiting their turn.
+// Keep in sync with harness-cli.sh.
+const INSTALL_LOCK_WAIT_SECONDS = 1800;
 if (meta.install_commands && meta.install_commands.length > 0) {
   for (const step of meta.install_commands) {
     try {
       execSync(
-        `flock -w 300 /cache/.dep-install-lock sh -c ${JSON.stringify(step.command)}`,
+        `flock -w ${INSTALL_LOCK_WAIT_SECONDS} /cache/.dep-install-lock sh -c ${JSON.stringify(step.command)}`,
         { cwd: step.cwd, stdio: 'inherit' }
       );
     } catch (e: unknown) {

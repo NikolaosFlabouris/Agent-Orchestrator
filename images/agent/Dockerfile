@@ -37,9 +37,28 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain — installed under /usr/local/go. Sized at ~150 MB.
-RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+# Keep this at or above the highest Go version any registered repo requires
+# (e.g. a repo's .go-version / go.mod toolchain directive) — repo setup
+# scripts gate on it and abort the harness before the agent starts when the
+# image's Go is too old.
+RUN curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
 ENV GOPATH="/home/agent/go"
+
+# GitHub CLI + shellcheck — repo setup scripts (e.g. Imbina's tools/setup.sh
+# prerequisite gate) treat these as required tooling; when they are missing
+# the install step exits non-zero and the container dies before the agent
+# runs. gh comes from GitHub's own apt repo (not in Ubuntu's archives).
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y \
+    gh \
+    shellcheck \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install agent tools (as root, before switching user)
 RUN npm install -g @anthropic-ai/claude-code

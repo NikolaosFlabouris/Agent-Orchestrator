@@ -21,10 +21,20 @@ ROLE=$(jq -r '.role' "$META")
 # sequentially under a single flock against /cache so concurrent containers
 # on the same repo don't race on the dependency cache.
 LOCKFILE="/cache/.dep-install-lock"
+# Lock-acquisition wait. Sized for the slowest realistic cold-cache install
+# holding the lock (multi-step npm ci + go mod download + tool provisioning
+# can run 10-15 minutes); containers that arrive second queue behind it
+# instead of being failed for merely waiting their turn. Keep in sync with
+# harness-sdk.ts. Total wall clock is still bounded by the orchestrator's
+# runtime timeout sweep.
+INSTALL_LOCK_WAIT=1800
 INSTALL_COUNT=$(jq -r '.install_commands | length' "$META")
 if [ "$INSTALL_COUNT" -gt 0 ]; then
   (
-    flock -w 300 200
+    flock -w "$INSTALL_LOCK_WAIT" 200 || {
+      echo "[harness] Timed out after ${INSTALL_LOCK_WAIT}s waiting for the shared install lock ($LOCKFILE) — another container on this repo held it for the whole window." >> "$AGENT_LOG"
+      exit 1
+    }
     for i in $(seq 0 $((INSTALL_COUNT - 1))); do
       CMD=$(jq -r ".install_commands[$i].command" "$META")
       CWD=$(jq -r ".install_commands[$i].cwd" "$META")

@@ -44,11 +44,22 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Go toolchain. GOPATH is /home/agent/go; GOMODCACHE stays at its default
-# ($GOPATH/pkg/mod), which is the persistent bind-mounted module cache.
-RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+# Go toolchain (keep >= the highest Go version any registered repo requires).
+# GOPATH is /home/agent/go; GOMODCACHE stays at its default ($GOPATH/pkg/mod),
+# which is the persistent bind-mounted module cache.
+RUN curl -fsSL https://go.dev/dl/go1.26.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:/home/agent/go/bin:${PATH}"
 ENV GOPATH="/home/agent/go"
+
+# GitHub CLI + shellcheck (repo setup scripts gate on these as required tooling)
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh shellcheck \
+    && rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs and SDK (npm-distributed)
 RUN npm install -g @anthropic-ai/claude-code \

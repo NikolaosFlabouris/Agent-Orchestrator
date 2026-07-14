@@ -294,9 +294,11 @@ const prompt = readFileSync('/task/prompt.md', 'utf-8');
 // Install steps run sequentially under a single flock against /cache.
 // Each step's command + cwd is pre-resolved by the orchestrator from the
 // repo's typed install_steps; the harness never sees free-text input.
+// The 1800s lock wait covers the slowest realistic cold-cache install, so
+// same-repo containers queue behind it instead of failing on the wait.
 for (const step of meta.install_commands ?? []) {
   execSync(
-    `flock -w 300 /cache/.dep-install-lock sh -c ${JSON.stringify(step.command)}`,
+    `flock -w 1800 /cache/.dep-install-lock sh -c ${JSON.stringify(step.command)}`,
     { cwd: step.cwd, stdio: 'inherit' }
   );
 }
@@ -340,7 +342,7 @@ META="/task/meta.json"
 INSTALL_COUNT=$(jq -r '.install_commands | length' "$META")
 if [ "$INSTALL_COUNT" -gt 0 ]; then
   (
-    flock -w 300 200
+    flock -w 1800 200
     for i in $(seq 0 $((INSTALL_COUNT - 1))); do
       CMD=$(jq -r ".install_commands[$i].command" "$META")
       CWD=$(jq -r ".install_commands[$i].cwd" "$META")

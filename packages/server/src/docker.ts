@@ -279,6 +279,12 @@ const CACHE_SUBDIRS = [
   'pip-cache',
   'go-mod-cache',
   'go-build-cache',
+  // General-purpose bucket for repo install scripts to cache downloaded
+  // tooling (e.g. pinned static binaries) across containers. Pre-created and
+  // chowned here because on Linux hosts the /cache root itself is root-owned
+  // — without this, a script's writability probe fails and its caching
+  // silently degrades to a per-container temp dir.
+  'agent-tools',
 ];
 
 function ensureCacheSubdirs(cacheDir: string): void {
