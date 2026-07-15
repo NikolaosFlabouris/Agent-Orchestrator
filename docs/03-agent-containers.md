@@ -162,6 +162,8 @@ Two agents working on the same repo in parallel could corrupt shared caches. The
 
 The orchestrator creates agent containers via the Docker API (dockerode). The `createAgentContainer` function receives a pre-assembled options object — profile resolution, harness invocation, path computation, environment variable assembly, and directory creation are handled by the caller (the scheduler / launch helpers in `packages/server/src/`). This keeps the Docker manager focused on container lifecycle and avoids coupling it to the database, harness registry, or workspace logic.
 
+**Mount source resolution:** the paths in the options object are the orchestrator's own in-container paths (`/workspaces/issue-N/...`), but the daemon interprets mount sources from the host's point of view. At boot the orchestrator inspects its own mounts and `resolveMountSource` (in `docker.ts`) translates each agent mount accordingly: when `/workspaces` and `/caches` are named volumes (the compose default), agents mount the same volume with a `Subpath` (Docker Engine 26+), keeping all I/O on the Docker VM's native filesystem; when they are host bind mounts, the in-container path is prefix-swapped to the host path as before. The mount lists in the pseudocode below show the logical `source:target` pairs — the daemon-level spec (bind string vs volume+subpath) is derived per mount at creation time.
+
 ```typescript
 interface CreateContainerOptions {
   task: Task;

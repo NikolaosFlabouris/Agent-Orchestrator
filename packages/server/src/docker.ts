@@ -26,34 +26,61 @@ export function getDocker(): Docker {
 }
 
 // ---------------------------------------------------------------------------
-// Host-path translation for sibling containers
+// Mount translation for sibling containers
 // ---------------------------------------------------------------------------
 //
 // The orchestrator runs inside a container. When it asks the Docker daemon to
-// create a sibling agent container with a bind mount, the daemon interprets the
-// bind source as a HOST path — NOT a path inside the orchestrator. On plain
-// Linux with matching host bind mounts (e.g. `./workspaces:/workspaces`) these
-// two paths happen to agree, so passing `/workspaces/issue-N` works. On Docker
-// Desktop (Windows/macOS), the host path is something like
-// `C:\Users\...\workspaces` and the daemon has no idea what `/workspaces` means
-// — it silently creates an empty directory (or maps into its own rootfs
-// overlay) and the agent sees nothing.
+// create a sibling agent container, mount sources are interpreted from the
+// DAEMON's point of view — never relative to the orchestrator's own
+// filesystem. An in-container path like /workspaces/issue-N therefore has to
+// be translated before it can back an agent mount. Two cases, decided by how
+// the orchestrator's own /workspaces and /caches are provided (inspected from
+// its container config at boot):
 //
-// To be portable, we inspect the orchestrator's own container at boot, read
-// the host `Source` for each of its mounts, and translate in-container paths
-// to host paths when constructing agent bind-mount specs.
+//   * named volume (the compose default) — there is no host path at all; the
+//     agent container mounts the SAME volume with a `Subpath` pointing at the
+//     issue-N subdirectory (Docker Engine 26+ / API 1.45+). This keeps all
+//     workspace I/O on the daemon's native filesystem, which on Docker
+//     Desktop (Windows/macOS) is orders of magnitude faster than the 9P /
+//     gRPC-FUSE host share that a host-folder bind goes through (observed:
+//     vitest coverage runs that never completed over 9P).
+//
+//   * bind mount (the pre-volume layout, still supported) — the daemon wants
+//     the HOST path, so we prefix-swap the in-container path with the bind's
+//     host Source. On Docker Desktop the Source is the Windows/macOS folder;
+//     on plain Linux the two paths typically agree.
+//
+// Fallback: when inspection fails or a path matches no mount, the
+// in-container path is passed through as a bind source unchanged — correct
+// on a native-Linux host whose bind layout mirrors the container's.
 
-let _hostPathMap: Map<string, string> | null = null;
+export type MountBacking =
+  | { kind: 'bind'; source: string }
+  | { kind: 'volume'; name: string };
 
-async function loadHostPathMap(): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
+export type ResolvedMountSource =
+  | { kind: 'bind'; hostPath: string }
+  | { kind: 'volume'; name: string; subpath: string }; // '' = volume root
+
+let _mountMap: Map<string, MountBacking> | null = null;
+
+async function loadMountMap(): Promise<Map<string, MountBacking>> {
+  const map = new Map<string, MountBacking>();
   try {
     const id = (process.env.HOSTNAME ?? os.hostname()).trim();
     if (!id) return map;
     const self = await _docker.getContainer(id).inspect();
     for (const m of self.Mounts ?? []) {
-      if (m.Destination && m.Source) {
-        map.set(m.Destination.replace(/\/+$/, ''), m.Source.replace(/\/+$/, ''));
+      if (!m.Destination) continue;
+      const dest = m.Destination.replace(/\/+$/, '');
+      // dockerode's inspect type carries Type/Name but older versions leave
+      // them optional — read defensively.
+      const type = (m as { Type?: string }).Type;
+      const name = (m as { Name?: string }).Name;
+      if (type === 'volume' && name) {
+        map.set(dest, { kind: 'volume', name });
+      } else if (m.Source) {
+        map.set(dest, { kind: 'bind', source: m.Source.replace(/\/+$/, '') });
       }
     }
   } catch {
@@ -65,27 +92,60 @@ async function loadHostPathMap(): Promise<Map<string, string>> {
 }
 
 export async function initHostPathMap(): Promise<void> {
-  _hostPathMap = await loadHostPathMap();
+  _mountMap = await loadMountMap();
+  await assertVolumeSubpathSupport(_mountMap);
 }
 
-/** Translate an in-container absolute path (e.g. /workspaces/issue-1) to the
- *  corresponding HOST path the Docker daemon can resolve. Falls back to the
- *  input if no mapping is known. */
-export function toHostPath(inContainerPath: string): string {
-  if (!_hostPathMap) return inContainerPath;
+/** Volume-backed workspaces need Docker Engine 26+ (API 1.45) for
+ *  VolumeOptions.Subpath on agent mounts. Fail at boot with an actionable
+ *  message rather than at first task launch with a cryptic daemon error. */
+async function assertVolumeSubpathSupport(
+  map: Map<string, MountBacking>
+): Promise<void> {
+  const usesVolumes = [...map.values()].some((b) => b.kind === 'volume');
+  if (!usesVolumes) return;
+  const version = await _docker.version();
+  const [maj = 0, min = 0] = (version.ApiVersion ?? '0.0')
+    .split('.')
+    .map(Number);
+  if (maj > 1 || (maj === 1 && min >= 45)) return;
+  throw new Error(
+    `/workspaces or /caches is a named volume, which requires Docker Engine 26+ ` +
+      `(API 1.45) for volume-subpath agent mounts — this daemon reports API ` +
+      `${version.ApiVersion} (Engine ${version.Version}). Upgrade Docker, or ` +
+      `switch the compose volumes back to host bind mounts.`
+  );
+}
+
+/** Resolve an in-container absolute path (e.g. /workspaces/issue-1) to the
+ *  daemon-visible mount source backing it: a host path (bind) or a named
+ *  volume plus subpath. Exported with an injectable map for unit tests. */
+export function resolveMountSource(
+  inContainerPath: string,
+  map: Map<string, MountBacking> | null = _mountMap
+): ResolvedMountSource {
   const normalized = inContainerPath.replace(/\/+$/, '');
   // Find the longest matching destination prefix.
-  let best: { dest: string; source: string } | null = null;
-  for (const [dest, source] of _hostPathMap.entries()) {
-    if (normalized === dest || normalized.startsWith(dest + '/')) {
-      if (!best || dest.length > best.dest.length) {
-        best = { dest, source };
+  let best: { dest: string; backing: MountBacking } | null = null;
+  if (map) {
+    for (const [dest, backing] of map.entries()) {
+      if (normalized === dest || normalized.startsWith(dest + '/')) {
+        if (!best || dest.length > best.dest.length) {
+          best = { dest, backing };
+        }
       }
     }
   }
-  if (!best) return inContainerPath;
+  if (!best) return { kind: 'bind', hostPath: normalized };
   const suffix = normalized.slice(best.dest.length);
-  return best.source + suffix;
+  if (best.backing.kind === 'bind') {
+    return { kind: 'bind', hostPath: best.backing.source + suffix };
+  }
+  return {
+    kind: 'volume',
+    name: best.backing.name,
+    subpath: suffix.replace(/^\//, ''),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +159,16 @@ const LABEL_TASK_ID = 'task-id';
 // ---------------------------------------------------------------------------
 // Container lifecycle
 // ---------------------------------------------------------------------------
+
+/** Volume mount spec for agent containers. Mirrors the Docker API shape;
+ *  declared locally because VolumeOptions.Subpath (Engine 26+ / API 1.45)
+ *  is not in @types/dockerode yet. */
+interface AgentVolumeMount {
+  Type: 'volume';
+  Source: string;
+  Target: string;
+  VolumeOptions?: { Subpath?: string };
+}
 
 export interface CreateContainerOptions {
   task: Task;
@@ -118,34 +188,50 @@ export async function createAgentContainer(
 ): Promise<Docker.Container> {
   const { task, repo, harnessRuntime, workdir, taskDir, outputDir, cacheDir, env } = opts;
 
-  // The orchestrator passes in paths as they appear INSIDE its own container.
-  // The Docker daemon interprets bind-mount sources as HOST paths, so translate
-  // before constructing the Binds array. No-op on plain Linux where the two
-  // agree. Also ensure cache subdirectories exist and are writable by the
-  // agent user before Docker auto-creates them as root-owned.
+  // The orchestrator passes in paths as they appear INSIDE its own container;
+  // resolveMountSource translates each one to a daemon-visible source (host
+  // path or volume subpath). Ensure cache subdirectories exist and are
+  // writable by the agent user before Docker auto-creates them as root-owned.
   ensureCacheSubdirs(cacheDir);
-
-  const workdirHost = toHostPath(workdir);
-  const taskDirHost = toHostPath(taskDir);
-  const outputDirHost = toHostPath(outputDir);
-  const cacheDirHost = toHostPath(cacheDir);
+  // Bind mounts auto-create a missing source directory; volume Subpath
+  // mounts refuse to start instead. Workspace prep guarantees all three in
+  // the normal flow — this is cheap insurance so a missing dir surfaces as
+  // an empty mount, not a container-start error.
+  ensureAgentDirs([workdir, taskDir, outputDir]);
 
   // All language cache buckets are always mounted. The unified
   // orchestrator-agent image ships Node, Python, and Go toolchains together,
   // so a repo can be polyglot. Empty buckets cost ~0 bytes until something
   // writes to them.
-  const mounts = [
-    `${workdirHost}:/repo`,
-    `${taskDirHost}:/task`,
-    `${outputDirHost}:/output`,
-    `${cacheDirHost}:/cache`,
-    `${cacheDirHost}/node_modules:/repo/node_modules`,
-    `${cacheDirHost}/npm-cache:/home/agent/.npm`,
-    `${cacheDirHost}/venv:/repo/.venv`,
-    `${cacheDirHost}/pip-cache:/home/agent/.cache/pip`,
-    `${cacheDirHost}/go-mod-cache:/home/agent/go/pkg/mod`,
-    `${cacheDirHost}/go-build-cache:/home/agent/.cache/go-build`,
+  const mountSpecs: Array<{ path: string; target: string }> = [
+    { path: workdir, target: '/repo' },
+    { path: taskDir, target: '/task' },
+    { path: outputDir, target: '/output' },
+    { path: cacheDir, target: '/cache' },
+    { path: `${cacheDir}/node_modules`, target: '/repo/node_modules' },
+    { path: `${cacheDir}/npm-cache`, target: '/home/agent/.npm' },
+    { path: `${cacheDir}/venv`, target: '/repo/.venv' },
+    { path: `${cacheDir}/pip-cache`, target: '/home/agent/.cache/pip' },
+    { path: `${cacheDir}/go-mod-cache`, target: '/home/agent/go/pkg/mod' },
+    { path: `${cacheDir}/go-build-cache`, target: '/home/agent/.cache/go-build' },
   ];
+
+  const binds: string[] = [];
+  const volumeMounts: AgentVolumeMount[] = [];
+  for (const spec of mountSpecs) {
+    const src = resolveMountSource(spec.path);
+    if (src.kind === 'bind') {
+      binds.push(`${src.hostPath}:${spec.target}`);
+    } else {
+      volumeMounts.push({
+        Type: 'volume',
+        Source: src.name,
+        Target: spec.target,
+        // Subpath is omitted when the path IS the volume root.
+        ...(src.subpath ? { VolumeOptions: { Subpath: src.subpath } } : {}),
+      });
+    }
+  }
 
   // Entrypoint determined by harness runtime
   const entrypoint =
@@ -169,7 +255,12 @@ export async function createAgentContainer(
     User: '1000:1000',
     Env: env,
     HostConfig: {
-      Binds: mounts,
+      ...(binds.length ? { Binds: binds } : {}),
+      // Cast: VolumeOptions.Subpath (Engine 26+ / API 1.45) is not in
+      // @types/dockerode yet; the daemon accepts it as-is.
+      ...(volumeMounts.length
+        ? { Mounts: volumeMounts as unknown as Docker.MountConfig }
+        : {}),
       Memory: memoryMb * 1024 * 1024,
       CpuPeriod: 100000,
       CpuQuota: cpuCores * 100000,
@@ -294,6 +385,26 @@ function ensureCacheSubdirs(cacheDir: string): void {
       fs.mkdirSync(p, { recursive: true });
       try {
         fs.chownSync(p, 1000, 1000);
+      } catch {
+        /* non-Linux host or no permission — best effort */
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/** Pre-create agent mount source directories. Volume Subpath mounts (unlike
+ *  binds) require the subdirectory to exist at container start. mkdir is
+ *  idempotent; the non-recursive chown only affects the dir itself, so an
+ *  already-prepared workspace tree keeps the ownership workspace prep gave
+ *  it. */
+function ensureAgentDirs(dirs: string[]): void {
+  for (const d of dirs) {
+    try {
+      fs.mkdirSync(d, { recursive: true });
+      try {
+        fs.chownSync(d, 1000, 1000);
       } catch {
         /* non-Linux host or no permission — best effort */
       }

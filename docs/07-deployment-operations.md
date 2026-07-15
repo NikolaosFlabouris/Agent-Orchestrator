@@ -108,16 +108,27 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data
-      - workspaces:/workspaces
-      - caches:/caches
+      - orchestrator-workspaces:/workspaces
+      - orchestrator-caches:/caches
     env_file:
       - .env
 
 volumes:
-  orchestrator-data:    # SQLite DB + config (no secrets — only task state and settings)
-  workspaces:           # Git working directories
-  caches:               # Dependency caches per repo
+  orchestrator-data:          # SQLite DB + config (no secrets — only task state and settings)
+  orchestrator-workspaces:    # Git working directories (agents mount per-task subpaths)
+  orchestrator-caches:        # Dependency caches per repo (agents mount per-repo subpaths)
 ```
+
+Workspaces and caches are named volumes; agent containers mount per-task /
+per-repo subdirectories of the same volumes via volume-subpath mounts
+(Docker Engine 26+ / API 1.45, verified by the orchestrator at boot). Named
+volumes live on the Docker VM's native filesystem, so agent I/O is full
+speed on every host OS — a host-folder bind mount on Docker Desktop
+(Windows/macOS) goes through a 9P/gRPC-FUSE share that is pathologically
+slow for dependency-heavy workloads. Swapping the two lines back to
+`./workspaces:/workspaces` + `./caches:/caches` still works (the
+orchestrator auto-detects bind mounts and reverts to host-path
+translation), at the cost of that penalty.
 
 ### Environment File
 
@@ -192,6 +203,22 @@ docker cp orchestrator:/data/orchestrator.db ./backup/
 ```
 
 The workspaces and caches volumes are transient and do not need backup.
+Because they are named volumes (not host folders), browse their contents
+through the orchestrator container when debugging, e.g.
+`docker exec orchestrator ls /workspaces` or
+`docker cp orchestrator:/workspaces/4-issue-371/.output/progress.log .`.
+
+**Upgrading a pre-volume install** (compose file with bind-mounted
+`./workspaces` + `./caches`): no data migration is needed. Pick a moment
+with no attempts running, then `docker compose down`, pull the new code,
+`docker compose up -d --build`. The new volumes start empty — queued and
+reworked tasks re-clone their workspaces automatically, and caches
+re-download on each repo's next task (a one-time warm-up). Un-pushed
+in-flight work in the old workspaces is not carried over. The old
+`./workspaces` and `./caches` host folders are no longer referenced and can
+be deleted. Beware that `docker compose down -v` now deletes the task
+database volume along with the (re-creatable) workspaces and caches — use
+plain `down`.
 
 ## Disk Management
 

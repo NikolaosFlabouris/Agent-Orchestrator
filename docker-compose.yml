@@ -100,17 +100,30 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - orchestrator-data:/data
-      # /workspaces and /caches are bind mounts (NOT named volumes) because the
-      # orchestrator passes its in-container `/workspaces/issue-N` path through
-      # the Docker socket as the source of agent-container bind mounts. The
-      # Docker daemon interprets that source as a HOST path. With a named
-      # volume, the host has no `/workspaces/...` and Docker silently creates
-      # an empty directory — agents launch with an empty /repo and immediately
-      # fail. With a bind mount, the orchestrator's `/workspaces` is the same
-      # filesystem path on the host, so the agent sees the actual workspace.
-      # The host directories are gitignored.
-      - ./workspaces:/workspaces
-      - ./caches:/caches
+      # /workspaces and /caches are NAMED VOLUMES. Agent containers mount
+      # per-task subdirectories of these same volumes via volume-subpath
+      # mounts (Docker Engine 26+ / API 1.45 — the orchestrator verifies this
+      # at boot). The orchestrator inspects its own mounts at startup and
+      # translates /workspaces/issue-N into {volume, subpath} when launching
+      # agents, so no host path is involved anywhere.
+      #
+      # Why volumes and not host bind mounts (`./workspaces:/workspaces`):
+      # volumes live on the Docker VM's native filesystem. On Docker Desktop
+      # (Windows/macOS) a host-folder bind is served over a 9P/gRPC-FUSE
+      # share, which is catastrophically slow for dependency-heavy work —
+      # observed: vitest coverage runs inside agent containers that never
+      # completed (>90 min, processes stuck in p9_client_rpc) versus minutes
+      # on a volume. Bind mounts still work if you swap these lines back to
+      # `./workspaces:/workspaces` + `./caches:/caches` (the orchestrator
+      # auto-detects and reverts to host-path translation), at the cost of
+      # that I/O penalty on Docker Desktop.
+      #
+      # NOTE: `docker compose down -v` now deletes workspaces and caches
+      # (both re-creatable: workspaces re-clone per task, caches re-download)
+      # AND orchestrator-data (the task database — NOT re-creatable). Use
+      # plain `docker compose down` unless you mean to wipe everything.
+      - orchestrator-workspaces:/workspaces
+      - orchestrator-caches:/caches
     env_file:
       - .env
 
@@ -176,4 +189,12 @@ services:
 
 volumes:
   orchestrator-data:
+  # Workspaces and per-repo dependency caches. Shared between the
+  # orchestrator (mounted whole at /workspaces and /caches) and agent
+  # containers (volume-subpath mounts of per-task subdirectories). Both are
+  # re-creatable: a lost workspace re-clones on the task's next attempt, a
+  # lost cache re-downloads. Browse contents via the orchestrator container,
+  # e.g. `docker exec orchestrator ls /workspaces`.
+  orchestrator-workspaces:
+  orchestrator-caches:
   forgejo-data:
