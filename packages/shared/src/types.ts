@@ -11,7 +11,26 @@ export interface Task {
   queue_position: number | null;
   attempt: number;
   max_attempts: number;
+  /** Prep failures charged against this task's permanent-failure budget.
+   *  Structural failures (bad branch, missing agent image, broken profile
+   *  chain) count every occurrence; outage-shaped git failures count once
+   *  per outage window, so a single git-host outage can't exhaust the cap. */
   prep_failure_count: number;
+  /** Consecutive outage-shaped workspace-prep failures. Drives the
+   *  exponential backoff delay, and doubles as the outage-window marker
+   *  (0 = no outage in progress). Cleared by a successful prepare and by
+   *  every requeue/reset path. */
+  prep_backoff_level: number;
+  /** ISO timestamp before which the scheduler must not retry workspace prep
+   *  for this task. NULL = runnable now. A task waiting out a backoff still
+   *  reads as `queued` externally and doesn't block other candidates. */
+  prep_next_attempt_at: string | null;
+  /** Consecutive failures of a deferred salvage push (preserving finished
+   *  agent work when the git host is down at push time). */
+  salvage_backoff_level: number;
+  /** ISO timestamp of the next salvage-push retry, or NULL when no salvage
+   *  is deferred. The workspace stays on disk while this is set. */
+  salvage_next_attempt_at: string | null;
   /** Per-task agent profile override for the implementation (develop)
    *  stage. NULL = inherit from `repos.agent_profile_id`, which itself
    *  falls back to `settings.default_agent_profile_id`. The orchestrator

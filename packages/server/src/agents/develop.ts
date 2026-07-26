@@ -18,8 +18,36 @@ import {
   detectChanges,
 } from '../workspace.js';
 import { runStep, getStep } from '../checkpoints.js';
+import {
+  isInfraGitFailure,
+  sanitizeGitError,
+  redactCredentials,
+  computeBackoffMs,
+  formatDelay,
+} from '../git-outage.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import type { FastifyBaseLogger } from 'fastify';
+
+/** Current salvage-backoff level, re-read from the DB so overlapping
+ *  deferrals escalate off the persisted value rather than a stale in-memory
+ *  task row. */
+function freshSalvageLevel(task: Task): number {
+  return getTask(task.id)?.salvage_backoff_level ?? task.salvage_backoff_level;
+}
+
+/** Clear a task's deferred-salvage state. No-op when nothing is deferred,
+ *  so it's cheap to call on every successful salvage. */
+function clearSalvageDeferral(task: Task): void {
+  const fresh = getTask(task.id);
+  if (!fresh) return;
+  if (fresh.salvage_backoff_level === 0 && fresh.salvage_next_attempt_at === null) {
+    return;
+  }
+  updateTask(task.id, {
+    salvage_backoff_level: 0,
+    salvage_next_attempt_at: null,
+  });
+}
 
 /**
  * Outcome of resolving the PR for a task's branch.
@@ -232,6 +260,11 @@ export async function postDevAgent(
   const { branch_exists: branchExists, branch_sha: branchSha, base_sha: baseSha } = verifyResult;
 
   if (branchExists) {
+    // The work is on the remote, so there is nothing left to salvage —
+    // drop any deferral a previous outage left behind (e.g. the push
+    // actually landed before the connection dropped).
+    clearSalvageDeferral(task);
+
     // Verify the remote is ahead of base
     if (baseSha && branchSha === baseSha) {
       updateTaskWithSync(task.id, {
@@ -374,6 +407,7 @@ export async function postDevAgent(
 
           // Push with retry
           let pushSucceeded = false;
+          let lastPushError = '';
           for (let pushAttempt = 0; pushAttempt < 2; pushAttempt++) {
             try {
               await execFileP(
@@ -388,6 +422,7 @@ export async function postDevAgent(
               pushSucceeded = true;
               break;
             } catch (err) {
+              lastPushError = err instanceof Error ? err.message : String(err);
               log.warn(
                 {
                   event: 'salvage_push_retry',
@@ -401,14 +436,81 @@ export async function postDevAgent(
           }
 
           if (!pushSucceeded) {
-            throw new Error('Salvage push failed after retries');
+            // Carry the git stderr forward: the caller classifies it to
+            // decide between deferring (host outage) and failing the task,
+            // and records it on the timeline either way. Redacted (the
+            // remote URL carries the agent token) but NOT truncated — the
+            // classifier must see the whole message; truncation happens at
+            // the recording site.
+            throw new Error(
+              `Salvage push failed after retries: ${redactCredentials(lastPushError)}`
+            );
           }
 
           return { pushed: true, reason: committedNewWork ? 'salvaged' as const : 'no_work' as const };
         }
       );
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      // Classify on the full message, record the truncated one — a long
+      // stderr must not push the outage signature past the event limit and
+      // turn a host outage into a terminal failure.
+      const raw = err instanceof Error ? err.message : String(err);
+      const detail = sanitizeGitError(raw);
+
+      // Git-host outage: the agent's work is real and it is safe on disk.
+      // Terminally failing the task here (the pre-#144 behaviour) stranded
+      // finished implementation runs during the 2026-07-23 Forgejo outage.
+      // Park the task instead — the scheduler's deferred-salvage sweep
+      // re-runs postDevAgent once the backoff elapses, and the checkpointed
+      // steps mean only the push is re-attempted.
+      if (isInfraGitFailure(raw)) {
+        const level = freshSalvageLevel(task) + 1;
+        const delayMs = computeBackoffMs(level);
+        const nextAt = new Date(Date.now() + delayMs).toISOString();
+        updateTask(task.id, {
+          salvage_backoff_level: level,
+          salvage_next_attempt_at: nextAt,
+        });
+        recordTaskEvent(
+          task.id,
+          'salvage_deferred',
+          `Salvage push deferred — git host unreachable: ${detail}. ` +
+            `Retry ${level} in ${formatDelay(delayMs)} (at ${nextAt}). ` +
+            `Local work preserved in workspace.`
+        );
+        // Comment once per outage, not once per retry — a multi-hour outage
+        // would otherwise bury the issue under a wall of identical notes.
+        if (level === 1) {
+          try {
+            await forgejo.commentOnIssue(
+              repo,
+              task.issue_id,
+              `Could not push salvaged work — the git host is unreachable (${detail}). ` +
+                `The work is preserved in the workspace and the push will be retried automatically.`
+            );
+          } catch { /* best effort */ }
+        }
+        log.warn(
+          {
+            event: 'salvage_deferred',
+            task_id: task.id,
+            backoff_level: level,
+            delay_ms: delayMs,
+            next_attempt_at: nextAt,
+            err,
+          },
+          'Salvage push deferred — git host unreachable'
+        );
+        return false;
+      }
+
+      // Structural failure (bad credentials, protected branch, missing git
+      // identity, …) — unchanged terminal behaviour. Clear any deferral
+      // state so the retry sweep doesn't pick the failed task back up.
+      updateTask(task.id, {
+        salvage_backoff_level: 0,
+        salvage_next_attempt_at: null,
+      });
       updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
@@ -431,6 +533,10 @@ export async function postDevAgent(
       );
       return false;
     }
+
+    // The push went through — drop any deferral state left by an earlier
+    // outage so the retry sweep stops considering this task.
+    clearSalvageDeferral(task);
 
     // Record the side-effect event when this run freshly executed the salvage
     // step (not on replay of a cached checkpoint) AND the push succeeded.

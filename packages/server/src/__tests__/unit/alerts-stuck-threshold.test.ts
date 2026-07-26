@@ -209,3 +209,77 @@ describe('checkAlerts — H5a stuck-task threshold sourcing', () => {
     expect(stuck).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Git-host outage visibility (#144). Outage-shaped prep failures no longer
+// fail tasks — which is the point — so the alerts pass is what tells an
+// operator that the queue is waiting on an unreachable host rather than
+// quietly idle.
+// ---------------------------------------------------------------------------
+
+function insertQueuedTask(opts: {
+  taskId: number;
+  prepBackoffLevel?: number;
+  prepNextAttemptAt?: string | null;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tasks
+         (id, issue_id, repo_id, status, queue_position, max_attempts,
+          prep_failure_count, prep_backoff_level, prep_next_attempt_at)
+       VALUES (?, ?, 1, 'queued', ?, 3, 0, ?, ?)`
+    )
+    .run(
+      opts.taskId,
+      200 + opts.taskId,
+      opts.taskId,
+      opts.prepBackoffLevel ?? 0,
+      opts.prepNextAttemptAt ?? null
+    );
+}
+
+describe('checkAlerts — git-host outage', () => {
+  it('is silent when nothing is backing off', async () => {
+    insertQueuedTask({ taskId: 20 });
+    const alerts = await checkAlerts(noopLog);
+    expect(alerts.filter((a) => a.message.includes('Git host unreachable'))).toHaveLength(0);
+  });
+
+  it('warns once for the whole queue, escalating to error on a sustained outage', async () => {
+    insertQueuedTask({ taskId: 21, prepBackoffLevel: 1 });
+    insertQueuedTask({ taskId: 22, prepBackoffLevel: 2 });
+
+    let outage = (await checkAlerts(noopLog)).filter((a) =>
+      a.message.includes('Git host unreachable')
+    );
+    expect(outage).toHaveLength(1);
+    expect(outage[0].level).toBe('warning');
+    expect(outage[0].message).toContain('2 tasks');
+
+    // The outage drags on — the worst task is now on its fourth retry.
+    getDb()
+      .prepare('UPDATE tasks SET prep_backoff_level = 4 WHERE id = 22')
+      .run();
+    outage = (await checkAlerts(noopLog)).filter((a) =>
+      a.message.includes('Git host unreachable')
+    );
+    expect(outage[0].level).toBe('error');
+    expect(outage[0].message).toContain('retry 4');
+  });
+
+  it('surfaces completed work whose salvage push is deferred', async () => {
+    getDb()
+      .prepare(
+        `INSERT INTO tasks
+           (id, issue_id, repo_id, status, queue_position, max_attempts,
+            prep_failure_count, salvage_backoff_level, salvage_next_attempt_at)
+         VALUES (23, 223, 1, 'in-progress', 23, 3, 0, 2, '2126-01-01T00:00:00.000Z')`
+      )
+      .run();
+
+    const alerts = await checkAlerts(noopLog);
+    const salvage = alerts.filter((a) => a.message.includes('could not be pushed'));
+    expect(salvage).toHaveLength(1);
+    expect(salvage[0].message).toContain('preserved in the workspace');
+  });
+});

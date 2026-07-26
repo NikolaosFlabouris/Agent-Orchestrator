@@ -313,6 +313,14 @@ export async function resetTask(
     container_id: null,
     attempt: nextAttempt,
     prep_failure_count: 0,
+    // Clear the git-outage backoff state too: a reset wipes the workspace,
+    // so any pending prep backoff or deferred salvage refers to work that
+    // no longer exists. Leaving `prep_next_attempt_at` set would park the
+    // freshly-requeued task for up to 30 minutes for no reason.
+    prep_backoff_level: 0,
+    prep_next_attempt_at: null,
+    salvage_backoff_level: 0,
+    salvage_next_attempt_at: null,
     started_at: null,
     completed_at: null,
     queue_position: queuePosition,

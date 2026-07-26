@@ -9,6 +9,7 @@ import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 import { insertTaskEvent } from './db.js';
+import { redactCredentials } from './git-outage.js';
 import { WORKSPACES_ROOT, CACHES_ROOT } from './constants.js';
 
 const execFileP = promisify(execFile);
@@ -143,29 +144,100 @@ export function generateBranchName(issueId: number, title: string): string {
 // Git helpers
 // ---------------------------------------------------------------------------
 
+/** Default timeout for a git subprocess. Clone gets its own, longer one. */
+const GIT_TIMEOUT_MS = 120_000;
+
 async function git(
   args: string[],
   cwd: string,
-  log: FastifyBaseLogger
+  log: FastifyBaseLogger,
+  opts: { timeoutMs?: number } = {}
 ): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
   log.debug({ event: 'git_exec', args, cwd }, `git ${args[0]}`);
   try {
     const { stdout } = await execFileP('git', args, {
       cwd,
       encoding: 'utf-8',
-      timeout: 120_000, // 2 minute timeout for git operations
+      timeout: timeoutMs,
     });
     return stdout.trim();
   } catch (err: unknown) {
-    const error = err as { stderr?: string; message?: string };
+    const error = err as {
+      stderr?: string;
+      message?: string;
+      killed?: boolean;
+      code?: string | number;
+      signal?: string;
+    };
+    // A subprocess killed by the `timeout` option surfaces as killed=true
+    // with a signal and (usually) empty stderr — "Command failed: git fetch"
+    // and nothing else. Name the timeout explicitly so the outage classifier
+    // (git-outage.ts) can recognise an unresponsive host, and so the
+    // resulting task_event says something useful. A kill for exceeding
+    // maxBuffer also sets killed=true but is NOT a timeout — it must keep
+    // its own (structural) error text rather than being retried forever.
+    const isTimeout =
+      error.code === 'ETIMEDOUT' ||
+      (error.killed === true && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+    if (isTimeout) {
+      throw new Error(
+        `git ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s ` +
+          `(git host unresponsive)`
+      );
+    }
     const stderr = error.stderr ?? error.message ?? String(err);
-    throw new Error(`git ${args[0]} failed: ${stderr}`);
+    // Redact before the message escapes this module: the remote URL carries
+    // the agent token, Node puts the full command line into an execFile
+    // error message, and these errors end up in task_events rows the UI
+    // renders verbatim.
+    throw new Error(redactCredentials(`git ${args[0]} failed: ${stderr}`));
   }
 }
 
 function getAgentAuthUrl(repoOwner: string, repoName: string): string {
   const url = new URL(FORGEJO_URL);
   return `${url.protocol}//agent:${AGENT_TOKEN}@${url.host}/${repoOwner}/${repoName}.git`;
+}
+
+/** Stable key for the git host the orchestrator clones from. Every repo
+ *  lives on the same configured Forgejo instance today, so this is a single
+ *  key in practice — but the outage gate is keyed by host so it keeps
+ *  working if repos ever gain per-host clone URLs. */
+export function getGitHostKey(): string {
+  try {
+    return new URL(FORGEJO_URL).host;
+  } catch {
+    return FORGEJO_URL;
+  }
+}
+
+/** Cheap liveness probe for the git host: `git ls-remote --heads` against a
+ *  real repo. Exercises the same transport and the same server-side repo
+ *  machinery as the clone/fetch that failed, which an HTTP health endpoint
+ *  would not (during the 2026-07-23 incident the API answered fine while
+ *  git served `repository corruption on the remote side`).
+ *
+ *  Never throws — resolves false when the host is still unhealthy. */
+export async function probeGitRemote(
+  repo: { owner: string; name: string },
+  log: FastifyBaseLogger,
+  timeoutMs = 20_000
+): Promise<boolean> {
+  try {
+    await execFileP(
+      'git',
+      ['ls-remote', '--heads', getAgentAuthUrl(repo.owner, repo.name)],
+      { encoding: 'utf-8', timeout: timeoutMs }
+    );
+    return true;
+  } catch (err) {
+    log.debug(
+      { event: 'git_host_probe_failed', repo: `${repo.owner}/${repo.name}`, err },
+      'git ls-remote probe failed — host still unhealthy'
+    );
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,9 +358,11 @@ export async function prepareWorkspace(
       'Cloning workspace'
     );
     await fsp.mkdir(workdir, { recursive: true });
-    await execFileP('git', ['clone', authUrl, workdir], {
-      encoding: 'utf-8',
-      timeout: 300_000, // 5 minute timeout for clone
+    // Routed through the `git` helper (rather than a bare execFileP) so a
+    // clone failure gets the same credential redaction, timeout naming, and
+    // `git clone failed: <stderr>` shape the outage classifier reads.
+    await git(['clone', authUrl, workdir], workdir, log, {
+      timeoutMs: 300_000, // 5 minute timeout for clone
     });
     insertTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
   } else {

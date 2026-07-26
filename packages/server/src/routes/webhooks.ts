@@ -172,6 +172,12 @@ async function handleIssueEvent(
             pr_number: null,
             attempt: 1,
             prep_failure_count: 0,
+            // A re-queue is a fresh start: drop any git-outage backoff or
+            // deferred-salvage state left over from the previous run.
+            prep_backoff_level: 0,
+            prep_next_attempt_at: null,
+            salvage_backoff_level: 0,
+            salvage_next_attempt_at: null,
             started_at: null,
             completed_at: null,
           });

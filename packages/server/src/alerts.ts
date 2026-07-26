@@ -174,5 +174,39 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
     }
   }
 
+  // 5. Git-host outage: tasks waiting out a workspace-prep backoff, or
+  // holding finished work whose salvage push is deferred (#144). Neither
+  // is a failure — the tasks resume on their own when the host returns —
+  // but an outage that outlives a few retries is exactly the thing an
+  // operator needs to know about, precisely BECAUSE nothing is failing
+  // loudly any more. Derived purely from persisted state, so it fires
+  // identically after an orchestrator restart.
+  const backingOff = getQueuedTasks().filter((t) => t.prep_backoff_level > 0);
+  if (backingOff.length > 0) {
+    const worstLevel = Math.max(...backingOff.map((t) => t.prep_backoff_level));
+    alerts.push({
+      // A single retry is ordinary noise; a task on its third-plus retry
+      // means the host has been unreachable for several minutes at least.
+      level: worstLevel >= 3 ? 'error' : 'warning',
+      message:
+        `Git host unreachable — ${backingOff.length} task${backingOff.length === 1 ? '' : 's'} ` +
+        `waiting on workspace-prep backoff (longest: retry ${worstLevel}). ` +
+        `Tasks stay queued and resume automatically once the host recovers.`,
+    });
+  }
+
+  const deferredSalvage = getTasks({ status: 'in-progress' }).filter(
+    (t) => t.salvage_next_attempt_at !== null
+  );
+  if (deferredSalvage.length > 0) {
+    alerts.push({
+      level: 'warning',
+      message:
+        `${deferredSalvage.length} task${deferredSalvage.length === 1 ? '' : 's'} ` +
+        `holding completed work that could not be pushed (git host unreachable). ` +
+        `The work is preserved in the workspace and the push is retried automatically.`,
+    });
+  }
+
   return alerts;
 }

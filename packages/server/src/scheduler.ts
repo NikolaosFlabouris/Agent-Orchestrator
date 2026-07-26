@@ -25,6 +25,7 @@ import {
   getLatestAttempt,
   getActiveAttempt,
   getTasks,
+  getTasksWithSalvageDue,
   resolveStageProfileId,
 } from './db.js';
 import {
@@ -67,9 +68,20 @@ import {
   getCacheDir,
   generateBranchName,
   writeHarnessConfigFiles,
+  getGitHostKey,
+  probeGitRemote,
   AGENT_UID,
   AGENT_GID,
 } from './workspace.js';
+import {
+  GitHostHealth,
+  isInfraGitFailure,
+  isGitOperationError,
+  sanitizeGitError,
+  computeBackoffMs,
+  backoffElapsed,
+  formatDelay,
+} from './git-outage.js';
 import { postDevAgent, handleDevFailure } from './agents/develop.js';
 import {
   processReviewVerdict,
@@ -229,6 +241,13 @@ interface ActiveTaskState {
 
 const activeState = new Map<number, ActiveTaskState>();
 
+/** Prep failures a task may accumulate before it is permanently failed.
+ *  Since #144 an outage-shaped git failure charges this counter once per
+ *  outage WINDOW (not once per retry), so this budget describes distinct
+ *  prep incidents — three unrelated structural failures, or three separate
+ *  outages — rather than three consecutive ticks against a dead host. */
+const PREP_FAILURE_LIMIT = 3;
+
 // ---------------------------------------------------------------------------
 // Scheduler
 // ---------------------------------------------------------------------------
@@ -272,6 +291,16 @@ export class Scheduler {
   // Runtime container reaper. Same flag-serialisation pattern — a slow
   // listContainers()/remove must not let a re-tick start a second sweep.
   private containerReapInFlight = false;
+  // Deferred-salvage retry sweep. Same flag-serialisation pattern — a slow
+  // push must not let a re-tick start a second salvage for the same task.
+  private salvageSweepInFlight = false;
+  // Cross-task circuit breaker for the git host (#144). After
+  // GIT_HOST_FAILURE_THRESHOLD consecutive outage-shaped git failures —
+  // regardless of which task hit them — workspace prep is gated for that
+  // host until an `ls-remote` probe succeeds. In-memory by design: the
+  // durable half of the state is the per-task backoff persisted on
+  // `tasks.prep_next_attempt_at`.
+  private gitHealth = new GitHostHealth();
 
   constructor(forgejo: ForgejoClient, log: FastifyBaseLogger) {
     this.forgejo = forgejo;
@@ -434,8 +463,58 @@ export class Scheduler {
     // blocked-state stays current even when nothing can launch.
     await this.evaluateQueuedDependencies();
 
+    // Step 1.6: Re-attempt salvage pushes that were deferred because the
+    // git host was down (#144). Runs before fillSlots so finished-but-
+    // unpushed work is rescued (and its review launched) ahead of starting
+    // anything new. No-op when nothing is deferred.
+    await this.retryDeferredSalvage();
+
     // Step 2: Fill empty slots
     await this.fillSlots();
+  }
+
+  /** Retry salvage pushes parked by `postDevAgent` while the git host was
+   *  unreachable. The workspace is preserved on disk, so re-running
+   *  `postDevAgent` replays the checkpointed steps and re-attempts only the
+   *  push; on success the task continues to review exactly as it would have
+   *  done without the outage. */
+  private async retryDeferredSalvage(): Promise<void> {
+    if (this.salvageSweepInFlight) return;
+    this.salvageSweepInFlight = true;
+    try {
+      // The host gate applies here too: no point pushing into a remote the
+      // liveness probe still says is down.
+      if (this.gitHealth.isGated(getGitHostKey())) return;
+      const due = getTasksWithSalvageDue(new Date().toISOString());
+      for (const task of due) {
+        try {
+          this.log.info(
+            {
+              event: 'salvage_retry',
+              task_id: task.id,
+              backoff_level: task.salvage_backoff_level,
+            },
+            'Retrying deferred salvage push'
+          );
+          const ready = await postDevAgent(task, this.forgejo, this.log);
+          if (ready) {
+            await this.continueToReview(getTask(task.id) ?? task);
+          }
+        } catch (err) {
+          this.log.error(
+            { event: 'salvage_retry_error', task_id: task.id, err },
+            'Deferred salvage retry failed'
+          );
+        }
+      }
+    } catch (err) {
+      this.log.error(
+        { event: 'salvage_sweep_error', err },
+        'Deferred salvage sweep failed'
+      );
+    } finally {
+      this.salvageSweepInFlight = false;
+    }
   }
 
   private async evaluateQueuedDependencies(): Promise<void> {
@@ -874,6 +953,11 @@ export class Scheduler {
     const activeByProvider = countActiveByProvider(active, cachedProviderIdForTask);
     const limitByProvider = limitMapFromProviders(getProviders());
 
+    // Probe any git host that consecutive infra-shaped failures have gated,
+    // so a host that came back since the last tick is ungated before we walk
+    // the candidate list (rather than one tick later).
+    await this.refreshGitHostHealth();
+
     const candidates = getCandidates();
 
     for (const candidate of candidates) {
@@ -905,6 +989,19 @@ export class Scheduler {
       // A later candidate on a different (idle) provider can still launch.
       const providerKey = resolveProviderKey(task, cachedProviderIdForTask(task));
       if (!canLaunchInPool(providerKey, activeByProvider, limitByProvider)) {
+        continue;
+      }
+
+      // Workspace-prep gate (#144). Applies to every launch that will call
+      // prepareWorkspace (i.e. everything except a review relaunch, which
+      // runs against the existing checkout). Two independent reasons to
+      // wait, neither of which touches task status — the task stays
+      // `queued` and later candidates are still considered:
+      //   1. this task is waiting out its own escalating backoff after an
+      //      outage-shaped prep failure;
+      //   2. the git host itself is gated after consecutive cross-task
+      //      failures and its liveness probe hasn't succeeded yet.
+      if (task.status !== 'in-review' && !this.prepGateAllows(task)) {
         continue;
       }
 
@@ -977,6 +1074,105 @@ export class Scheduler {
         );
         await this.handlePrepFailure(task, err);
       }
+    }
+  }
+
+  // ---- Git-host outage gating (#144) ----
+
+  /** Whether workspace prep may be attempted for this task right now.
+   *  Pure read of persisted backoff state + the in-memory host gate; never
+   *  mutates the task, so a gated task stays exactly where it is (queued,
+   *  in FIFO order) and other candidates keep launching. */
+  private prepGateAllows(task: Task): boolean {
+    if (!backoffElapsed(task.prep_next_attempt_at)) {
+      this.log.debug(
+        {
+          event: 'prep_backoff_waiting',
+          task_id: task.id,
+          next_attempt_at: task.prep_next_attempt_at,
+        },
+        'Task is waiting out a workspace-prep backoff'
+      );
+      return false;
+    }
+    if (this.gitHealth.isGated(getGitHostKey())) {
+      this.log.debug(
+        { event: 'prep_host_gated', task_id: task.id, host: getGitHostKey() },
+        'Workspace prep gated — git host is unhealthy'
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /** Probe gated git hosts (rate-limited inside GitHostHealth) and log the
+   *  recovery transition. Never throws — a probe failure just leaves the
+   *  gate closed until the next tick. */
+  private async refreshGitHostHealth(): Promise<void> {
+    try {
+      const recovered = await this.gitHealth.refresh(async () => {
+        const repo = this.probeRepoForHost();
+        // No repo to probe against (fresh install): don't hold the gate
+        // closed on a question we can't ask.
+        if (!repo) return true;
+        return probeGitRemote(repo, this.log);
+      });
+      for (const host of recovered) {
+        this.log.info(
+          { event: 'git_host_recovered', host },
+          'Git host liveness probe succeeded — resuming workspace prep'
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        { event: 'git_host_probe_error', err },
+        'Git host health refresh failed'
+      );
+    }
+  }
+
+  /** Pick a repo to run the liveness probe against. Every repo lives on the
+   *  same configured Forgejo host, so any repo the orchestrator tracks will
+   *  do; prefer one belonging to a task that is actually waiting. */
+  private probeRepoForHost(): Repo | undefined {
+    for (const status of ['queued', 'changes-needed'] as const) {
+      for (const task of getTasks({ status })) {
+        const repo = getRepo(task.repo_id);
+        if (repo) return repo;
+      }
+    }
+    return undefined;
+  }
+
+  /** Clear a task's prep-backoff state after a successful prepare, and tell
+   *  the host gate the outage is over. Called on the happy path so a task
+   *  that waited out an outage returns to normal scheduling — and so the
+   *  next infra failure opens a fresh outage window. */
+  private onPrepSucceeded(taskId: number): void {
+    const hostRecovered = this.gitHealth.recordSuccess(getGitHostKey());
+    if (hostRecovered) {
+      this.log.info(
+        { event: 'git_host_recovered', host: getGitHostKey() },
+        'Workspace prep succeeded — git host gate cleared'
+      );
+    }
+    const fresh = getTask(taskId);
+    if (!fresh) return;
+    if (fresh.prep_backoff_level > 0 || fresh.prep_next_attempt_at) {
+      updateTask(taskId, {
+        prep_backoff_level: 0,
+        prep_next_attempt_at: null,
+      });
+      recordTaskEvent(
+        taskId,
+        'prep_recovered',
+        `Workspace prepared after ${fresh.prep_backoff_level} ` +
+          `git-host retr${fresh.prep_backoff_level === 1 ? 'y' : 'ies'}`
+      );
+      this.log.info(
+        { event: 'prep_recovered', task_id: taskId, retries: fresh.prep_backoff_level },
+        'Workspace prep recovered after git-host outage'
+      );
     }
   }
 
@@ -1064,8 +1260,11 @@ export class Scheduler {
     // Update status to preparing
     updateTaskWithSync(task.id, { status: 'preparing' });
 
-    // Prepare workspace
+    // Prepare workspace. A success here is also the signal that the git
+    // host is healthy again, so it clears both this task's backoff state
+    // and (if it was closed) the cross-task host gate.
     await prepareWorkspace(task, this.log);
+    this.onPrepSucceeded(task.id);
 
     // Write task files
     await this.writeTaskFiles(task, repo, ctx, issue, feedback);
@@ -1406,9 +1605,15 @@ export class Scheduler {
         } catch { /* best effort */ }
         await this.continueToReview(task);
       } else {
-        // Check if postDevAgent already marked as failed
+        // Check if postDevAgent already marked as failed, or parked the
+        // task waiting for the git host to come back (#144) — a deferred
+        // salvage must not be turned into a fresh dev attempt, that would
+        // relaunch an agent on top of the very work we're preserving.
         const freshTask = getTask(task.id)!;
-        if (freshTask.status !== 'failed') {
+        if (
+          freshTask.status !== 'failed' &&
+          freshTask.salvage_next_attempt_at === null
+        ) {
           await handleDevFailure(
             task,
             'Agent timed out with no salvageable work',
@@ -1639,7 +1844,6 @@ export class Scheduler {
   private async handlePrepFailure(task: Task, err: unknown): Promise<void> {
     const errorMsg = err instanceof Error ? err.message : String(err);
     const freshTask = getTask(task.id)!;
-    const newCount = freshTask.prep_failure_count + 1;
 
     // Categorize known structural failures BEFORE the generic prep-failure
     // bookkeeping. Categorized failures get a dedicated task_event row
@@ -1652,11 +1856,84 @@ export class Scheduler {
       recordTaskEvent(task.id, category.eventType, category.message);
     }
 
-    if (newCount >= 3) {
+    // Persist the underlying error text on the task itself. Before this,
+    // the timeline only ever said "Task failed" and the git stderr lived
+    // solely in the pino container logs — which rotate away the moment the
+    // container is recreated, i.e. exactly when an operator goes looking.
+    const detail = sanitizeGitError(errorMsg);
+    recordTaskEvent(task.id, 'prep_failed', `Workspace preparation failed: ${detail}`);
+
+    // A recognised structural failure is never an outage, however its
+    // stderr reads — those keep failing fast on the counter below.
+    const isOutage = category === null && isInfraGitFailure(errorMsg);
+
+    if (isOutage) {
+      // Outage-shaped failure: wait, don't fail. The host gate only counts
+      // failures that actually came from a git invocation — a Docker
+      // daemon `connection refused` says nothing about Forgejo's health.
+      if (isGitOperationError(errorMsg)) {
+        const host = getGitHostKey();
+        if (this.gitHealth.recordFailure(host)) {
+          this.log.error(
+            {
+              event: 'git_host_gated',
+              host,
+              consecutive_failures: this.gitHealth.consecutiveFailures(host),
+            },
+            'Consecutive git failures across tasks — gating workspace prep until the host recovers'
+          );
+        }
+      }
+
+      const level = freshTask.prep_backoff_level + 1;
+      const delayMs = computeBackoffMs(level);
+      const nextAttemptAtIso = new Date(Date.now() + delayMs).toISOString();
+      // Outage-window accounting: only the FIRST failure of a window is
+      // charged to the permanent-failure budget. Retries inside the same
+      // window escalate the delay instead, so a three-day outage costs one
+      // unit of budget rather than exhausting it in three ticks.
+      const newCount =
+        freshTask.prep_backoff_level === 0
+          ? freshTask.prep_failure_count + 1
+          : freshTask.prep_failure_count;
+
+      updateTaskWithSync(task.id, {
+        status: 'queued',
+        prep_failure_count: newCount,
+        prep_backoff_level: level,
+        prep_next_attempt_at: nextAttemptAtIso,
+      });
+      recordTaskEvent(
+        task.id,
+        'prep_backoff',
+        `Git host unreachable — retry ${level} scheduled in ${formatDelay(delayMs)} ` +
+          `(at ${nextAttemptAtIso}). Task stays queued.`
+      );
+      this.log.warn(
+        {
+          event: 'prep_failed_infra',
+          task_id: task.id,
+          error: detail,
+          backoff_level: level,
+          delay_ms: delayMs,
+          next_attempt_at: nextAttemptAtIso,
+        },
+        'Workspace preparation failed against an unreachable git host — backing off'
+      );
+      return;
+    }
+
+    // Structural / unrecognised failure — unchanged fail-fast behaviour.
+    // Clear any backoff state so the retry happens on the next tick, as it
+    // always did for this class of failure.
+    const newCount = freshTask.prep_failure_count + 1;
+    if (newCount >= PREP_FAILURE_LIMIT) {
       // Permanent failure
       updateTaskWithSync(task.id, {
         status: 'failed',
         prep_failure_count: newCount,
+        prep_backoff_level: 0,
+        prep_next_attempt_at: null,
         completed_at: new Date().toISOString(),
       });
       this.log.error(
@@ -1668,6 +1945,8 @@ export class Scheduler {
       updateTaskWithSync(task.id, {
         status: 'queued',
         prep_failure_count: newCount,
+        prep_backoff_level: 0,
+        prep_next_attempt_at: null,
       });
       this.log.warn(
         { event: 'prep_failed_transient', task_id: task.id, error: errorMsg, retry: newCount },
