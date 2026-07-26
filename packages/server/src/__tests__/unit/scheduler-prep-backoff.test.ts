@@ -206,6 +206,10 @@ const CORRUPTION_ERROR =
 /** A structural failure the categorizer already knows about. */
 const STRUCTURAL_ERROR =
   '(HTTP code 404) no such container - No such image: orchestrator-agent:latest';
+/** Mirrors the scheduler's module-local PREP_FAILURE_LIMIT — the shared
+ *  budget of distinct prep incidents (structural failures and outage
+ *  windows alike). */
+const PREP_FAILURE_LIMIT = 3;
 
 let store: Task[] = [];
 let tmpDir: string;
@@ -407,6 +411,52 @@ describe('workspace-prep backoff under a simulated git-host outage', () => {
     // semantics this task would have been permanently failed after three.
     expect(store[0].prep_failure_count).toBe(1);
     expect(store[0].status).toBe('queued');
+  });
+
+  it('keeps waiting inside an open window even once the budget is spent', async () => {
+    // The budget counts prep INCIDENTS, and it is only tested when one
+    // starts. A task already backing off has nothing more to charge, so a
+    // host that stays down for days keeps it queued rather than failing it —
+    // the whole point of #144.
+    store = [
+      mkTask({
+        id: 1,
+        prep_failure_count: PREP_FAILURE_LIMIT,
+        prep_backoff_level: 2,
+        prep_next_attempt_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ];
+    mocks.prepareWorkspace.mockRejectedValue(new Error(OUTAGE_ERROR));
+    mocks.probeGitRemote.mockResolvedValue(true);
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await scheduler.tick();
+
+    expect(store[0].status).toBe('queued');
+    expect(store[0].completed_at).toBeNull();
+    expect(store[0].prep_backoff_level).toBe(3);
+    expect(store[0].prep_failure_count).toBe(PREP_FAILURE_LIMIT);
+  });
+
+  it('fails a task whose earlier, separate incidents already spent the budget', async () => {
+    // The flip side of the shared budget: an outage window is a prep incident
+    // like any other, so the third one is terminal (docs/02-task-state-machine).
+    store = [
+      mkTask({ id: 1, prep_failure_count: PREP_FAILURE_LIMIT - 1, prep_backoff_level: 0 }),
+    ];
+    mocks.prepareWorkspace.mockRejectedValue(new Error(OUTAGE_ERROR));
+    mocks.probeGitRemote.mockResolvedValue(true);
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await scheduler.tick();
+
+    expect(store[0].status).toBe('failed');
+    expect(store[0].prep_failure_count).toBe(PREP_FAILURE_LIMIT);
+    // No stale backoff state left behind on a terminal task.
+    expect(store[0].prep_backoff_level).toBe(0);
+    expect(store[0].prep_next_attempt_at).toBeNull();
+    // The cause is still on the timeline, not just in the container logs.
+    expect(eventsOfType('prep_failed')[0]).toContain('Could not read from remote repository');
   });
 
   it('leaves the task queued while the backoff is unexpired, and does not launch', async () => {
@@ -704,6 +754,65 @@ describe('deferred-salvage retry sweep', () => {
     await scheduler.tick(); // sweep must not push into a dead host
 
     expect(mocks.postDevAgent).not.toHaveBeenCalled();
+  });
+
+  it('re-arms the backoff when the retry breaks before reaching the push', async () => {
+    // postDevAgent handles push failures itself; a throw means the re-run
+    // broke earlier (corrupt workspace, I/O error). The due timestamp is
+    // already in the past, so without re-arming, the sweep would re-run the
+    // same failing re-attempt on every tick, seconds apart, forever.
+    const deferred = mkTask({
+      id: 7,
+      status: 'in-progress',
+      salvage_backoff_level: 2,
+      salvage_next_attempt_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    store = [deferred];
+    mocks.getTasksWithSalvageDue.mockReturnValue([deferred]);
+    mocks.postDevAgent.mockRejectedValue(new Error('EIO: i/o error, stat /workspaces/7'));
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await scheduler.tick();
+
+    expect(store[0].salvage_backoff_level).toBe(3);
+    // Spaced by the same escalating backoff a failed push earns, not retried
+    // on the next tick.
+    const delay = Date.parse(store[0].salvage_next_attempt_at!) - Date.now();
+    expect(delay).toBeGreaterThan(60_000);
+    // Still deferred, not failed — the work stays on disk.
+    expect(store[0].status).toBe('in-progress');
+    const events = eventsOfType('salvage_deferred');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toContain('EIO');
+  });
+
+  it('does not re-arm salvage when the push succeeded and the follow-on failed', async () => {
+    // A successful re-run clears the deferral; if continueToReview is what
+    // threw, re-arming would drag the task back through a salvage it has
+    // already completed.
+    const deferred = mkTask({
+      id: 7,
+      status: 'in-progress',
+      salvage_backoff_level: 2,
+      salvage_next_attempt_at: new Date(Date.now() - 1000).toISOString(),
+    });
+    store = [deferred];
+    mocks.getTasksWithSalvageDue.mockReturnValue([deferred]);
+    mocks.postDevAgent.mockImplementation(async () => {
+      // What the real postDevAgent does once the push lands.
+      store[0].salvage_backoff_level = 0;
+      store[0].salvage_next_attempt_at = null;
+      return true;
+    });
+    mocks.shouldDeferReviewLaunch.mockReturnValue(false);
+    mocks.createAgentContainer.mockRejectedValue(new Error('docker daemon unreachable'));
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+
+    await scheduler.tick();
+
+    expect(store[0].salvage_next_attempt_at).toBeNull();
+    expect(store[0].salvage_backoff_level).toBe(0);
+    expect(eventsOfType('salvage_deferred')).toHaveLength(0);
   });
 
   it('does not turn a deferred salvage into a fresh dev attempt', async () => {

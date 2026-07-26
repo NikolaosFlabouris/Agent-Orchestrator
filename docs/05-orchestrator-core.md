@@ -183,13 +183,23 @@ catch error:
 
   if is_outage_shaped(error):     # connection refused/reset, "Could not read
                                   # from remote repository", remote-side
-                                  # repository corruption, timeouts
+                                  # repository corruption, timeouts.
+                                  # NOT: 4xx from the remote (bad/expired
+                                  # token, invisible repo) — those are
+                                  # structural and take the branch below.
     # Wait, don't fail.
     if error came from git: git_host_health.record_failure(host)
+    # Outage-WINDOW accounting: only the first failure of a window is charged,
+    # and only a window OPENING can exhaust the budget — a task already
+    # backing off keeps waiting for as long as the host is down.
+    if task.prep_backoff_level == 0:
+      task.prep_failure_count++
+      if task.prep_failure_count >= 3:
+        relabel: status/failed
+        log error "task={task.issue_id} event=prep_failed_permanent"
+        return
     task.prep_backoff_level++
     task.prep_next_attempt_at = now + backoff(task.prep_backoff_level)   # 1m→2m→4m→…→30m, ±20% jitter
-    # Outage-WINDOW accounting: only the first failure of a window is charged.
-    if task.prep_backoff_level == 1: task.prep_failure_count++
     relabel: status/queued
     log warn "task={task.issue_id} event=prep_failed_infra backoff_level={level}"
   else:
@@ -213,7 +223,9 @@ Two layers keep a single outage from walking the whole queue into a permanent fa
 1. **Per-task backoff.** `prep_next_attempt_at` gates the task in `fillSlots`. The task stays `queued` (externally indistinguishable from any other queued task) and later candidates are still launched, so a backing-off task never blocks the queue.
 2. **Per-host gate.** After `GIT_HOST_FAILURE_THRESHOLD` (3) consecutive outage-shaped git failures across *any* tasks, workspace prep for that host is gated entirely until a `git ls-remote` liveness probe succeeds. Probes are rate-limited to one per 30s. This is in-memory state; the persisted per-task backoff is what survives a restart.
 
-`prep_failure_count` is the permanent-failure budget AND the audit counter the reliability report reads. Because outage-shaped failures charge it once per outage window rather than once per retry, it now counts distinct prep incidents. `prep_backoff_level` — not the counter — is what a successful prepare resets.
+`prep_failure_count` is the permanent-failure budget AND the audit counter the reliability report reads. Because outage-shaped failures charge it once per outage window rather than once per retry, it now counts distinct prep incidents — structural failures and outage windows share the one 3-incident budget, and the cap is tested only when an incident *starts*. A sustained outage therefore can never fail a task no matter how long it lasts; a task that has already spent two incidents does fail when a third starts, whatever its shape. `prep_backoff_level` — not the counter — is what a successful prepare resets.
+
+Classification is deliberately asymmetric: structural signatures are matched **first** and win. `unable to access '<url>': …` is git's wrapper for every HTTP outcome, so a revoked or mis-scoped agent token produces outage-shaped text (`… returned error: 403`). Treating that as an outage would gate the host, fail the `ls-remote` probe with the same broken token, and freeze the queue with no task ever reaching a terminal state — so 4xx (except 429, which really is transient) and explicit credential rejections always fail fast.
 
 ### Workspace State Verification
 

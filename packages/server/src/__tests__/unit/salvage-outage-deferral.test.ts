@@ -87,6 +87,14 @@ const BRANCH = 'agent/issue-10-test';
 const OUTAGE_PUSH_ERROR = new Error(
   "Command failed: git push -f origin agent/issue-10-test\nfatal: unable to access 'http://agent:tok3n@forgejo:3000/owner/repo.git/': Failed to connect to forgejo port 3000: Connection refused"
 );
+/** A git host that accepts the connection and then stops answering: the push
+ *  blows its `timeout` and Node rejects with `killed`, a signal, and NOTHING
+ *  on stderr. The message alone is outage-shaped to nobody — which is why the
+ *  push must render its errors through `describeGitExecFailure`. */
+const HUNG_PUSH_ERROR = Object.assign(
+  new Error('Command failed: git push -f origin agent/issue-10-test'),
+  { killed: true, code: null, signal: 'SIGTERM', stderr: '' }
+);
 /** A push failure that is the task's own fault — must stay terminal. */
 const STRUCTURAL_PUSH_ERROR = new Error(
   'Command failed: git push -f origin agent/issue-10-test\n! [remote rejected] agent/issue-10-test -> agent/issue-10-test (pre-receive hook declined)'
@@ -226,6 +234,31 @@ describe('salvage push during a git-host outage', () => {
     // …and the underlying git text is carried, with the token redacted.
     expect(deferred[0]).toContain('Connection refused');
     expect(deferred[0]).not.toContain('tok3n');
+  });
+
+  it('defers a push the host left hanging until the timeout killed it', async () => {
+    mocks.execFileHandler.mockImplementation((_cmd: string, args: string[]) =>
+      args[0] === 'push' ? HUNG_PUSH_ERROR : null
+    );
+
+    const ready = await postDevAgent(mkTask(), makeForgejo(), silentLog);
+
+    expect(ready).toBe(false);
+    // Unresponsive is just as much an outage as refusing — finished work must
+    // not be abandoned for it.
+    expect(mocks.updateTaskWithSync).not.toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(eventsOfType('salvage_failed')).toHaveLength(0);
+    const deferred = eventsOfType('salvage_deferred');
+    expect(deferred).toHaveLength(1);
+    // The timeline says why, rather than a bare "Command failed: git push".
+    expect(deferred[0]).toMatch(/timed out after 120s/);
+    expect(
+      updatePatches().find((p) => 'salvage_next_attempt_at' in p)
+        ?.salvage_backoff_level
+    ).toBe(1);
   });
 
   it('persists an escalating retry schedule', async () => {

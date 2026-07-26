@@ -152,7 +152,10 @@ function createTables(db: Database.Database): void {
       -- profile chain) increment it on every occurrence; an outage-shaped
       -- git failure increments it ONCE PER OUTAGE WINDOW (see the v31
       -- columns below), so a multi-day git-host outage costs a task one
-      -- unit of budget instead of exhausting it in 300 ms.
+      -- unit of budget instead of exhausting it in 300 ms. One shared budget
+      -- of distinct prep INCIDENTS: the cap is enforced for both kinds, but
+      -- only when a window opens, so a task backing off inside an ongoing
+      -- outage keeps waiting however long the host stays down.
       prep_failure_count INTEGER DEFAULT 0,
       -- v31 (git-outage resilience). Consecutive outage-shaped prep
       -- failures for this task. Drives the exponential backoff delay and

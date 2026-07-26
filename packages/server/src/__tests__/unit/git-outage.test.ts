@@ -3,6 +3,8 @@ import {
   classifyGitFailure,
   isInfraGitFailure,
   isGitOperationError,
+  isExecTimeout,
+  describeGitExecFailure,
   redactCredentials,
   sanitizeGitError,
   computeBackoffMs,
@@ -46,6 +48,18 @@ describe('classifyGitFailure', () => {
       ['early EOF / RPC failure on a big fetch', 'git clone failed: error: RPC failed; curl 56 GnuTLS recv error\nfatal: early EOF'],
       ['a 502 from a reverse proxy in front of Forgejo', "git push failed: error: unable to access 'http://forgejo:3000/x.git/': The requested URL returned error: 502 Bad Gateway"],
       ['raw socket errno', 'connect ECONNREFUSED 192.168.1.30:3000'],
+      [
+        'a bare 5xx with no reason phrase (Forgejo mid-restart)',
+        "git fetch failed: fatal: unable to access 'http://forgejo:3000/x.git/': The requested URL returned error: 503",
+      ],
+      [
+        'rate limiting — the one 4xx that really is transient',
+        "git clone failed: fatal: unable to access 'http://forgejo:3000/x.git/': The requested URL returned error: 429",
+      ],
+      [
+        'a salvage push killed by its own timeout, once named by describeGitExecFailure',
+        'git push timed out after 120s (git host unresponsive)',
+      ],
     ];
 
     for (const [label, message] of INFRA_CASES) {
@@ -84,6 +98,31 @@ describe('classifyGitFailure', () => {
         'git push failed: ! [rejected] feat -> feat (non-fast-forward)',
       ],
       ['missing git identity on the orchestrator', 'Salvage commit failed: Command failed: git commit -m x\n*** Please tell me who you are.'],
+      // git wraps EVERY HTTP outcome in `unable to access '<url>': …`, so a
+      // 4xx is shaped exactly like an outage. Backing off on one would be
+      // worse than a stuck task: the failure gates the host, the ls-remote
+      // probe carries the same broken token and also fails, and the gate
+      // never reopens — the whole queue freezes with nothing ever failing.
+      [
+        'a revoked agent token (403) — never an outage',
+        "git push failed: fatal: unable to access 'http://***@forgejo:3000/nik/repo.git/': The requested URL returned error: 403",
+      ],
+      [
+        'an expired token (401)',
+        "git fetch failed: fatal: unable to access 'http://***@forgejo:3000/nik/repo.git/': The requested URL returned error: 401",
+      ],
+      [
+        'a repo the token cannot see (404)',
+        "git clone failed: fatal: unable to access 'http://***@forgejo:3000/nik/gone.git/': The requested URL returned error: 404 Not Found",
+      ],
+      [
+        'credentials rejected without an HTTP code',
+        "git fetch failed: fatal: Authentication failed for 'http://forgejo:3000/nik/repo.git/'",
+      ],
+      [
+        'no credentials at all — git wanted to prompt',
+        "git fetch failed: fatal: could not read Username for 'http://forgejo:3000': terminal prompts disabled",
+      ],
     ];
 
     for (const [label, message] of STRUCTURAL_CASES) {
@@ -92,6 +131,85 @@ describe('classifyGitFailure', () => {
         expect(isInfraGitFailure(message)).toBe(false);
       });
     }
+  });
+});
+
+describe('describeGitExecFailure / isExecTimeout', () => {
+  /** How Node rejects an execFile that blew its `timeout`: killed, signalled,
+   *  and with nothing on stderr — the message alone says nothing about why. */
+  function timeoutRejection(cmd: string): Error {
+    return Object.assign(new Error(`Command failed: ${cmd}`), {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+      stderr: '',
+    });
+  }
+
+  it('names a killed subprocess as a timeout so the classifier sees the outage', () => {
+    const err = timeoutRejection('git push -f origin agent/issue-10-x');
+    expect(isExecTimeout(err)).toBe(true);
+    const msg = describeGitExecFailure(err, 'push', 120_000);
+    expect(msg).toBe('git push timed out after 120s (git host unresponsive)');
+    // The whole point: a hung host must back off, not fail the task.
+    expect(isInfraGitFailure(msg)).toBe(true);
+  });
+
+  it('recognises an explicit ETIMEDOUT code', () => {
+    const err = Object.assign(new Error('Command failed: git fetch'), {
+      code: 'ETIMEDOUT',
+    });
+    expect(isExecTimeout(err)).toBe(true);
+    expect(isInfraGitFailure(describeGitExecFailure(err, 'fetch', 60_000))).toBe(
+      true
+    );
+  });
+
+  it('does not treat a maxBuffer kill as a timeout — that one is structural', () => {
+    const err = Object.assign(new Error('stdout maxBuffer length exceeded'), {
+      killed: true,
+      code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    });
+    expect(isExecTimeout(err)).toBe(false);
+    const msg = describeGitExecFailure(err, 'clone', 120_000);
+    expect(msg).toContain('maxBuffer');
+    expect(isInfraGitFailure(msg)).toBe(false);
+  });
+
+  it('prefers stderr over the bare "Command failed" message', () => {
+    const err = Object.assign(new Error('Command failed: git fetch origin'), {
+      stderr: 'fatal: Could not read from remote repository.\n',
+    });
+    expect(describeGitExecFailure(err, 'fetch', 120_000)).toBe(
+      'git fetch failed: fatal: Could not read from remote repository.'
+    );
+  });
+
+  it('falls back to the message when stderr is empty', () => {
+    const err = Object.assign(new Error('Command failed: git push'), {
+      stderr: '   ',
+    });
+    expect(describeGitExecFailure(err, 'push', 120_000)).toBe(
+      'git push failed: Command failed: git push'
+    );
+  });
+
+  it('redacts the agent token before the message escapes', () => {
+    const err = Object.assign(new Error('boom'), {
+      stderr:
+        "fatal: unable to access 'http://agent:s3cr3t@forgejo:3000/nik/repo.git/': Connection refused",
+    });
+    const msg = describeGitExecFailure(err, 'clone', 120_000);
+    expect(msg).not.toContain('s3cr3t');
+    expect(msg).toContain('http://***@forgejo:3000');
+  });
+
+  it('tolerates a non-Error rejection', () => {
+    expect(isExecTimeout('nope')).toBe(false);
+    expect(isExecTimeout(null)).toBe(false);
+    expect(describeGitExecFailure('nope', 'fetch', 1000)).toBe(
+      'git fetch failed: nope'
+    );
   });
 });
 

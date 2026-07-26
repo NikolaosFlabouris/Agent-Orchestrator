@@ -14,7 +14,10 @@ export interface Task {
   /** Prep failures charged against this task's permanent-failure budget.
    *  Structural failures (bad branch, missing agent image, broken profile
    *  chain) count every occurrence; outage-shaped git failures count once
-   *  per outage window, so a single git-host outage can't exhaust the cap. */
+   *  per outage window, so a single git-host outage can't exhaust the cap.
+   *  One shared budget of distinct prep incidents: the cap applies to both
+   *  kinds, checked only when a new window opens, so a task waiting out an
+   *  ongoing outage is never failed for it. */
   prep_failure_count: number;
   /** Consecutive outage-shaped workspace-prep failures. Drives the
    *  exponential backoff delay, and doubles as the outage-window marker

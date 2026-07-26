@@ -501,10 +501,18 @@ export class Scheduler {
             await this.continueToReview(getTask(task.id) ?? task);
           }
         } catch (err) {
+          // postDevAgent handles push failures itself (deferring or failing
+          // the task); reaching here means the re-run broke BEFORE the push —
+          // a corrupted workspace, an I/O error in verifyWorkspaceState. The
+          // deferral timestamp is already in the past, so without re-arming
+          // it the sweep would re-run this same failing re-attempt on every
+          // tick, seconds apart, forever. Space it exactly like a push
+          // failure instead.
           this.log.error(
             { event: 'salvage_retry_error', task_id: task.id, err },
             'Deferred salvage retry failed'
           );
+          this.deferSalvageAfterRetryError(task, err);
         }
       }
     } catch (err) {
@@ -515,6 +523,46 @@ export class Scheduler {
     } finally {
       this.salvageSweepInFlight = false;
     }
+  }
+
+  /** Re-arm the deferral of a salvage retry that failed for a reason
+   *  `postDevAgent` did not handle itself, so the sweep waits out the same
+   *  escalating backoff a failed push would have earned instead of spinning
+   *  on every tick.
+   *
+   *  Deliberately a no-op when the task is no longer deferred: a re-run whose
+   *  push SUCCEEDED clears the deferral, and if the follow-on
+   *  `continueToReview` is what threw, re-arming would drag the task back
+   *  through salvage it has already completed. */
+  private deferSalvageAfterRetryError(task: Task, err: unknown): void {
+    const fresh = getTask(task.id);
+    if (!fresh || fresh.salvage_next_attempt_at === null) return;
+
+    const level = fresh.salvage_backoff_level + 1;
+    const delayMs = computeBackoffMs(level);
+    const nextAt = new Date(Date.now() + delayMs).toISOString();
+    updateTask(task.id, {
+      salvage_backoff_level: level,
+      salvage_next_attempt_at: nextAt,
+    });
+    const detail = sanitizeGitError(err instanceof Error ? err.message : String(err));
+    recordTaskEvent(
+      task.id,
+      'salvage_deferred',
+      `Salvage retry failed before the push: ${detail}. ` +
+        `Retry ${level} in ${formatDelay(delayMs)} (at ${nextAt}). ` +
+        `Local work preserved in workspace.`
+    );
+    this.log.warn(
+      {
+        event: 'salvage_retry_deferred',
+        task_id: task.id,
+        backoff_level: level,
+        delay_ms: delayMs,
+        next_attempt_at: nextAt,
+      },
+      'Deferred salvage retry re-scheduled after an unexpected failure'
+    );
   }
 
   private async evaluateQueuedDependencies(): Promise<void> {
@@ -1892,10 +1940,38 @@ export class Scheduler {
       // charged to the permanent-failure budget. Retries inside the same
       // window escalate the delay instead, so a three-day outage costs one
       // unit of budget rather than exhausting it in three ticks.
-      const newCount =
-        freshTask.prep_backoff_level === 0
-          ? freshTask.prep_failure_count + 1
-          : freshTask.prep_failure_count;
+      const isNewWindow = freshTask.prep_backoff_level === 0;
+      const newCount = isNewWindow
+        ? freshTask.prep_failure_count + 1
+        : freshTask.prep_failure_count;
+
+      // `prep_failure_count` is one shared budget of PREP_FAILURE_LIMIT
+      // *distinct prep incidents*, outage windows and structural failures
+      // alike (docs/02-task-state-machine.md). A sustained outage — however
+      // long — stays inside a single window and keeps backing off, so it can
+      // never exhaust the budget; only a task that has already burned it on
+      // earlier, separate incidents gives up here. Checked on window open
+      // only: mid-window retries charge nothing, so re-testing them would
+      // fail a task the moment it inherited an exhausted budget.
+      if (isNewWindow && newCount >= PREP_FAILURE_LIMIT) {
+        updateTaskWithSync(task.id, {
+          status: 'failed',
+          prep_failure_count: newCount,
+          prep_backoff_level: 0,
+          prep_next_attempt_at: null,
+          completed_at: new Date().toISOString(),
+        });
+        this.log.error(
+          {
+            event: 'prep_failed_permanent',
+            task_id: task.id,
+            error: errorMsg,
+            outage_windows: newCount,
+          },
+          'Workspace preparation failed in a new outage window with the prep budget already exhausted'
+        );
+        return;
+      }
 
       updateTaskWithSync(task.id, {
         status: 'queued',

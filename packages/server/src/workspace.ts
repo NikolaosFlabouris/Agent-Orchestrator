@@ -9,7 +9,7 @@ import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 import { insertTaskEvent } from './db.js';
-import { redactCredentials } from './git-outage.js';
+import { describeGitExecFailure } from './git-outage.js';
 import { WORKSPACES_ROOT, CACHES_ROOT } from './constants.js';
 
 const execFileP = promisify(execFile);
@@ -163,35 +163,10 @@ async function git(
     });
     return stdout.trim();
   } catch (err: unknown) {
-    const error = err as {
-      stderr?: string;
-      message?: string;
-      killed?: boolean;
-      code?: string | number;
-      signal?: string;
-    };
-    // A subprocess killed by the `timeout` option surfaces as killed=true
-    // with a signal and (usually) empty stderr — "Command failed: git fetch"
-    // and nothing else. Name the timeout explicitly so the outage classifier
-    // (git-outage.ts) can recognise an unresponsive host, and so the
-    // resulting task_event says something useful. A kill for exceeding
-    // maxBuffer also sets killed=true but is NOT a timeout — it must keep
-    // its own (structural) error text rather than being retried forever.
-    const isTimeout =
-      error.code === 'ETIMEDOUT' ||
-      (error.killed === true && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
-    if (isTimeout) {
-      throw new Error(
-        `git ${args[0]} timed out after ${Math.round(timeoutMs / 1000)}s ` +
-          `(git host unresponsive)`
-      );
-    }
-    const stderr = error.stderr ?? error.message ?? String(err);
-    // Redact before the message escapes this module: the remote URL carries
-    // the agent token, Node puts the full command line into an execFile
-    // error message, and these errors end up in task_events rows the UI
-    // renders verbatim.
-    throw new Error(redactCredentials(`git ${args[0]} failed: ${stderr}`));
+    // Timeout naming, stderr extraction and credential redaction all live in
+    // `describeGitExecFailure` — shared with the salvage push in
+    // agents/develop.ts, which must classify a hung host identically.
+    throw new Error(describeGitExecFailure(err, args[0], timeoutMs));
   }
 }
 

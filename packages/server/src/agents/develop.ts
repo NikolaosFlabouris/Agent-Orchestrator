@@ -21,12 +21,17 @@ import { runStep, getStep } from '../checkpoints.js';
 import {
   isInfraGitFailure,
   sanitizeGitError,
-  redactCredentials,
+  describeGitExecFailure,
   computeBackoffMs,
   formatDelay,
 } from '../git-outage.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import type { FastifyBaseLogger } from 'fastify';
+
+/** Timeout for the salvage force-push. Generous — a large branch over a slow
+ *  link is not a failure — but bounded, because a git host that has stopped
+ *  answering must be recognised as an outage rather than hang the sweep. */
+const SALVAGE_PUSH_TIMEOUT_MS = 120_000;
 
 /** Current salvage-backoff level, re-read from the DB so overlapping
  *  deferrals escalate off the persisted value rather than a stale in-memory
@@ -416,13 +421,23 @@ export async function postDevAgent(
                 {
                   cwd: workdir,
                   encoding: 'utf-8',
-                  timeout: 120_000,
+                  timeout: SALVAGE_PUSH_TIMEOUT_MS,
                 }
               );
               pushSucceeded = true;
               break;
             } catch (err) {
-              lastPushError = err instanceof Error ? err.message : String(err);
+              // Same rendering the workspace `git` helper applies: a host
+              // that accepts the connection and then never answers gets
+              // killed by the timeout above and would otherwise surface as a
+              // bare `Command failed: git push …` with empty stderr —
+              // outage-shaped in reality, structural to the classifier, and
+              // therefore a terminal `salvage_failed` on finished work.
+              lastPushError = describeGitExecFailure(
+                err,
+                'push',
+                SALVAGE_PUSH_TIMEOUT_MS
+              );
               log.warn(
                 {
                   event: 'salvage_push_retry',
@@ -438,13 +453,11 @@ export async function postDevAgent(
           if (!pushSucceeded) {
             // Carry the git stderr forward: the caller classifies it to
             // decide between deferring (host outage) and failing the task,
-            // and records it on the timeline either way. Redacted (the
-            // remote URL carries the agent token) but NOT truncated — the
-            // classifier must see the whole message; truncation happens at
-            // the recording site.
-            throw new Error(
-              `Salvage push failed after retries: ${redactCredentials(lastPushError)}`
-            );
+            // and records it on the timeline either way. Already redacted by
+            // `describeGitExecFailure` (the remote URL carries the agent
+            // token) but NOT truncated — the classifier must see the whole
+            // message; truncation happens at the recording site.
+            throw new Error(`Salvage push failed after retries: ${lastPushError}`);
           }
 
           return { pushed: true, reason: committedNewWork ? 'salvaged' as const : 'no_work' as const };

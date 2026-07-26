@@ -71,8 +71,35 @@ const INFRA_PATTERNS: RegExp[] = [
   /remote:\s*(fatal:\s*)?bad (tree|blob|commit) object/i,
   /remote error:\s*(internal|unavailable|service unavailable)/i,
   /\b(500 internal server error|502 bad gateway|503 service unavailable|504 gateway time-?out)\b/i,
+  /returned error: (?:5\d\d|429)/i,
   // -- Our own timeout wrapper (see workspace.ts `git`) --
   /timed out after \d+s/i,
+];
+
+/** Structural signatures that OUTRANK the infra patterns above.
+ *
+ *  `unable to access '<url>': …` is git's curl-level wrapper for every HTTP
+ *  transport outcome, healthy remote included — a revoked or mis-scoped
+ *  agent token surfaces as `unable to access '…': The requested URL returned
+ *  error: 403`, which is shaped exactly like an outage but is the remote
+ *  saying *no*. Treating it as an outage would be worse than one stuck task:
+ *  the failure feeds the host gate, the `git ls-remote` probe carries the
+ *  same broken token and so also fails, and the gate never reopens — every
+ *  task freezes with none ever reaching a terminal state. A 4xx is therefore
+ *  always structural, and the task must keep failing fast so an operator
+ *  sees it. 429 is the deliberate exception: rate limiting really is
+ *  transient, so it stays in `INFRA_PATTERNS` above. */
+const STRUCTURAL_PATTERNS: RegExp[] = [
+  // 4xx (except 429) from git's HTTP transport: 401/403 bad or expired
+  // credentials, 404 repo not visible to this token.
+  /returned error: 4(?!29\b)\d\d/i,
+  /\bhttp (?:code|error) 4(?!29\b)\d\d\b/i,
+  // Explicit credential rejections that never carry an HTTP code.
+  /authentication failed/i,
+  /invalid username or password/i,
+  // No credentials at all — git wanted to prompt and could not.
+  /could not read (username|password) for/i,
+  /terminal prompts disabled/i,
 ];
 
 /** Does this message come from a git invocation (as opposed to Docker, the
@@ -88,8 +115,14 @@ export type GitFailureKind = 'infra' | 'other';
 
 /** Classify a failure message as outage-shaped (`infra`) or not (`other`).
  *  `other` covers both known-structural failures and anything unrecognised;
- *  callers keep their existing fail-fast handling for those. */
+ *  callers keep their existing fail-fast handling for those.
+ *
+ *  Structural patterns are checked first and win: several of them are
+ *  wrapped in text that also matches an infra pattern (see
+ *  `STRUCTURAL_PATTERNS`), and "wait for the host" is the wrong — and
+ *  unbounded — response to a credential problem. */
 export function classifyGitFailure(errorMsg: string): GitFailureKind {
+  if (STRUCTURAL_PATTERNS.some((p) => p.test(errorMsg))) return 'other';
   return INFRA_PATTERNS.some((p) => p.test(errorMsg)) ? 'infra' : 'other';
 }
 
@@ -109,6 +142,63 @@ export function isInfraGitFailure(errorMsg: string): boolean {
  *  Task Detail page renders verbatim. */
 export function redactCredentials(text: string): string {
   return text.replace(/(\w+:\/\/)[^/@\s]+(?::[^/@\s]*)?@/g, '$1***@');
+}
+
+/** The subset of an `execFile` rejection this module reasons about. */
+interface ExecFileFailure {
+  stderr?: string;
+  message?: string;
+  killed?: boolean;
+  code?: string | number;
+  signal?: string;
+}
+
+/**
+ * Was this `execFile` rejection a kill by the `timeout` option?
+ *
+ * A timed-out subprocess surfaces as `killed: true` with a signal and
+ * (usually) empty stderr — the message is a bare `Command failed: git push
+ * -f origin <branch>` and nothing else, which matches no outage signature at
+ * all. A kill for exceeding `maxBuffer` also sets `killed`, but it is NOT a
+ * timeout: that one is structural and must keep failing fast rather than
+ * being retried against a host that is answering fine.
+ */
+export function isExecTimeout(err: unknown): boolean {
+  const e = err as ExecFileFailure | null;
+  if (!e || typeof e !== 'object') return false;
+  if (e.code === 'ETIMEDOUT') return true;
+  return e.killed === true && e.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+}
+
+/**
+ * Render an `execFile` rejection from a git subprocess as the message the
+ * orchestrator classifies, logs and stores.
+ *
+ * Every git invocation that talks to the remote must go through this so a
+ * hung host — which is an outage shape ("timeouts"), just a silent one —
+ * is *named* as a timeout and recognised by `classifyGitFailure`. A bare
+ * `Command failed: …` would fall through to the structural branch and turn
+ * an outage into a permanent failure.
+ *
+ * Credentials are redacted here, before the message escapes the caller: the
+ * remote URL carries the agent token, Node copies the whole command line
+ * into the error message, and these strings end up in `task_events` rows the
+ * UI renders verbatim.
+ */
+export function describeGitExecFailure(
+  err: unknown,
+  subcommand: string,
+  timeoutMs: number
+): string {
+  if (isExecTimeout(err)) {
+    return (
+      `git ${subcommand} timed out after ${Math.round(timeoutMs / 1000)}s ` +
+      `(git host unresponsive)`
+    );
+  }
+  const e = (err ?? {}) as ExecFileFailure;
+  const detail = e.stderr?.trim() || e.message || String(err);
+  return redactCredentials(`git ${subcommand} failed: ${detail}`);
 }
 
 /** Prepare a raw git/launch error for storage in a task_events row:
