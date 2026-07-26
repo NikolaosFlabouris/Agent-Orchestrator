@@ -41,7 +41,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 30;
+const CURRENT_SCHEMA_VERSION = 31;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -147,7 +147,34 @@ function createTables(db: Database.Database): void {
       queue_position INTEGER,
       attempt INTEGER DEFAULT 1,
       max_attempts INTEGER DEFAULT 7,
+      -- Count of prep failures charged against this task's permanent-failure
+      -- budget. Structural failures (bad branch, missing image, broken
+      -- profile chain) increment it on every occurrence; an outage-shaped
+      -- git failure increments it ONCE PER OUTAGE WINDOW (see the v31
+      -- columns below), so a multi-day git-host outage costs a task one
+      -- unit of budget instead of exhausting it in 300 ms. One shared budget
+      -- of distinct prep INCIDENTS: the cap is enforced for both kinds, but
+      -- only when a window opens, so a task backing off inside an ongoing
+      -- outage keeps waiting however long the host stays down.
       prep_failure_count INTEGER DEFAULT 0,
+      -- v31 (git-outage resilience). Consecutive outage-shaped prep
+      -- failures for this task. Drives the exponential backoff delay and
+      -- doubles as the outage-window marker: 0 means "no outage in
+      -- progress", so the next infra failure opens a new window and charges
+      -- prep_failure_count. Reset to 0 by a successful prepare and by every
+      -- requeue/reset path.
+      prep_backoff_level INTEGER NOT NULL DEFAULT 0,
+      -- v31. ISO timestamp before which the scheduler must not attempt
+      -- workspace prep for this task again. NULL = runnable now. A task
+      -- waiting here stays queued externally and never blocks other
+      -- runnable candidates.
+      prep_next_attempt_at TEXT,
+      -- v31. Same pair for deferred salvage pushes (preserving finished
+      -- agent work when the git host is down at push time). The workspace
+      -- is kept on disk, so the push is simply re-attempted later instead
+      -- of emitting a terminal salvage_failed.
+      salvage_backoff_level INTEGER NOT NULL DEFAULT 0,
+      salvage_next_attempt_at TEXT,
       -- Per-task implementation-stage profile override. NULL inherits from
       -- repos.agent_profile_id, which inherits from settings.default_*.
       agent_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
@@ -682,6 +709,35 @@ function runMigrations(db: Database.Database): void {
           }
         }
       }
+      if (version < 31) {
+        // v31: git-outage resilience state on tasks. Two (level,
+        // next_attempt_at) pairs — one for workspace prep, one for deferred
+        // salvage pushes. The levels are NOT NULL DEFAULT 0 so existing rows
+        // backfill to "no outage in progress"; the timestamps are nullable
+        // (NULL = runnable now). createTables holds the canonical shape; the
+        // ALTERs below forward-migrate existing installs. SQLite has no ADD
+        // COLUMN IF NOT EXISTS, so guard via pragma_table_info to stay
+        // idempotent after a partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        const newColumns: Array<[string, string]> = [
+          ['prep_backoff_level', 'INTEGER NOT NULL DEFAULT 0'],
+          ['prep_next_attempt_at', 'TEXT'],
+          ['salvage_backoff_level', 'INTEGER NOT NULL DEFAULT 0'],
+          ['salvage_next_attempt_at', 'TEXT'],
+        ];
+        for (const [col, decl] of newColumns) {
+          if (!hasColumn('tasks', col)) {
+            db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${decl}`);
+          }
+        }
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -1032,6 +1088,31 @@ export function getQueuedTasks(): Task[] {
     .all() as Task[];
 }
 
+/** Tasks whose deferred salvage push has come due (v31).
+ *
+ *  A salvage push that fails while the git host is down parks the task with
+ *  `salvage_next_attempt_at` set instead of emitting a terminal
+ *  `salvage_failed` — the agent's work is preserved on disk, so the push is
+ *  simply re-attempted later. Scoped to `in-progress` because that's the
+ *  status a task deferring salvage sits in; a task that has since been
+ *  reset, cancelled, or failed by another path must not be resurrected by
+ *  the retry sweep. `container_id IS NULL` is the second half of that
+ *  guard: a task whose dev agent is running again (a stale timestamp that
+ *  outlived a requeue) must never have its workspace committed and pushed
+ *  out from under the live agent. */
+export function getTasksWithSalvageDue(nowIso: string): Task[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM tasks
+        WHERE status = 'in-progress'
+          AND container_id IS NULL
+          AND salvage_next_attempt_at IS NOT NULL
+          AND salvage_next_attempt_at <= ?
+        ORDER BY salvage_next_attempt_at ASC, id ASC`
+    )
+    .all(nowIso) as Task[];
+}
+
 export function insertTask(task: {
   issue_id: number;
   issue_title?: string | null;
@@ -1081,6 +1162,10 @@ export function updateTask(
       | 'attempt'
       | 'max_attempts'
       | 'prep_failure_count'
+      | 'prep_backoff_level'
+      | 'prep_next_attempt_at'
+      | 'salvage_backoff_level'
+      | 'salvage_next_attempt_at'
       | 'agent_profile_id'
       | 'review_agent_profile_id'
       | 'container_id'
@@ -2753,7 +2838,14 @@ const RELIABILITY_EVENTS: Array<{
  *  range (the incident happened in-window) and the owning task's repo. Prep
  *  failures are a point-in-time per-task counter (tasks.prep_failure_count),
  *  so they're summed over the created-in-range cohort and reported in the
- *  totals + per-repo breakdown only — not the time-series. */
+ *  totals + per-repo breakdown only — not the time-series.
+ *
+ *  Since v31 that counter charges an outage-shaped git failure once per
+ *  outage WINDOW rather than once per retry, so this roll-up counts
+ *  "distinct prep incidents" and no longer inflates by however many times
+ *  the scheduler re-tried during a single git-host outage. Every individual
+ *  attempt is still recorded as a `prep_failed` task_event if you need the
+ *  raw retry history. */
 export function getReportReliability(
   filter: ReportFilter,
   bucket: 'day' | 'week'

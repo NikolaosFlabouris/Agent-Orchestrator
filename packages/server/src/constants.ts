@@ -69,6 +69,39 @@ export const STUCK_TASK_TIMEOUT_MULTIPLIER = 2;
  *  See `Scheduler.enforceTimeouts()` for the call site. */
 export const TIMEOUT_KILL_GRACE_MINUTES = 5;
 
+/** Backoff schedule for git-host outages (workspace prep and salvage
+ *  pushes). Level 1 waits the base delay, each further consecutive failure
+ *  doubles it up to the cap: 1m → 2m → 4m → 8m → 16m → 30m → 30m …
+ *
+ *  Minutes-scale on purpose. The failure mode this replaces retried on the
+ *  next scheduler tick (~300 ms apart in the production logs of the
+ *  2026-07-23 Forgejo outage), which turned any outage longer than about a
+ *  minute into a queue-wide massacre. The 30-minute ceiling keeps a task
+ *  responsive once a multi-hour outage ends, and the jitter de-synchronises
+ *  a queue of tasks that all started waiting at the same moment. */
+export const GIT_BACKOFF_BASE_SECONDS = 60;
+export const GIT_BACKOFF_MAX_SECONDS = 30 * 60;
+export const GIT_BACKOFF_JITTER_RATIO = 0.2;
+
+/** Consecutive infra-shaped git failures — across ALL tasks, not per task —
+ *  after which the orchestrator stops launching workspace prep against that
+ *  git host until a liveness probe succeeds. Three is enough to distinguish
+ *  a genuine outage from one unlucky task while still stopping the queue
+ *  before it walks the whole backlog into a dead host. */
+export const GIT_HOST_FAILURE_THRESHOLD = 3;
+
+/** Minimum spacing between `git ls-remote` liveness probes of a gated host.
+ *  The probe is cheap but it is still a network round-trip against a host
+ *  that is, by definition, struggling. */
+export const GIT_HOST_PROBE_INTERVAL_SECONDS = 30;
+
+/** How much of an underlying git/launch error text is persisted into a
+ *  `task_events` row. The full text goes to the structured log; the event
+ *  row is the copy that survives container recreation (pino logs rotate
+ *  away with the container), so it needs enough to identify the cause
+ *  without turning the timeline into a wall of stack traces. */
+export const TASK_EVENT_ERROR_MAX_CHARS = 500;
+
 /** Default Docker memory limit (MB) for an agent container when a repo
  *  doesn't override it. The agent process itself is light (~100–500 MB);
  *  these defaults exist for the tool commands the agent runs (npm ci,

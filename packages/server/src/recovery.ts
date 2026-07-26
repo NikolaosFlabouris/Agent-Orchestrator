@@ -25,6 +25,7 @@ import {
 } from './workspace.js';
 import type { Scheduler } from './scheduler.js';
 import { runOrphanSweep } from './orphan-recovery.js';
+import { sanitizeGitError } from './git-outage.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
@@ -486,13 +487,27 @@ async function recoverTask(
             }
           );
         } catch (err) {
+          // Non-terminal: the workspace (and the agent's commits in it) is
+          // left untouched, so the work survives the requeue and the next
+          // run pushes it. Record the underlying git text on the timeline —
+          // the container logs that used to be its only home rotate away
+          // when the container is recreated.
+          const detail = sanitizeGitError(
+            err instanceof Error ? err.message : String(err)
+          );
           log.error(
             { event: 'recovery_push_failed', task_id: task.id, err },
             'Recovery salvage push failed'
           );
+          insertTaskEvent(
+            task.id,
+            'salvage_push_failed',
+            `Recovery salvage push failed: ${detail}. ` +
+              `Local work preserved in workspace; task re-queued.`
+          );
           resetToQueued(
             task,
-            `Recovery salvage push failed: ${err instanceof Error ? err.message : String(err)}.`,
+            `Recovery salvage push failed: ${detail}.`,
             forgejo,
             log
           );
@@ -528,6 +543,13 @@ function resetToQueued(
     status: 'queued',
     container_id: null,
     started_at: null,
+    // A recovered task starts its next run from the queue, so any deferred
+    // salvage from before the restart is moot — recovery has just re-derived
+    // the workspace state itself. Clearing it stops the scheduler's
+    // deferred-salvage sweep from acting on a stale timestamp if the task
+    // later returns to `in-progress`.
+    salvage_backoff_level: 0,
+    salvage_next_attempt_at: null,
   });
 
   log.info(

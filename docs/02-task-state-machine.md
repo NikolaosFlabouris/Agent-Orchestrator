@@ -59,8 +59,8 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Trigger: workspace preparation fails due to a transient error (Forgejo unreachable, network timeout, git clone failure)
 - Action: relabel back to `status/queued`, post comment "Workspace preparation failed: {error}. Task returned to queue."
 - The attempt counter is NOT incremented — preparation failures are infrastructure issues, not agent failures
-- The task becomes eligible for pickup on the next scheduler tick
-- A `prep_failure_count` is tracked internally. If preparation fails 3 consecutive times for the same task, transition to `status/failed` instead to avoid infinite retry loops
+- The task becomes eligible for pickup on the next scheduler tick — unless the failure was outage-shaped (see below), in which case pickup is delayed by an escalating backoff (`tasks.prep_next_attempt_at`, 1m → 2m → … → 30m with jitter). A backing-off task still reads as `queued` everywhere and does not block other runnable tasks.
+- A `prep_failure_count` is tracked internally. If preparation fails 3 times for the same task, transition to `status/failed` instead to avoid infinite retry loops. Outage-shaped failures (git host unreachable / serving corrupt data) charge that counter **once per outage window**, not once per retry, so a single git-host outage cannot exhaust the budget: the counter measures distinct prep *incidents*, and the 3-incident cap covers structural failures and outage windows in one shared budget. The cap is only tested when a window **opens**, so a task backing off inside an ongoing outage keeps waiting however long the host stays down — the corollary being that a task with two earlier prep incidents of any kind fails when the next one starts. The orchestrator also gates prep for the whole host after 3 consecutive cross-task failures until a `git ls-remote` probe succeeds. See `docs/05-orchestrator-core.md` → Workspace Preparation Failure Handling.
 
 **preparing → failed** (permanent failure)
 - Trigger: workspace preparation fails due to a permanent error (disk full, invalid repo configuration) or exceeds max prep retries

@@ -67,6 +67,8 @@ const mocks = vi.hoisted(() => ({
   getCacheDir: vi.fn(),
   generateBranchName: vi.fn(),
   writeHarnessConfigFiles: vi.fn(),
+  getGitHostKey: vi.fn(),
+  probeGitRemote: vi.fn(),
   // agents
   postDevAgent: vi.fn(),
   handleDevFailure: vi.fn(),
@@ -150,6 +152,8 @@ vi.mock('../../workspace.js', () => ({
   getCacheDir: mocks.getCacheDir,
   generateBranchName: mocks.generateBranchName,
   writeHarnessConfigFiles: mocks.writeHarnessConfigFiles,
+  getGitHostKey: mocks.getGitHostKey,
+  probeGitRemote: mocks.probeGitRemote,
 }));
 
 vi.mock('../../agents/develop.js', () => ({
@@ -227,6 +231,10 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     attempt: 1,
     max_attempts: 3,
     prep_failure_count: 0,
+    prep_backoff_level: 0,
+    prep_next_attempt_at: null,
+    salvage_backoff_level: 0,
+    salvage_next_attempt_at: null,
     agent_profile_id: null,
     review_agent_profile_id: null,
     container_id: 'c1',
@@ -280,6 +288,9 @@ beforeEach(() => {
   mocks.getOutputDir.mockReturnValue(tmpDir);
   mocks.getCacheDir.mockReturnValue(tmpDir);
   mocks.writeHarnessConfigFiles.mockResolvedValue(undefined);
+  // git-host outage gate (#144): healthy host, probe never needed.
+  mocks.getGitHostKey.mockReturnValue('forgejo:3000');
+  mocks.probeGitRemote.mockResolvedValue(true);
 
   // docker: exited only for 'c1'; everything else (e.g. a freshly-launched
   // review container) is 'running'.

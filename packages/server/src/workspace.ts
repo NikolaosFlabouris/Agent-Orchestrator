@@ -9,6 +9,7 @@ import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
 import { insertTaskEvent } from './db.js';
+import { describeGitExecFailure } from './git-outage.js';
 import { WORKSPACES_ROOT, CACHES_ROOT } from './constants.js';
 
 const execFileP = promisify(execFile);
@@ -143,29 +144,75 @@ export function generateBranchName(issueId: number, title: string): string {
 // Git helpers
 // ---------------------------------------------------------------------------
 
+/** Default timeout for a git subprocess. Clone gets its own, longer one. */
+const GIT_TIMEOUT_MS = 120_000;
+
 async function git(
   args: string[],
   cwd: string,
-  log: FastifyBaseLogger
+  log: FastifyBaseLogger,
+  opts: { timeoutMs?: number } = {}
 ): Promise<string> {
+  const timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
   log.debug({ event: 'git_exec', args, cwd }, `git ${args[0]}`);
   try {
     const { stdout } = await execFileP('git', args, {
       cwd,
       encoding: 'utf-8',
-      timeout: 120_000, // 2 minute timeout for git operations
+      timeout: timeoutMs,
     });
     return stdout.trim();
   } catch (err: unknown) {
-    const error = err as { stderr?: string; message?: string };
-    const stderr = error.stderr ?? error.message ?? String(err);
-    throw new Error(`git ${args[0]} failed: ${stderr}`);
+    // Timeout naming, stderr extraction and credential redaction all live in
+    // `describeGitExecFailure` — shared with the salvage push in
+    // agents/develop.ts, which must classify a hung host identically.
+    throw new Error(describeGitExecFailure(err, args[0], timeoutMs));
   }
 }
 
 function getAgentAuthUrl(repoOwner: string, repoName: string): string {
   const url = new URL(FORGEJO_URL);
   return `${url.protocol}//agent:${AGENT_TOKEN}@${url.host}/${repoOwner}/${repoName}.git`;
+}
+
+/** Stable key for the git host the orchestrator clones from. Every repo
+ *  lives on the same configured Forgejo instance today, so this is a single
+ *  key in practice — but the outage gate is keyed by host so it keeps
+ *  working if repos ever gain per-host clone URLs. */
+export function getGitHostKey(): string {
+  try {
+    return new URL(FORGEJO_URL).host;
+  } catch {
+    return FORGEJO_URL;
+  }
+}
+
+/** Cheap liveness probe for the git host: `git ls-remote --heads` against a
+ *  real repo. Exercises the same transport and the same server-side repo
+ *  machinery as the clone/fetch that failed, which an HTTP health endpoint
+ *  would not (during the 2026-07-23 incident the API answered fine while
+ *  git served `repository corruption on the remote side`).
+ *
+ *  Never throws — resolves false when the host is still unhealthy. */
+export async function probeGitRemote(
+  repo: { owner: string; name: string },
+  log: FastifyBaseLogger,
+  timeoutMs = 20_000
+): Promise<boolean> {
+  try {
+    await execFileP(
+      'git',
+      ['ls-remote', '--heads', getAgentAuthUrl(repo.owner, repo.name)],
+      { encoding: 'utf-8', timeout: timeoutMs }
+    );
+    return true;
+  } catch (err) {
+    log.debug(
+      { event: 'git_host_probe_failed', repo: `${repo.owner}/${repo.name}`, err },
+      'git ls-remote probe failed — host still unhealthy'
+    );
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -286,9 +333,11 @@ export async function prepareWorkspace(
       'Cloning workspace'
     );
     await fsp.mkdir(workdir, { recursive: true });
-    await execFileP('git', ['clone', authUrl, workdir], {
-      encoding: 'utf-8',
-      timeout: 300_000, // 5 minute timeout for clone
+    // Routed through the `git` helper (rather than a bare execFileP) so a
+    // clone failure gets the same credential redaction, timeout naming, and
+    // `git clone failed: <stderr>` shape the outage classifier reads.
+    await git(['clone', authUrl, workdir], workdir, log, {
+      timeoutMs: 300_000, // 5 minute timeout for clone
     });
     insertTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
   } else {

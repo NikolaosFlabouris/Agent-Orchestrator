@@ -169,32 +169,63 @@ On first attempt, the orchestrator creates a fresh branch from the latest base. 
 
 ### Workspace Preparation Failure Handling
 
-Preparation failures (clone timeout, Forgejo unreachable, git errors) are transient infrastructure issues, not agent failures. They should not consume an attempt:
+Preparation failures (clone timeout, Forgejo unreachable, git errors) are transient infrastructure issues, not agent failures. They should not consume an attempt — and, since the 2026-07-23 git-host outage, they must not consume the task's permanent-failure budget either. The handler splits failures by shape:
 
 ```
 try:
   prepare_workspace(task)
+  # Success also ends any outage in progress.
+  task.prep_backoff_level = 0
+  task.prep_next_attempt_at = null
+  git_host_health.record_success(host)
 catch error:
-  task.prep_failure_count++
+  record_task_event(task, 'prep_failed', truncate(redact(error)))
 
-  if task.prep_failure_count >= 3:
-    # Permanent failure — stop retrying
-    relabel: status/failed
-    forgejo.comment_on_issue(task.issue_id,
-      "Workspace preparation failed 3 times. Last error: {error}. Marking as failed.")
-    log error "task={task.issue_id} event=prep_failed_permanent error={error}"
-  else:
-    # Transient failure — return to queue for retry
+  if is_outage_shaped(error):     # connection refused/reset, "Could not read
+                                  # from remote repository", remote-side
+                                  # repository corruption, timeouts.
+                                  # NOT: 4xx from the remote (bad/expired
+                                  # token, invisible repo) — those are
+                                  # structural and take the branch below.
+    # Wait, don't fail.
+    if error came from git: git_host_health.record_failure(host)
+    # Outage-WINDOW accounting: only the first failure of a window is charged,
+    # and only a window OPENING can exhaust the budget — a task already
+    # backing off keeps waiting for as long as the host is down.
+    if task.prep_backoff_level == 0:
+      task.prep_failure_count++
+      if task.prep_failure_count >= 3:
+        relabel: status/failed
+        log error "task={task.issue_id} event=prep_failed_permanent"
+        return
+    task.prep_backoff_level++
+    task.prep_next_attempt_at = now + backoff(task.prep_backoff_level)   # 1m→2m→4m→…→30m, ±20% jitter
     relabel: status/queued
-    forgejo.comment_on_issue(task.issue_id,
-      "Workspace preparation failed: {error}. Task returned to queue (attempt not incremented).")
-    log warn "task={task.issue_id} event=prep_failed_transient error={error} retry={task.prep_failure_count}"
+    log warn "task={task.issue_id} event=prep_failed_infra backoff_level={level}"
+  else:
+    # Structural failure (bad branch, missing image, broken profile chain) —
+    # fail fast, exactly as before.
+    task.prep_failure_count++
+    task.prep_backoff_level = 0; task.prep_next_attempt_at = null
+    if task.prep_failure_count >= 3:
+      relabel: status/failed
+      log error "task={task.issue_id} event=prep_failed_permanent error={error}"
+    else:
+      relabel: status/queued
+      log warn "task={task.issue_id} event=prep_failed_transient error={error} retry={count}"
 
   free slot
   return
 ```
 
-The `prep_failure_count` resets to zero when preparation succeeds. This prevents infinite retry loops while allowing recovery from brief network outages.
+Two layers keep a single outage from walking the whole queue into a permanent failure:
+
+1. **Per-task backoff.** `prep_next_attempt_at` gates the task in `fillSlots`. The task stays `queued` (externally indistinguishable from any other queued task) and later candidates are still launched, so a backing-off task never blocks the queue.
+2. **Per-host gate.** After `GIT_HOST_FAILURE_THRESHOLD` (3) consecutive outage-shaped git failures across *any* tasks, workspace prep for that host is gated entirely until a `git ls-remote` liveness probe succeeds. Probes are rate-limited to one per 30s. This is in-memory state; the persisted per-task backoff is what survives a restart.
+
+`prep_failure_count` is the permanent-failure budget AND the audit counter the reliability report reads. Because outage-shaped failures charge it once per outage window rather than once per retry, it now counts distinct prep incidents — structural failures and outage windows share the one 3-incident budget, and the cap is tested only when an incident *starts*. A sustained outage therefore can never fail a task no matter how long it lasts; a task that has already spent two incidents does fail when a third starts, whatever its shape. `prep_backoff_level` — not the counter — is what a successful prepare resets.
+
+Classification is deliberately asymmetric: structural signatures are matched **first** and win. `unable to access '<url>': …` is git's wrapper for every HTTP outcome, so a revoked or mis-scoped agent token produces outage-shaped text (`… returned error: 403`). Treating that as an outage would gate the host, fail the `ls-remote` probe with the same broken token, and freeze the queue with no task ever reaching a terminal state — so 4xx (except 429, which really is transient) and explicit credential rejections always fail fast.
 
 ### Workspace State Verification
 
@@ -297,8 +328,20 @@ post_dev_agent(task) -> boolean:
     git -C workdir push -f origin {task.branch_name}
     if push fails:
       retry once
+      if still fails and error is outage-shaped:
+        # The git host is down, not the work. DEFER rather than fail: the
+        # workspace stays on disk and the scheduler's deferred-salvage sweep
+        # re-runs post_dev_agent once the backoff elapses (checkpoints mean
+        # only the push is re-attempted). Comment on the issue once per
+        # outage, not once per retry.
+        task.salvage_backoff_level++
+        task.salvage_next_attempt_at = now + backoff(task.salvage_backoff_level)
+        record_task_event(task, 'salvage_deferred', truncate(redact(error)))
+        log warn "task={task.issue_id} event=salvage_deferred error={error}"
+        return false      # task stays in-progress; NOT failed
       if still fails:
-        log error "task={task.issue_id} event=salvage_push_failed error={error}"
+        # Structural (auth, protected branch, missing git identity) — terminal.
+        log error "task={task.issue_id} event=salvage_failed error={error}"
         relabel: status/failed
         forgejo.comment_on_issue(task.issue_id,
           "Salvage push failed: {error}. Local work preserved in workspace.")

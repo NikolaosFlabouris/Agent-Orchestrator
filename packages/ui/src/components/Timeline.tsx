@@ -22,6 +22,13 @@ const EVENT_ICONS: Record<string, string> = {
   no_changes: 'empty',
   salvage_failed: 'alert',
   pr_creation_failed: 'alert',
+  // Git-host outage handling: the failure itself, the scheduled wait, and
+  // the eventual recovery. `prep_failed` carries the underlying git error.
+  prep_failed: 'alert',
+  prep_backoff: 'wait',
+  prep_recovered: 'check',
+  salvage_deferred: 'wait',
+  salvage_push_failed: 'alert',
 };
 
 const EVENT_COLORS: Record<string, string> = {
@@ -49,6 +56,15 @@ const EVENT_COLORS: Record<string, string> = {
   no_changes: 'bg-amber-500',
   salvage_failed: 'bg-red-600',
   pr_creation_failed: 'bg-red-600',
+  // Git-host outage handling. These are NOT task failures — the task is
+  // waiting, and its work is intact — so they read amber (waiting) and
+  // green (recovered) rather than red. `prep_failed` is the one red note:
+  // it records the underlying git error behind whichever of the two follows.
+  prep_failed: 'bg-red-600',
+  prep_backoff: 'bg-amber-500',
+  prep_recovered: 'bg-green-500',
+  salvage_deferred: 'bg-amber-500',
+  salvage_push_failed: 'bg-amber-500',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {
