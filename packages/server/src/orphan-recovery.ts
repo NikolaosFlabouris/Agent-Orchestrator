@@ -12,6 +12,7 @@ import {
   stopContainer,
   removeContainer,
 } from './docker.js';
+import { HEALTH_ACTIVE_STATUSES } from './task-health.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import { resetTask } from './actions.js';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
@@ -26,11 +27,10 @@ import type { FastifyBaseLogger } from 'fastify';
  */
 const CRASH_LOOP_WINDOW_MS = 30_000;
 
-const ACTIVE_STATUSES = new Set<Task['status']>([
-  'in-progress',
-  'in-review',
-  'changes-needed',
-]);
+/** Statuses during which a task is expected to own a container — the same
+ *  set `computeTaskHealth` keys off, imported so the sweep and the health
+ *  signal can't drift apart. */
+const ACTIVE_STATUSES = HEALTH_ACTIVE_STATUSES;
 
 export type OrphanKind = 'null_container' | 'missing_container';
 
@@ -436,24 +436,14 @@ function isCrashLoop(task: Task, stuckAttempt: Attempt): boolean {
 
 /**
  * Given a task, compute the health signal the UI and API should expose.
- * Pure function over (task, managedContainerIds, runningAttempt). Lives
- * here so the definition of "orphaned" stays tied to the recovery logic
- * that acts on it.
+ * Pure function over (task, managedContainerIds, runningAttempt). The
+ * implementation lives in the leaf module `task-health.ts` — the task
+ * serializer needs it and cannot import this module (which pulls in
+ * state-sync + actions, closing an import cycle through ws/dashboard) —
+ * but it is re-exported here so the definition of "orphaned" still reads
+ * as belonging with the recovery logic that acts on it.
  */
-export function computeTaskHealth(
-  task: Task,
-  managedContainerIds: Set<string>,
-  runningAttempt: Attempt | undefined
-): 'healthy' | 'orphaned' | 'idle' {
-  if (!ACTIVE_STATUSES.has(task.status)) return 'idle';
-
-  const hasRunningAttempt = runningAttempt !== undefined;
-  if (!hasRunningAttempt) return 'healthy'; // between roles — not orphaned.
-
-  if (task.container_id === null) return 'orphaned';
-  if (!managedContainerIds.has(task.container_id)) return 'orphaned';
-  return 'healthy';
-}
+export { computeTaskHealth } from './task-health.js';
 
 /**
  * Resolve the display name of a running container, if any. Returns the

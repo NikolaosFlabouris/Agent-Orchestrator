@@ -1,6 +1,11 @@
-import type { Task } from './types.js';
+import type { TaskView } from './task-view.js';
 
-/** WebSocket event types for the dashboard stream. */
+/** WebSocket event types for the dashboard stream.
+ *
+ *  Task payloads carry the enriched `TaskView` — the SAME object
+ *  `GET /api/tasks` returns, not the raw `Task` row. The client store
+ *  replaces a task wholesale on `task_updated`, so anything less than the
+ *  full view silently downgrades the row it lands on. */
 
 /** Host resource pool utilisation. Replaces the old count-based slot
  *  metric — see schema v19. Each container's actual size (per-repo
@@ -15,7 +20,7 @@ export interface HostPool {
 
 export interface DashboardSnapshot {
   type: 'snapshot';
-  tasks: Task[];
+  tasks: TaskView[];
   hostPool: HostPool;
   queueDepth: number;
   paused: boolean;
@@ -23,12 +28,12 @@ export interface DashboardSnapshot {
 
 export interface TaskUpdatedEvent {
   type: 'task_updated';
-  task: Task;
+  task: TaskView;
 }
 
 export interface TaskCreatedEvent {
   type: 'task_created';
-  task: Task;
+  task: TaskView;
 }
 
 // NOTE: A `TaskRemovedEvent` type lived here previously but nothing ever

@@ -7,28 +7,22 @@ import {
   getTaskEvents,
   getTaskDependencies,
   getAgentProfile,
-  getSetting,
 } from '../db.js';
 import { isBlocked, syncTaskDependencies } from '../dependencies.js';
+import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import {
-  TERMINAL_STATUSES,
-  SATISFIED_DEP_STATES,
-  DRIVER_LABELS,
-} from '@orchestrator/shared';
-import type { Task, TaskStatus, Attempt } from '@orchestrator/shared';
+  enrichTask,
+  enrichTaskWithDerivation,
+  loadProfileDefaults,
+} from '../task-view.js';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { cancelTask, closeTask, resetTask, requeueTask, extendTask } from '../actions.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { getOutputDir } from '../workspace.js';
-import { getSnapshot, warmRepoSnapshots } from '../forgejo-snapshot.js';
-import type { Snapshot } from '../forgejo-snapshot.js';
-import { deriveStatus } from '../status-derivation.js';
-import {
-  computeTaskHealth,
-  getContainerDisplayName,
-} from '../orphan-recovery.js';
+import { warmRepoSnapshots } from '../forgejo-snapshot.js';
+import { getContainerDisplayName } from '../orphan-recovery.js';
 import { listContainers } from '../docker.js';
 import {
   createTask as createTaskService,
@@ -115,9 +109,12 @@ export function createTaskRoutes(
         })
       );
 
+      // The global profile defaults are loop-invariant — resolve them once
+      // rather than issuing 2 settings reads per task.
+      const defaults = loadProfileDefaults();
       const enriched = await Promise.all(
         allTasks.map((t) =>
-          enrichTaskWithDerivation(t, forgejo, { managedIds })
+          enrichTaskWithDerivation(t, forgejo, { managedIds, defaults })
         )
       );
 
@@ -607,16 +604,6 @@ export function createTaskRoutes(
   };
 }
 
-interface EnrichContext {
-  /** Ids of all orchestrator-managed containers, for health derivation.
-   *  If undefined, health computation skips the Docker cross-check and
-   *  returns 'healthy' for active tasks with a non-null container_id. */
-  managedIds?: Set<string>;
-  /** Pre-resolved container display name. Only set for single-task lookups
-   *  that warrant a targeted inspect call. */
-  containerName?: string | null;
-}
-
 /**
  * Validate an agent-profile pointer value for the PATCH handler
  * (`agent_profile_id` or `review_agent_profile_id` — pass `fieldName`
@@ -638,223 +625,18 @@ export function validateAgentProfile(
   return { valid: true };
 }
 
-/**
- * Resolve the effective agent profile id and its source for a task.
- * Three-tier chain: task.agent_profile_id → repo.agent_profile_id →
- * settings.default_agent_profile_id. Exported for unit tests; the
- * authoritative launch-time resolution lives in scheduler.resolveProfile().
- */
-export function resolveEffectiveAgentProfile(
-  taskAgentProfile: string | null,
-  repoAgentProfile: string | null,
-  globalDefaultProfile: string | null
-): {
-  effective_agent_profile_id: string | null;
-  agent_profile_source: 'task' | 'repo' | 'global' | 'none';
-} {
-  if (taskAgentProfile !== null) {
-    return {
-      effective_agent_profile_id: taskAgentProfile,
-      agent_profile_source: 'task',
-    };
-  }
-  if (repoAgentProfile !== null) {
-    return {
-      effective_agent_profile_id: repoAgentProfile,
-      agent_profile_source: 'repo',
-    };
-  }
-  if (globalDefaultProfile !== null) {
-    return {
-      effective_agent_profile_id: globalDefaultProfile,
-      agent_profile_source: 'global',
-    };
-  }
-  return { effective_agent_profile_id: null, agent_profile_source: 'none' };
-}
-
-/**
- * Resolve the effective REVIEW profile id and its source for a task.
- * Chain: task.review_agent_profile_id → repo.review_agent_profile_id →
- * settings.default_review_agent_profile_id → the task's effective
- * implementation profile ('implementation' source — review runs with the
- * same profile as the implementation when no review tier is set).
- * Exported for unit tests; the authoritative launch-time resolution lives
- * in scheduler.resolveProfile() via db.resolveStageProfileId().
- */
-export function resolveEffectiveReviewAgentProfile(
-  taskReviewProfile: string | null,
-  repoReviewProfile: string | null,
-  globalReviewDefault: string | null,
-  effectiveImplementationProfile: string | null
-): {
-  effective_review_agent_profile_id: string | null;
-  review_agent_profile_source: 'task' | 'repo' | 'global' | 'implementation' | 'none';
-} {
-  if (taskReviewProfile !== null) {
-    return {
-      effective_review_agent_profile_id: taskReviewProfile,
-      review_agent_profile_source: 'task',
-    };
-  }
-  if (repoReviewProfile !== null) {
-    return {
-      effective_review_agent_profile_id: repoReviewProfile,
-      review_agent_profile_source: 'repo',
-    };
-  }
-  if (globalReviewDefault !== null) {
-    return {
-      effective_review_agent_profile_id: globalReviewDefault,
-      review_agent_profile_source: 'global',
-    };
-  }
-  if (effectiveImplementationProfile !== null) {
-    return {
-      effective_review_agent_profile_id: effectiveImplementationProfile,
-      review_agent_profile_source: 'implementation',
-    };
-  }
-  return {
-    effective_review_agent_profile_id: null,
-    review_agent_profile_source: 'none',
-  };
-}
-
-function enrichTask(task: Task, ctx: EnrichContext = {}) {
-  const repo = getRepo(task.repo_id);
-  const attempts = getAttempts(task.id);
-
-  const runningAttempt = findRunningAttempt(attempts);
-  const health = ctx.managedIds
-    ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
-    : deriveHealthWithoutDocker(task, runningAttempt);
-
-  // Surface the effective profile ids (per stage) and which tier each came
-  // from so the UI can render the override / inherit chains without a
-  // second round-trip. Task-level override wins, then repo default, then
-  // the global default; the review chain additionally falls back to the
-  // effective implementation profile.
-  const repoProfileId = repo?.agent_profile_id ?? null;
-  const globalDefault = getSetting('default_agent_profile_id') ?? null;
-  const { effective_agent_profile_id, agent_profile_source } =
-    resolveEffectiveAgentProfile(
-      task.agent_profile_id,
-      repoProfileId,
-      globalDefault
-    );
-
-  const repoReviewProfileId = repo?.review_agent_profile_id ?? null;
-  const globalReviewDefault =
-    getSetting('default_review_agent_profile_id') ?? null;
-  const { effective_review_agent_profile_id, review_agent_profile_source } =
-    resolveEffectiveReviewAgentProfile(
-      task.review_agent_profile_id,
-      repoReviewProfileId,
-      globalReviewDefault,
-      effective_agent_profile_id
-    );
-
-  // Blocked is presentation-only: computed at read time from the synced
-  // dependency rows, never stored, never a TaskStatus.
-  const dependencies = getTaskDependencies(task.id);
-
-  return {
-    ...task,
-    issue_title: task.issue_title ?? `Issue #${task.issue_id}`,
-    repo: repo ? { id: repo.id, owner: repo.owner, name: repo.name } : null,
-    dependencies,
-    blocked_by: dependencies
-      .filter((d) => !SATISFIED_DEP_STATES.has(d.state))
-      .map((d) => d.dep_issue_number),
-    blocked: task.status === 'queued' && isBlocked(dependencies),
-    runtime_status: task.status as TaskStatus,
-    health,
-    container_name: ctx.containerName ?? null,
-    effective_agent_profile_id,
-    agent_profile_source,
-    repo_agent_profile_id: repoProfileId,
-    global_agent_profile_id: globalDefault,
-    effective_review_agent_profile_id,
-    review_agent_profile_source,
-    repo_review_agent_profile_id: repoReviewProfileId,
-    global_review_agent_profile_id: globalReviewDefault,
-  };
-}
-
-/**
- * Read the human-review driver label off a Forgejo snapshot. The label —
- * not a task column — is what makes the orchestrator skip the automated
- * review agent, so this is the live answer to "will a review agent run
- * for this task?". Returns null when no snapshot is available (Forgejo
- * unreachable / not yet fetched): "unknown", which the UI treats as
- * not-enabled. Exported for unit tests.
- */
-export function hasHumanReviewLabel(snapshot: Snapshot | null): boolean | null {
-  if (!snapshot) return null;
-  return snapshot.issue.labels.includes(DRIVER_LABELS.HUMAN_REVIEW);
-}
-
-/**
- * Enrich a task and overlay the Forgejo-derived status.
- *
- * The response's `status` field is the derived value (what the UI should
- * show); `runtime_status` preserves the stored orchestrator state for
- * debugging. Snapshot fetch failures fall back to the stored status — the
- * API stays responsive if Forgejo is briefly unreachable.
- *
- * Also surfaces `has_human_review_label` from the same snapshot so the
- * UI can grey out the review-profile selector (the review agent never
- * runs while the label is present). Only the derivation paths carry the
- * field — POST/PATCH responses (plain `enrichTask`) omit it, and the UI
- * re-fetches via GET after mutations anyway.
- */
-export async function enrichTaskWithDerivation(
-  task: Task,
-  forgejo: ForgejoClient,
-  ctx: EnrichContext = {}
-): Promise<ReturnType<typeof enrichTask> & { has_human_review_label: boolean | null }> {
-  const base = enrichTask(task, ctx);
-
-  let snapshot = null;
-  try {
-    snapshot = await getSnapshot(task, forgejo);
-  } catch {
-    // Best effort — derivation falls back to stored status.
-  }
-  const derived = deriveStatus(task, snapshot);
-  return {
-    ...base,
-    status: derived.status,
-    // Re-key blocked on the DERIVED status: a queued task whose issue was
-    // closed externally reads as cancelled, not blocked. (derived ===
-    // 'queued' implies stored === 'queued', so base.blocked is reusable.)
-    blocked: derived.status === 'queued' && base.blocked,
-    has_human_review_label: hasHumanReviewLabel(snapshot),
-  };
-}
-
-function findRunningAttempt(attempts: Attempt[]): Attempt | undefined {
-  for (let i = attempts.length - 1; i >= 0; i--) {
-    if (attempts[i].status === 'running') return attempts[i];
-  }
-  return undefined;
-}
-
-function deriveHealthWithoutDocker(
-  task: Task,
-  runningAttempt: Attempt | undefined
-): 'healthy' | 'orphaned' | 'idle' {
-  // Fallback used when the caller didn't pass managedIds (e.g. POST
-  // handlers where fetching the Docker list is overkill). Only catches
-  // the "container_id is null with a running attempt" orphan shape —
-  // missing_container requires Docker state we don't have here.
-  const active = new Set(['in-progress', 'in-review', 'changes-needed']);
-  if (!active.has(task.status)) return 'idle';
-  if (!runningAttempt) return 'healthy';
-  if (task.container_id === null) return 'orphaned';
-  return 'healthy';
-}
+// The task serializer (`enrichTask`, `enrichTaskWithDerivation`, the
+// profile resolvers, `hasHumanReviewLabel`) now lives in `../task-view.ts`
+// so the WebSocket broadcasters build the exact same object these routes
+// return. Re-exported here because existing callers and unit tests import
+// them from this module.
+export {
+  enrichTask,
+  enrichTaskWithDerivation,
+  hasHumanReviewLabel,
+  resolveEffectiveAgentProfile,
+  resolveEffectiveReviewAgentProfile,
+} from '../task-view.js';
 
 export async function loadManagedContainerIds(
   log: Parameters<typeof getContainerDisplayName>[1]

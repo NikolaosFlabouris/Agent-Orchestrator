@@ -14,6 +14,7 @@ import type {
   ReportsTasksPage,
   ReportTasksSort,
   TaskStatus,
+  TaskView,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -281,69 +282,13 @@ export interface MeResponse {
   user: AuthUser | null;
 }
 
-export interface TaskResponse {
-  id: number;
-  issue_id: number;
-  issue_title: string;
-  repo: { id: number; owner: string; name: string } | null;
-  branch_name: string | null;
-  pr_number: number | null;
-  status: string;
-  queue_position: number | null;
-  attempt: number;
-  max_attempts: number;
-  agent_profile_id: string | null;
-  /** Per-task review-stage profile override. Null inherits (repo review
-   *  default → global review default → implementation profile). */
-  review_agent_profile_id: string | null;
-  container_id: string | null;
-  started_at: string | null;
-  completed_at: string | null;
-  created_at: string;
-  /** Synced projection of the issue body's `## Dependencies` checklist. */
-  dependencies: TaskDependencyResponse[];
-  /** Unsatisfied dependency issue numbers (empty when none gate launch). */
-  blocked_by: number[];
-  /** True when the task is queued and unsatisfied dependencies prevent it
-   *  from launching. Presentation-only — the status stays `queued`. */
-  blocked: boolean;
-  /** Runtime health derived from container state. 'orphaned' means the
-   *  task looks active but its container has vanished; the orchestrator
-   *  will attempt recovery on the next sweep. Optional: POST/PATCH
-   *  responses omit it. */
-  health?: 'healthy' | 'orphaned' | 'idle';
-  /** Human-readable container name if one is currently running.
-   *  Only populated on the single-task detail endpoint. */
-  container_name?: string | null;
-  /** Effective profile id resolved through the chain
-   *  task → repo → settings.default_agent_profile_id. May be null only
-   *  when none of the three is set, in which case the orchestrator can't
-   *  launch the task — useful for the UI to surface "configure a default". */
-  effective_agent_profile_id: string | null;
-  /** Tier the effective profile came from. */
-  agent_profile_source: 'task' | 'repo' | 'global' | 'none';
-  /** Repo's configured default profile id (the second tier in the
-   *  resolution chain). */
-  repo_agent_profile_id: string | null;
-  /** Global default profile id (the third / fallback tier). */
-  global_agent_profile_id: string | null;
-  /** Effective REVIEW-stage profile id, resolved task → repo → global
-   *  review default → the effective implementation profile. */
-  effective_review_agent_profile_id: string | null;
-  /** Tier the effective review profile came from. 'implementation' =
-   *  no review tier set; review runs with the implementation profile. */
-  review_agent_profile_source: 'task' | 'repo' | 'global' | 'implementation' | 'none';
-  /** Repo's configured review default (second tier of the review chain). */
-  repo_review_agent_profile_id: string | null;
-  /** Global review default (third tier of the review chain). */
-  global_review_agent_profile_id: string | null;
-  /** Live read of the Forgejo `human-review` driver label. true = the
-   *  automated review agent is skipped for this task, so the review
-   *  profile is unused. null = unknown (no Forgejo snapshot available).
-   *  Optional: only GET responses carry it (POST/PATCH omit it; the UI
-   *  re-fetches after mutations). */
-  has_human_review_label?: boolean | null;
-}
+/** The task object every task endpoint returns AND every dashboard
+ *  WebSocket event carries. Defined once in `@orchestrator/shared`
+ *  (`TaskView`) and produced by a single server-side serializer, so REST
+ *  and WS payloads cannot drift apart — see packages/server/src/task-view.ts.
+ *  Aliased here because the rest of the client refers to it by the
+ *  `*Response` naming convention. */
+export type TaskResponse = TaskView;
 
 export type DependencyState =
   | 'satisfied'

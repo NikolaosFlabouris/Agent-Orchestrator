@@ -28,6 +28,7 @@ import type {
 import { SATISFIED_DEP_STATES } from '@orchestrator/shared';
 import {
   getRepo,
+  getTask,
   getQueuedTasks,
   getDependentTasks,
   getTaskByRepoIssue,
@@ -35,6 +36,8 @@ import {
   upsertTaskDependency,
   deleteTaskDependenciesExcept,
 } from './db.js';
+import { isBlocked } from './dependency-state.js';
+import { buildTaskView } from './task-view.js';
 import { DEP_EVAL_MIN_INTERVAL_SECONDS } from './constants.js';
 import { recordTaskEvent } from './state-sync.js';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
@@ -200,11 +203,12 @@ export function stripDependencySection(body: string): string {
 // Blocked computation
 // ---------------------------------------------------------------------------
 
-/** A task is blocked when any dependency is not satisfied. Zero deps =
- *  not blocked. */
-export function isBlocked(deps: readonly TaskDependency[]): boolean {
-  return deps.some((d) => !SATISFIED_DEP_STATES.has(d.state));
-}
+// `isBlocked` lives in the leaf module `dependency-state.ts` so the task
+// serializer can reach it without importing this module (which pulls in
+// state-sync + ws/dashboard and would close an import cycle). Re-exported
+// here because this module owns the dependency concept — call sites and
+// tests are unaffected.
+export { isBlocked, unsatisfiedDepIssues } from './dependency-state.js';
 
 // ---------------------------------------------------------------------------
 // Cycle detection
@@ -509,7 +513,17 @@ export async function evaluateTaskDependencies(
     );
   }
   if (changed) {
-    broadcastDashboardEvent({ type: 'task_updated', task });
+    // Re-read the row: `task` was captured before evaluation, and this
+    // broadcast exists precisely because dependency state moved. Sending
+    // the stale object would emit an event whose `blocked` / `blocked_by`
+    // describe the world before the change that triggered it.
+    const fresh = getTask(task.id);
+    if (fresh) {
+      broadcastDashboardEvent({
+        type: 'task_updated',
+        task: buildTaskView(fresh),
+      });
+    }
   }
 
   return { blocked, deps: after, changed };

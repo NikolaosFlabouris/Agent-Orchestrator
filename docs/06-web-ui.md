@@ -529,12 +529,16 @@ The UI dashboard header uses `state`, `host_pool` (rendered as `Mem: used/total 
 All WebSocket events use `type` as the discriminator field (matching the `DashboardEvent` union type in `events.ts`). The primary event types send full task objects rather than partial updates, simplifying client-side state management:
 
 ```json
-{"type": "snapshot", "tasks": [...], "activeCount": 3, "maxConcurrency": 5, "queueDepth": 7, "paused": false}
+{"type": "snapshot", "tasks": [...], "hostPool": {"memory_used_mb": 8192, "memory_total_mb": 32768, "cpu_used_cores": 4, "cpu_total_cores": 12}, "queueDepth": 7, "paused": false}
 {"type": "task_updated", "task": {"id": 42, "status": "in-review", "..."}}
 {"type": "task_created", "task": {"id": 47, "status": "queued", "..."}}
-{"type": "task_removed", "taskId": 43}
-{"type": "status_changed", "paused": false, "activeCount": 3, "queueDepth": 6}
+{"type": "status_changed", "paused": false, "hostPool": {"...": "..."}, "queueDepth": 6}
+{"type": "resource_changed", "resource": "profiles"}
 ```
+
+Every task payload — in `snapshot`, `task_updated` and `task_created` alike — is the **same enriched object** `GET /api/tasks` returns (`TaskView` in `packages/shared`), produced by the single serializer in `packages/server/src/task-view.ts`. The client replaces a task wholesale when an event arrives, so a leaner payload would silently strip fields (`repo`, `dependencies`/`blocked`, `health`, the resolved agent-profile chains) off rows it already held.
+
+One caveat applies to the broadcast path only: it is synchronous and never calls Forgejo or Docker, so `status` is Forgejo-derived only when a snapshot is already cached for that task, and `health` uses the Docker-free derivation (it can report `orphaned` for a null container, but not for a container that vanished). With no cached snapshot the payload carries the stored runtime status — the same degradation `deriveStatus` documents. REST reads keep their stale-while-revalidate snapshot fetch and Docker-derived health.
 
 The UI subscribes to the dashboard WebSocket on load and maintains local state from events. REST endpoints are used for actions and initial page load only.
 
@@ -550,8 +554,12 @@ The snapshot combines the data from `GET /api/tasks` and `GET /api/status` into 
   "tasks": [
     { "id": 1, "issue_id": 42, "status": "in-progress", "..." : "..." }
   ],
-  "activeCount": 3,
-  "maxConcurrency": 5,
+  "hostPool": {
+    "memory_used_mb": 8192,
+    "memory_total_mb": 32768,
+    "cpu_used_cores": 4,
+    "cpu_total_cores": 12
+  },
   "queueDepth": 7,
   "paused": false
 }
