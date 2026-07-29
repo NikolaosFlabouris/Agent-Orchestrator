@@ -14,7 +14,8 @@ import { recordStep } from '../../checkpoints.js';
 const mocks = vi.hoisted(() => ({
   getTasks: vi.fn(),
   getRepo: vi.fn(),
-  updateTask: vi.fn(),
+  updateTaskRaw: vi.fn(),
+  updateTaskWithSync: vi.fn(),
   insertTaskEvent: vi.fn(),
   listContainers: vi.fn(),
   getContainer: vi.fn(),
@@ -36,10 +37,16 @@ vi.mock('../../db.js', async (importOriginal) => {
     ...real,
     getTasks: mocks.getTasks,
     getRepo: mocks.getRepo,
-    updateTask: mocks.updateTask,
+    updateTaskRaw: mocks.updateTaskRaw,
     insertTaskEvent: mocks.insertTaskEvent,
   };
 });
+
+// recovery.ts routes every status transition through state-sync now, so the
+// broadcasting wrapper is what the assertions below watch.
+vi.mock('../../state-sync.js', () => ({
+  updateTaskWithSync: mocks.updateTaskWithSync,
+}));
 
 vi.mock('../../docker.js', () => ({
   listContainers: mocks.listContainers,
@@ -140,7 +147,8 @@ beforeEach(() => {
     container_cpu_cores: null,
     merge_strategy: 'squash',
   });
-  mocks.updateTask.mockReturnValue(undefined);
+  mocks.updateTaskRaw.mockReturnValue(undefined);
+  mocks.updateTaskWithSync.mockReturnValue(undefined);
   mocks.insertTaskEvent.mockReturnValue(undefined);
   mocks.listContainers.mockResolvedValue([]);
   mocks.runOrphanSweep.mockResolvedValue(undefined);
@@ -189,7 +197,7 @@ describe('recoverTask — verify-push checkpoint exists, no create-pr checkpoint
     await onStartup(forgejo, scheduler, silentLog);
 
     expect(createPullRequest).toHaveBeenCalledTimes(1);
-    expect(mocks.updateTask).toHaveBeenCalledWith(
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
       task.id,
       expect.objectContaining({ status: 'in-review' })
     );
@@ -231,7 +239,7 @@ describe('recoverTask — both verify-push and create-pr checkpoints exist', () 
     await onStartup(forgejo, scheduler, silentLog);
 
     expect(createPullRequest).not.toHaveBeenCalled();
-    expect(mocks.updateTask).toHaveBeenCalledWith(
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
       task.id,
       expect.objectContaining({ status: 'in-review' })
     );
@@ -284,7 +292,7 @@ describe('recoverTask — verify-push checkpoint with branch_exists: false, no c
     expect(createPullRequest).not.toHaveBeenCalled();
 
     // Task must NOT be moved to in-review without a valid branch/PR.
-    const inReviewCall = mocks.updateTask.mock.calls.find(
+    const inReviewCall = mocks.updateTaskWithSync.mock.calls.find(
       (call: unknown[]) =>
         typeof call[1] === 'object' &&
         call[1] !== null &&

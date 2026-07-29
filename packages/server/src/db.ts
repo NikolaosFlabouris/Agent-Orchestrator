@@ -1150,7 +1150,20 @@ export function insertTask(task: {
   return getTask(result.lastInsertRowid as number)!;
 }
 
-export function updateTask(
+/**
+ * Raw `UPDATE tasks` — writes the columns and nothing else.
+ *
+ * It does NOT broadcast a `task_updated` WebSocket event, does NOT record a
+ * status timeline event, and does NOT sync the Forgejo `status/*` label.
+ * Prefer `updateTaskWithSync` from `state-sync.ts` unless you have a specific
+ * reason not to: a status change written through here is invisible to every
+ * connected browser until the next manual reload. The legitimate exceptions
+ * are internal bookkeeping writes that change no task STATUS — scheduling and
+ * backoff fields, and the `container_id` clears whose visible consequence is
+ * owned by a broadcasting write that follows. Each such call site carries a
+ * comment saying which case it is.
+ */
+export function updateTaskRaw(
   id: number,
   updates: Partial<
     Pick<

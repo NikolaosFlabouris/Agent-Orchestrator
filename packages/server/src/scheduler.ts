@@ -18,7 +18,7 @@ import {
   getProvider,
   getProviders,
   getSetting,
-  updateTask,
+  updateTaskRaw,
   insertAttempt,
   updateAttempt,
   getRunningAttempt,
@@ -541,7 +541,10 @@ export class Scheduler {
     const level = fresh.salvage_backoff_level + 1;
     const delayMs = computeBackoffMs(level);
     const nextAt = new Date(Date.now() + delayMs).toISOString();
-    updateTask(task.id, {
+    // Raw on purpose: backoff bookkeeping only — no status change, so there
+    // is nothing to broadcast and no label to sync. The `salvage_deferred`
+    // event recorded below is what explains the pause on the task's timeline.
+    updateTaskRaw(task.id, {
       salvage_backoff_level: level,
       salvage_next_attempt_at: nextAt,
     });
@@ -802,7 +805,13 @@ export class Scheduler {
             { event: 'container_not_found', task_id: task.id, container_id: task.container_id },
             'Container not found'
           );
-          updateTask(task.id, { container_id: null });
+          // Raw on purpose: the task's status is untouched. Note this is NOT
+          // invisible — `deriveHealthWithoutDocker` reports `orphaned` for an
+          // active task with a running attempt and no container_id — but the
+          // next tick's `reconcileOrphans` (step 0) owns that narrative and
+          // broadcasts via `updateTaskWithSync`. Broadcasting here would push a
+          // transient `orphaned` row out ahead of the recovery event.
+          updateTaskRaw(task.id, { container_id: null });
         } else {
           this.log.error(
             { event: 'container_inspect_error', task_id: task.id, err },
@@ -925,7 +934,14 @@ export class Scheduler {
       );
     }
     if (removed) {
-      updateTask(task.id, { container_id: null });
+      // Raw on purpose: the container is gone and its id is now stale.
+      // `completeAttempt` above already retired the running attempt, so health
+      // stays `healthy` rather than flipping to `orphaned`, and the status
+      // transition that follows in the onDev/onReview handlers broadcasts. The
+      // one path that returns without a status write is the git-outage salvage
+      // deferral (`postDevAgent` → false); there the stale container_id is
+      // corrected on the next tick's reconcile.
+      updateTaskRaw(task.id, { container_id: null });
     }
 
     // Dispatch to appropriate handler
@@ -948,7 +964,7 @@ export class Scheduler {
     if (this.paused) return;
     // Re-entry guard: a webhook-triggered tick that arrives mid-launch would
     // otherwise read the same DB snapshot and pick the same candidate before
-    // the in-flight launch's updateTask has bumped the active count. Skipping
+    // the in-flight launch's task update has bumped the active count. Skipping
     // is correct — the in-flight call will pick up any newly-queued work on
     // its next pass, and the trailing tick can run on the next event.
     if (this.fillSlotsInFlight) return;
@@ -1207,7 +1223,10 @@ export class Scheduler {
     const fresh = getTask(taskId);
     if (!fresh) return;
     if (fresh.prep_backoff_level > 0 || fresh.prep_next_attempt_at) {
-      updateTask(taskId, {
+      // Raw on purpose: prep-backoff bookkeeping only — no status change, so
+      // no broadcast is needed and there is no label to sync. The
+      // `prep_recovered` event below records it on the task's timeline.
+      updateTaskRaw(taskId, {
         prep_backoff_level: 0,
         prep_next_attempt_at: null,
       });
@@ -1295,7 +1314,7 @@ export class Scheduler {
     // Generate branch name on first attempt if not set
     if (!task.branch_name) {
       const branchName = generateBranchName(task.issue_id, issue.title);
-      updateTask(task.id, { branch_name: branchName });
+      updateTaskWithSync(task.id, { branch_name: branchName });
       task = getTask(task.id)!;
     }
 

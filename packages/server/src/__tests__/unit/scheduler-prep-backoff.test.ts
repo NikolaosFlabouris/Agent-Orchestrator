@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   getProvider: vi.fn(),
   getProviders: vi.fn(),
   getSetting: vi.fn(),
-  updateTask: vi.fn(),
+  updateTaskRaw: vi.fn(),
   insertAttempt: vi.fn(),
   updateAttempt: vi.fn(),
   getRunningAttempt: vi.fn(),
@@ -90,7 +90,7 @@ vi.mock('../../db.js', () => ({
   getProvider: mocks.getProvider,
   getProviders: mocks.getProviders,
   getSetting: mocks.getSetting,
-  updateTask: mocks.updateTask,
+  updateTaskRaw: mocks.updateTaskRaw,
   insertAttempt: mocks.insertAttempt,
   updateAttempt: mocks.updateAttempt,
   getRunningAttempt: mocks.getRunningAttempt,
@@ -260,7 +260,7 @@ beforeEach(() => {
     const t = store.find((x) => x.id === id);
     if (t) Object.assign(t, patch);
   };
-  mocks.updateTask.mockImplementation(applyPatch);
+  mocks.updateTaskRaw.mockImplementation(applyPatch);
   mocks.updateTaskWithSync.mockImplementation(applyPatch);
 
   // Inert tick sub-steps.

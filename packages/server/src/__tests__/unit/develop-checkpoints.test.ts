@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   // db helpers called directly by postDevAgent
   getRepo: vi.fn(),
   getTask: vi.fn(),
-  updateTask: vi.fn(),
+  updateTaskRaw: vi.fn(),
   // state-sync helpers
   updateTaskWithSync: vi.fn(),
   recordTaskEvent: vi.fn(),
@@ -37,7 +37,7 @@ vi.mock('../../db.js', async (importOriginal) => {
     ...real,
     getRepo: mocks.getRepo,
     getTask: mocks.getTask,
-    updateTask: mocks.updateTask,
+    updateTaskRaw: mocks.updateTaskRaw,
   };
 });
 
@@ -136,8 +136,8 @@ beforeEach(() => {
     merge_strategy: 'squash',
   });
 
-  // Default: updateTask is a no-op
-  mocks.updateTask.mockReturnValue(undefined);
+  // Default: updateTaskRaw is a no-op
+  mocks.updateTaskRaw.mockReturnValue(undefined);
   mocks.updateTaskWithSync.mockReturnValue(undefined);
   mocks.verifyWorkspaceState.mockResolvedValue(undefined);
 });
@@ -323,7 +323,7 @@ describe('postDevAgent — PR reconciliation', () => {
     expect(result).toBe(true);
     expect(createPullRequest).not.toHaveBeenCalled();
     expect(closePullRequest).not.toHaveBeenCalled();
-    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 7 });
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(task.id, { pr_number: 7 });
     expect(eventTypes()).toContain('pr_adopted');
   });
 
@@ -350,7 +350,7 @@ describe('postDevAgent — PR reconciliation', () => {
     expect(result).toBe(true);
     expect(closePullRequest).toHaveBeenCalledWith(expect.anything(), 8);
     expect(createPullRequest).toHaveBeenCalledTimes(1);
-    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 99 });
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(task.id, { pr_number: 99 });
     expect(eventTypes()).toContain('pr_recreated');
   });
 
@@ -411,7 +411,7 @@ describe('postDevAgent — PR reconciliation', () => {
 
     expect(result).toBe(true);
     expect(createPullRequest).toHaveBeenCalledTimes(1);
-    expect(mocks.updateTask).toHaveBeenCalledWith(task.id, { pr_number: 14 });
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(task.id, { pr_number: 14 });
     expect(eventTypes()).toContain('pr_adopted');
     expect(eventTypes()).not.toContain('pr_creation_failed');
   });

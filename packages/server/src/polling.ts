@@ -18,16 +18,41 @@ import {
   getTasks,
   getTask,
   insertTask,
-  updateTask,
 } from './db.js';
 import { checkAlerts } from './alerts.js';
 import { cleanupOldWorkspaces } from './cleanup.js';
 import { POLL_INTERVAL_SECONDS } from './constants.js';
-import { notifyTaskCreated } from './state-sync.js';
+import { notifyTaskCreated, updateTaskWithSync } from './state-sync.js';
+import { invalidateSnapshot } from './forgejo-snapshot.js';
 import { syncTaskDependencies } from './dependencies.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
+
+/**
+ * Apply a state change the poller detected on Forgejo: drop the cached Forgejo
+ * view, then write through `updateTaskWithSync` so the transition reaches every
+ * connected dashboard.
+ *
+ * The invalidation is load-bearing, not hygiene. `updateTaskWithSync` derives
+ * its broadcast payload via `peekSnapshot`, which deliberately serves EXPIRED
+ * entries — so a cache warmed by an earlier REST read would make the event
+ * announce the status that stale snapshot implies (e.g. still
+ * `awaiting-human-merge`) rather than the one just written, and the client
+ * replaces the row wholesale from that payload. `routes/webhooks.ts`
+ * invalidates ahead of its writes for the same reason.
+ *
+ * Called only from the branches that actually change state — never once per
+ * task per cycle — so it neither floods the socket nor throws away a warm
+ * cache the REST path still wants.
+ */
+function applyExternalChange(
+  taskId: number,
+  updates: Parameters<typeof updateTaskWithSync>[1]
+): void {
+  invalidateSnapshot(taskId);
+  updateTaskWithSync(taskId, updates);
+}
 
 /**
  * Fallback polling loop.
@@ -159,7 +184,7 @@ export class Poller {
         // full retry budget. To preserve the prior branch, use the orchestrator
         // UI's reset+requeue flow instead.
         if (REQUEUEABLE_FROM_LABEL.has(existing.status)) {
-          updateTask(existing.id, {
+          applyExternalChange(existing.id, {
             status: 'queued',
             container_id: null,
             branch_name: null,
@@ -220,6 +245,11 @@ export class Poller {
    * `merged` rather than leaving it stuck. Issue-closed and external-cancel
    * are still scoped to non-terminal tasks so a prior `failed` outcome isn't
    * silently overwritten when the issue is later closed as "won't fix".
+   *
+   * This loop runs over every non-final task in the repo on each poll cycle,
+   * so the `applyExternalChange` calls must stay inside the branches that
+   * actually change status. Hoisting one out would turn a quiet reconciliation
+   * pass into a per-task WebSocket broadcast every 60 seconds.
    */
   private async detectExternalStateChanges(
     repo: import('@orchestrator/shared').Repo
@@ -245,7 +275,7 @@ export class Poller {
             const pr = await this.forgejo.getPullRequest(repo, task.pr_number);
             if (pr.merged) {
               const previousStatus = task.status;
-              updateTask(task.id, {
+              applyExternalChange(task.id, {
                 status: 'merged',
                 completed_at: new Date().toISOString(),
               });
@@ -269,7 +299,7 @@ export class Poller {
         // state so a prior `failed` outcome isn't overwritten by a later
         // "won't fix" issue closure.
         if (issue.state === 'closed' && !TERMINAL_STATUSES.has(task.status)) {
-          updateTask(task.id, {
+          applyExternalChange(task.id, {
             status: 'cancelled',
             completed_at: new Date().toISOString(),
           });
@@ -285,7 +315,7 @@ export class Poller {
           (l) => l.name === 'status/cancelled'
         );
         if (hasCancelled && !TERMINAL_STATUSES.has(task.status)) {
-          updateTask(task.id, {
+          applyExternalChange(task.id, {
             status: 'cancelled',
             completed_at: new Date().toISOString(),
           });

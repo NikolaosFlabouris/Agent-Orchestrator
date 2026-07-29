@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Fastify from 'fastify';
 import type { Task } from '@orchestrator/shared';
-import { initDatabase, getTask, getRepo, updateTask } from '../../db.js';
+import { initDatabase, getTask, getRepo, updateTaskRaw } from '../../db.js';
 import { Poller } from '../../polling.js';
 import { createWebhookRoutes } from '../../routes/webhooks.js';
 
@@ -14,8 +14,10 @@ import { createWebhookRoutes } from '../../routes/webhooks.js';
 //
 // resetTask is exercised for real (in-memory DB, Docker + workspace mocked
 // away). The label-driven requeue in polling.ts / routes/webhooks.ts writes
-// the same patch through db.updateTask, so it is asserted here against the
-// same DB rather than by booting the poller and a Fastify server.
+// the same patch through updateTaskWithSync, so it is asserted here against
+// the same DB rather than by booting the poller and a Fastify server. (The
+// broadcast half of that write is covered by
+// external-transition-broadcast.test.ts.)
 // ---------------------------------------------------------------------------
 
 vi.mock('../../docker.js', () => ({
@@ -135,7 +137,7 @@ describe('resetTask clears git-outage state', () => {
 describe('label-driven requeue clears git-outage state', () => {
   /** Put the task in a terminal state a human can re-queue from. */
   function markFailed(): void {
-    updateTask(TASK_ID, { status: 'failed' });
+    updateTaskRaw(TASK_ID, { status: 'failed' });
   }
 
   it('the fallback poller clears it when status/queued is re-applied', async () => {

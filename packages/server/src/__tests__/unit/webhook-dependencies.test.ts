@@ -4,7 +4,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import {
   initDatabase,
   insertTask,
-  updateTask,
+  updateTaskRaw,
   getTaskDependencies,
   getRepo,
 } from '../../db.js';
@@ -122,7 +122,7 @@ describe('issues edited webhook', () => {
 
   it('ignores edits to issues of terminal tasks', async () => {
     const task = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
-    updateTask(task.id, { status: 'merged' });
+    updateTaskRaw(task.id, { status: 'merged' });
 
     await inject({
       action: 'edited',
@@ -202,7 +202,7 @@ describe('reevaluateDependentsOfIssue', () => {
         log
       );
     }
-    updateTask(running.id, { status: 'in-progress' });
+    updateTaskRaw(running.id, { status: 'in-progress' });
 
     issueStates[5] = 'closed';
     const touched = await reevaluateDependentsOfIssue(1, 5, forgejo, log);

@@ -21,7 +21,7 @@ import { initDatabase } from '../../db.js';
 const mocks = vi.hoisted(() => ({
   getRepo: vi.fn(),
   getTask: vi.fn(),
-  updateTask: vi.fn(),
+  updateTaskRaw: vi.fn(),
   updateTaskWithSync: vi.fn(),
   recordTaskEvent: vi.fn(),
   verifyWorkspaceState: vi.fn(),
@@ -54,7 +54,7 @@ vi.mock('../../db.js', async (importOriginal) => {
     ...real,
     getRepo: mocks.getRepo,
     getTask: mocks.getTask,
-    updateTask: mocks.updateTask,
+    updateTaskRaw: mocks.updateTaskRaw,
   };
 });
 
@@ -167,7 +167,7 @@ function eventsOfType(type: string): string[] {
 }
 
 function updatePatches(): Array<Record<string, unknown>> {
-  return mocks.updateTask.mock.calls.map((c: unknown[]) => c[1] as Record<string, unknown>);
+  return mocks.updateTaskRaw.mock.calls.map((c: unknown[]) => c[1] as Record<string, unknown>);
 }
 
 beforeEach(() => {
@@ -194,7 +194,7 @@ beforeEach(() => {
     merge_strategy: 'squash',
   });
   mocks.getTask.mockReturnValue(mkTask());
-  mocks.updateTask.mockReturnValue(undefined);
+  mocks.updateTaskRaw.mockReturnValue(undefined);
   mocks.updateTaskWithSync.mockReturnValue(undefined);
   mocks.verifyWorkspaceState.mockResolvedValue(undefined);
   // The agent left uncommitted work behind and never pushed a branch.
@@ -276,7 +276,7 @@ describe('salvage push during a git-host outage', () => {
 
     // The next deferral escalates off the PERSISTED level, not the stale
     // in-memory task row the caller happens to be holding.
-    mocks.updateTask.mockClear();
+    mocks.updateTaskRaw.mockClear();
     mocks.getTask.mockReturnValue(mkTask({ salvage_backoff_level: 3 }));
     await postDevAgent(mkTask(), makeForgejo(), silentLog);
     const second = updatePatches().find((p) => 'salvage_next_attempt_at' in p)!;
@@ -376,19 +376,24 @@ describe('structural salvage failures stay terminal', () => {
     const ready = await postDevAgent(mkTask(), makeForgejo(), silentLog);
 
     expect(ready).toBe(false);
+    // No stale deferral is left behind for the retry sweep to resurrect —
+    // and the clear rides along on the SAME broadcasting write as the status
+    // change, so the dashboard sees one `task_updated`, not two.
     expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failed' })
+      expect.objectContaining({
+        status: 'failed',
+        salvage_backoff_level: 0,
+        salvage_next_attempt_at: null,
+      })
+    );
+    expect(updatePatches()).not.toContainEqual(
+      expect.objectContaining({ salvage_backoff_level: 0 })
     );
     const failed = eventsOfType('salvage_failed');
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatch(/pre-receive hook declined/);
     expect(eventsOfType('salvage_deferred')).toHaveLength(0);
-    // No stale deferral is left behind for the retry sweep to resurrect.
-    expect(updatePatches()).toContainEqual({
-      salvage_backoff_level: 0,
-      salvage_next_attempt_at: null,
-    });
   });
 
   it('fails the task when the commit itself cannot be made', async () => {

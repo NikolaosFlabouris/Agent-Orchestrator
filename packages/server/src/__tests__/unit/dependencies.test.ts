@@ -4,7 +4,7 @@ import type { Repo } from '@orchestrator/shared';
 import {
   initDatabase,
   insertTask,
-  updateTask,
+  updateTaskRaw,
   getTask,
   getTaskDependencies,
   getDependentTasks,
@@ -396,7 +396,7 @@ describe('evaluateTaskDependencies', () => {
   it('tracked merged task satisfies without a Forgejo call', async () => {
     seedRepo(1);
     const depTask = insertTask({ issue_id: 5, repo_id: 1, status: 'queued' });
-    updateTask(depTask.id, { status: 'merged', pr_number: 52 });
+    updateTaskRaw(depTask.id, { status: 'merged', pr_number: 52 });
     const task = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
     const forgejo = forgejoStub(() => 'open');
 
@@ -512,7 +512,7 @@ describe('evaluateTaskDependencies', () => {
   it('reflects tracked task progress as in-progress / failed', async () => {
     seedRepo(1);
     const depTask = insertTask({ issue_id: 5, repo_id: 1, status: 'queued' });
-    updateTask(depTask.id, { status: 'in-progress' });
+    updateTaskRaw(depTask.id, { status: 'in-progress' });
     const task = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
     const forgejo = forgejoStub(() => 'open');
 
@@ -524,7 +524,7 @@ describe('evaluateTaskDependencies', () => {
     );
     expect(summary.deps[0].state).toBe('in-progress');
 
-    updateTask(depTask.id, { status: 'failed' });
+    updateTaskRaw(depTask.id, { status: 'failed' });
     _clearDependencyCache();
     summary = await evaluateTaskDependencies(
       task,
@@ -824,7 +824,7 @@ describe('runQueuedDependencyPass / dependencyGateAllows', () => {
   it('skips non-queued tasks', async () => {
     seedRepo(1);
     const active = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
-    updateTask(active.id, { status: 'in-progress' });
+    updateTaskRaw(active.id, { status: 'in-progress' });
     const forgejo = passStub({ 10: { body: '' } });
     const state = createDependencyPassState();
 

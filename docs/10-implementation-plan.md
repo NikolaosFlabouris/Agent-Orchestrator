@@ -36,7 +36,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
      points `default_agent_profile_id` at it)
    - WAL mode and busy_timeout pragmas
    - Query helpers: `getTask`, `getTasks`, `getRepo`, `getProvider`,
-     `getModel`, `getAgentProfile`, `getSetting`, `updateTask`,
+     `getModel`, `getAgentProfile`, `getSetting`, `updateTaskRaw`,
      `insertAttempt`, `updateAttempt`
 
 3. **Forgejo API client** (`packages/server/src/forgejo.ts`)
