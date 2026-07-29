@@ -29,6 +29,25 @@ export function createDashboardWs(opts: {
   return dashboardWs;
 }
 
+/** Heartbeat cadence. Two jobs:
+ *
+ *  1. A protocol-level ping keeps middleboxes (NAT tables, reverse proxies
+ *     with idle timeouts) from silently dropping an otherwise-idle socket.
+ *  2. The accompanying `status_changed` frame is what the CLIENT measures
+ *     silence against — a browser never surfaces an incoming ping frame to
+ *     JavaScript, so a ping alone cannot prove liveness to the UI. Reusing
+ *     the existing event (rather than inventing a heartbeat type) keeps the
+ *     `DashboardEvent` union unchanged and doubles as a periodic status
+ *     resync; the client's `setStatus` is idempotent.
+ *
+ *  Keep in step with `DASHBOARD_STALE_TIMEOUT_MS` in `packages/ui/src/ws.ts`,
+ *  which must stay at roughly twice this value. */
+const PING_INTERVAL_MS = 25_000;
+
+/** `ws` readyState for OPEN. Hardcoded rather than read off the socket so a
+ *  mock in tests doesn't have to carry the constant. */
+const WS_OPEN = 1;
+
 export async function dashboardWs(app: FastifyInstance): Promise<void> {
   app.get('/ws/dashboard', { websocket: true }, (socket) => {
     clients.add(socket);
@@ -37,13 +56,36 @@ export async function dashboardWs(app: FastifyInstance): Promise<void> {
     const snapshot = buildSnapshot();
     socket.send(JSON.stringify(snapshot));
 
-    socket.on('close', () => {
-      clients.delete(socket);
-    });
+    const heartbeat = setInterval(() => {
+      if (socket.readyState !== WS_OPEN) return;
+      try {
+        socket.ping();
+        socket.send(
+          JSON.stringify({
+            type: 'status_changed',
+            paused: getPausedState(),
+            hostPool: buildHostPool(),
+            queueDepth: getQueuedTasks().length,
+          } satisfies DashboardEvent)
+        );
+      } catch {
+        // Socket died between the readyState check and the write. The
+        // close/error handler below performs the cleanup.
+      }
+    }, PING_INTERVAL_MS);
+    // Never hold the process open for a heartbeat alone.
+    heartbeat.unref?.();
 
-    socket.on('error', () => {
+    // One cleanup for both terminal paths — an errored socket may never emit
+    // 'close', so registering the clear on only one of them leaks a timer per
+    // dropped connection for the life of the process.
+    const cleanup = () => {
+      clearInterval(heartbeat);
       clients.delete(socket);
-    });
+    };
+
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
   });
 }
 

@@ -567,7 +567,20 @@ The snapshot combines the data from `GET /api/tasks` and `GET /api/status` into 
 
 The snapshot uses the `DashboardSnapshot` type from `events.ts`. The `tasks` array uses the same task object shape as `GET /api/tasks`. Top-level fields provide the status summary. The client replaces its entire local state with the snapshot on (re)connect.
 
+**One connection per tab.** The dashboard socket is owned app-wide by `<LiveData>` (mounted inside `GatedLayout`), not by any single view, and views attach to it through the reference-counted `subscribeDashboard` in `ws.ts`. Navigating Dashboard → Task Detail → Dashboard therefore neither tears the socket down nor opens a second one; the store stays live on Reports and Settings too. Task Detail attaches to the same stream to refetch its own task on `task_updated`.
+
+**Heartbeat.** Every 25s the server sends each dashboard socket a protocol-level ping *and* a `status_changed` frame. The ping keeps NAT tables and idle-timeout proxies from dropping a quiet connection; the `status_changed` frame exists because a browser never surfaces an incoming ping frame to JavaScript, so it is the only thing the client can measure liveness against. No new event type is involved — the frame doubles as a periodic status resync, and `setStatus` is idempotent. The per-socket interval is cleared on both `close` and `error`.
+
 **On disconnect:** the client reconnects automatically with exponential backoff (1s, 2s, 4s, 8s, max 30s). On successful reconnection, the server sends a fresh state snapshot, and the client replaces its local state entirely (not merged, to avoid stale data).
+
+**On silence:** a half-open TCP connection (idle NAT timeout, host IP change, suspended laptop) never fires `onclose`, so the backoff above would never engage. The client tracks the time of the last received frame and, after 60s of silence (~2× the heartbeat), closes the socket itself to force the reconnect path. Connection health lives in the store as `connection: 'connected' | 'reconnecting'` and renders in `AppHeader` on every view — a muted "Live" marker when healthy, an amber "Reconnecting — data may be stale" chip when not.
+
+**REST refresh vs snapshot.** The Dashboard's 30s `GET /api/tasks` poll goes through `store.syncTasks`, which upserts every returned row — so the poll heals a `task_created` event that never arrived — and prunes local rows the server omitted, but only when both of these hold:
+
+1. **The response is known to be complete.** The route buckets tasks into active / queued / completed and truncates the completed bucket to `limit`, so a response whose completed bucket came back *at* the limit is silent about everything it dropped and nothing may be pruned from it. The client sends `limit` explicitly and compares. Bucketing by the client's own status is *not* a valid substitute: the server buckets on the Forgejo-derived status, which is precisely what this poll exists to discover — a task stored `in-progress` whose issue was just closed externally is bucketed `cancelled` server-side and truncated away, and pruning it on the theory that "active tasks always come back in full" would delete a live row every 30 seconds.
+2. **The id was already in the store when the request was issued.** Otherwise a `task_created` arriving over the WebSocket mid-request is pruned by a response that predates it.
+
+Snapshot handling is unchanged: `setSnapshot` still replaces task state wholesale.
 
 **Agent output stream (`/ws/tasks/:id/output`):** on connect, the server sends all buffered output from the current container's progress log, then streams new lines as they arrive. On reconnect, the same replay-then-stream behaviour ensures no output is missed. When the container exits, the server sends a final `{"event": "stream_complete"}` message and closes the connection.
 

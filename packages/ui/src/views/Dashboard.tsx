@@ -1,29 +1,27 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useStore } from '../store.js';
+import { ACTIVE_STATUSES, useStore } from '../store.js';
 import { api } from '../api.js';
 import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
-import { connectDashboardWs } from '../ws.js';
-import type { DashboardWsEvent, HostPool } from '../ws.js';
+import type { HostPool } from '../ws.js';
 import { AlertBanner } from '../components/AlertBanner.js';
 import { AppHeader } from '../components/AppHeader.js';
+import { Elapsed, TimeAgo } from '../components/LiveTime.js';
 import { QueueList } from '../components/QueueList.js';
 import { KpiCard } from '../components/KpiCard.js';
 import { formatNumber, formatPercent } from '../components/reportFormat.js';
 import { defaultRange, previousRange } from '../components/reportFilter.js';
 import type { ReportsOverview } from '@orchestrator/shared';
 
-const ACTIVE_STATUSES = new Set([
-  'preparing',
-  'in-progress',
-  'in-review',
-  'changes-needed',
-]);
-
 // Cap on the homepage Recent list. The full, paginated history lives on the
 // Reports "All tasks" browser (linked via "View all"); the Active and Queue
 // sections stay unbounded as they're operationally important. Tune freely.
 const RECENT_LIMIT = 10;
+
+// `limit` sent with the /api/tasks refresh — the same value the route
+// defaults to, stated explicitly because `syncTasks` needs to know it to
+// tell a complete response from a truncated one before it prunes anything.
+const TASKS_FETCH_LIMIT = 20;
 
 export function Dashboard() {
   // Selector-based subscriptions: each call subscribes only to its
@@ -56,15 +54,12 @@ export function Dashboard() {
     // don't add subscriptions for things we only invoke (never read
     // as values). Same identity guarantee as the selector pattern,
     // just without the unused subscription overhead.
-    const {
-      setForgejoBaseUrl,
-      setHostPool: setHostPoolFn,
-      setSnapshot,
-      updateTask,
-      addTask,
-      setStatus: setStatusFn,
-      bumpResourceVersion,
-    } = useStore.getState();
+    //
+    // The dashboard WebSocket is NOT opened here — it's owned app-wide by
+    // <LiveData> in main.tsx so it survives navigation. This effect only
+    // owns the REST polls, which are per-view.
+    const { setForgejoBaseUrl, setHostPool: setHostPoolFn, syncTasks } =
+      useStore.getState();
 
     // Pull status immediately and every 5 s. Providers are sampled often so
     // the Pools row stays close to live.
@@ -89,47 +84,34 @@ export function Dashboard() {
     // reality overrides stale local `failed` rows. Refresh on mount and
     // every 30 s so driver-label / issue-closure changes reach the UI even
     // if a webhook was dropped.
+    //
+    // `syncTasks` (not a per-row updateTask loop): it upserts, so this poll
+    // heals a `task_created` event we never received, and it converges on the
+    // server's view instead of only ever growing.
+    //
+    // The id set is captured BEFORE the request so a task created over the
+    // WebSocket while it's in flight isn't pruned by a response that predates
+    // it; the limit lets syncTasks refuse to prune from a truncated response.
+    // See syncTasks for the full rule.
     const refreshTasks = () => {
-      api.getTasks().then((res) => {
-        for (const task of res.tasks) updateTask(task);
-      }).catch(() => {});
+      const knownIds = new Set(useStore.getState().tasks.map((t) => t.id));
+      api
+        .getTasks({ limit: TASKS_FETCH_LIMIT })
+        .then((res) =>
+          syncTasks(res.tasks, {
+            knownIds,
+            completedLimit: TASKS_FETCH_LIMIT,
+          })
+        )
+        .catch(() => {});
     };
     refreshTasks();
     const tasksTimer = window.setInterval(refreshTasks, 30_000);
-
-    // Connect WebSocket
-    const handler = (event: DashboardWsEvent) => {
-      switch (event.type) {
-        case 'snapshot':
-          setSnapshot(event);
-          break;
-        case 'task_updated':
-          updateTask(event.task);
-          break;
-        case 'task_created':
-          addTask(event.task);
-          break;
-        case 'status_changed':
-          setStatusFn(event);
-          break;
-        case 'resource_changed':
-          // Bump the version counter — every Settings tab + the
-          // Dashboard's profilesVersion useEffect subscribes to this
-          // and refetches when it ticks. No inline fetch here: the
-          // bump is debounced (store.ts), and an inline fetch would
-          // both bypass that debounce and duplicate the request.
-          bumpResourceVersion(event.resource);
-          break;
-      }
-    };
-
-    const disconnect = connectDashboardWs(handler);
 
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
 
     return () => {
-      disconnect();
       window.clearInterval(timer);
       window.clearInterval(tasksTimer);
     };
@@ -475,7 +457,9 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
           </span>
           {task.started_at && (
             <span className="text-gray-500">
-              {elapsed(task.started_at)}
+              {/* Self-ticking leaf: the duration advances every second
+                  without a server event, and only this span re-renders. */}
+              <Elapsed startedAt={task.started_at} />
             </span>
           )}
         </div>
@@ -533,7 +517,9 @@ function CompletedItem({ task }: { task: TaskResponse }) {
           {task.attempt} attempt{task.attempt !== 1 ? 's' : ''}
         </span>
         {task.completed_at && (
-          <span className="text-gray-500">{timeAgo(task.completed_at)}</span>
+          <span className="text-gray-500">
+            <TimeAgo date={task.completed_at} />
+          </span>
         )}
       </div>
     </div>
@@ -655,26 +641,3 @@ function StatusBadge({ status, label }: { status: string; label?: string }) {
   );
 }
 
-function elapsed(startedAt: string): string {
-  const seconds = Math.floor(
-    (Date.now() - new Date(startedAt).getTime()) / 1000
-  );
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
-function timeAgo(dateStr: string): string {
-  const seconds = Math.floor(
-    (Date.now() - new Date(dateStr).getTime()) / 1000
-  );
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}

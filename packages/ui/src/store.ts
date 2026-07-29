@@ -1,10 +1,33 @@
 import { create } from 'zustand';
 import type { AuthUser, TaskResponse, AgentProfileResponse } from './api.js';
-import type { HostPool } from './ws.js';
+import type { ConnectionState, HostPool } from './ws.js';
 
 interface Alert {
   level: 'info' | 'warning' | 'error';
   message: string;
+}
+
+/** Statuses the orchestrator treats as "an agent is working on it". Shared
+ *  between the Dashboard's bucketing and `completedCount` below so the two
+ *  can never disagree about what counts as active. Mirrors
+ *  `ACTIVE_STATUSES` in `packages/server/src/routes/tasks.ts`. */
+export const ACTIVE_STATUSES = new Set([
+  'preparing',
+  'in-progress',
+  'in-review',
+  'changes-needed',
+]);
+
+/** Size of the completed bucket in a `GET /api/tasks` response, using the
+ *  same split the server's handler applies (active / queued / completed).
+ *  `syncTasks` compares this against the requested `limit` to tell a
+ *  complete response from a truncated one. */
+function completedCount(tasks: TaskResponse[]): number {
+  let count = 0;
+  for (const t of tasks) {
+    if (!ACTIVE_STATUSES.has(t.status) && t.status !== 'queued') count += 1;
+  }
+  return count;
 }
 
 /** Monotonic per-resource counter the server bumps via the WS
@@ -16,6 +39,17 @@ export interface ResourceVersions {
   providers: number;
   models: number;
   profiles: number;
+}
+
+export interface SyncTasksOptions {
+  /** The `limit` that was sent with the request. Supplying it lets
+   *  `syncTasks` tell a complete response from one whose completed bucket
+   *  the server truncated; only a complete response may prune. */
+  completedLimit?: number;
+  /** Ids the caller already held when it issued the request. Rows that
+   *  appeared afterwards (a `task_created` racing the fetch) are never
+   *  pruned by a response that predates them. */
+  knownIds?: ReadonlySet<number>;
 }
 
 interface DashboardState {
@@ -31,6 +65,11 @@ interface DashboardState {
    *  via GET /api/me. Null when auth is disabled or the userinfo
    *  lookup failed at login. */
   user: AuthUser | null;
+  /** Health of the shared dashboard WebSocket, rendered as the "Live" /
+   *  "Reconnecting" marker in AppHeader. Starts as `reconnecting` — we
+   *  haven't got a socket open yet, and claiming "Live" before the first
+   *  frame arrives would be a lie on a dead backend. */
+  connection: ConnectionState;
 
   // Actions
   setSnapshot: (data: {
@@ -40,8 +79,10 @@ interface DashboardState {
     paused: boolean;
   }) => void;
   updateTask: (task: TaskResponse) => void;
+  syncTasks: (tasks: TaskResponse[], opts?: SyncTasksOptions) => void;
   addTask: (task: TaskResponse) => void;
   removeTask: (taskId: number) => void;
+  setConnection: (state: ConnectionState) => void;
   setStatus: (data: {
     paused: boolean;
     hostPool: HostPool;
@@ -75,6 +116,7 @@ export const useStore = create<DashboardState>((set) => ({
   alerts: [],
   resourceVersions: { providers: 0, models: 0, profiles: 0 },
   user: null,
+  connection: 'reconnecting',
 
   setSnapshot: (data) =>
     set({
@@ -84,15 +126,95 @@ export const useStore = create<DashboardState>((set) => ({
       paused: data.paused,
     }),
 
+  // Upsert, not map-in-place. A `task_updated` for an id we've never seen
+  // used to be silently dropped, which made the REST refresh incapable of
+  // healing a missed `task_created` — every creation path had to remember
+  // to emit one or the task stayed invisible until a manual reload.
   updateTask: (task) =>
-    set((state) => ({
-      tasks: state.tasks.map((t) => (t.id === task.id ? task : t)),
-    })),
+    set((state) => {
+      const idx = state.tasks.findIndex((t) => t.id === task.id);
+      if (idx === -1) return { tasks: [...state.tasks, task] };
+      const tasks = state.tasks.slice();
+      tasks[idx] = task;
+      return { tasks };
+    }),
 
+  /** Converge local state on an unfiltered `GET /api/tasks` response: upsert
+   *  every returned row (preserving existing order, appending new ids) and
+   *  prune local rows the server did not return.
+   *
+   *  Pruning is gated, because "absent from the response" does NOT generally
+   *  mean "gone". Both conditions must hold:
+   *
+   *  1. The response is known to be complete, i.e. `completedLimit` was
+   *     supplied and its completed bucket came back shorter than that. The
+   *     route splits tasks into active / queued / completed and truncates the
+   *     completed bucket to `limit` (`packages/server/src/routes/tasks.ts`),
+   *     so a truncated response is silent about everything it dropped and
+   *     nothing may be pruned from it. Omitting `completedLimit` disables
+   *     pruning entirely, which makes `syncTasks` a plain bulk upsert.
+   *
+   *     Bucketing by the LOCAL status instead is not a valid substitute: the
+   *     server buckets on the Forgejo-derived status, which is exactly what
+   *     this poll exists to discover. A task stored `in-progress` whose issue
+   *     was just closed is bucketed `cancelled` by the server and truncated
+   *     away — pruning it because "active tasks are always returned in full"
+   *     would delete a live row every 30s.
+   *  2. The id was already in the store when the caller ISSUED the request
+   *     (`knownIds`). Otherwise a `task_created` arriving over the WebSocket
+   *     mid-flight is pruned by a response that predates it, and the new task
+   *     blinks out until the next poll.
+   *
+   *  Not for snapshot handling: a WS (re)connect replaces task state
+   *  wholesale via `setSnapshot`, which is intentional (docs/06-web-ui.md). */
+  syncTasks: (tasks, opts) =>
+    set((state) => {
+      // Without a limit to compare against we cannot tell a complete
+      // response from a truncated one, so "absent" reads as "unknown".
+      const complete =
+        opts?.completedLimit !== undefined &&
+        completedCount(tasks) < opts.completedLimit;
+      const incoming = new Map(tasks.map((t) => [t.id, t]));
+      const merged: TaskResponse[] = [];
+      const seen = new Set<number>();
+      for (const local of state.tasks) {
+        // Collapse any pre-existing duplicate ids while we're here — two
+        // rows with the same id would render under the same React key.
+        if (seen.has(local.id)) continue;
+        const fresh = incoming.get(local.id);
+        if (fresh) {
+          merged.push(fresh);
+          seen.add(local.id);
+          continue;
+        }
+        const prunable =
+          complete &&
+          (opts?.knownIds === undefined || opts.knownIds.has(local.id));
+        if (prunable) continue;
+        merged.push(local);
+        seen.add(local.id);
+      }
+      for (const task of tasks) {
+        if (!seen.has(task.id)) {
+          merged.push(task);
+          seen.add(task.id);
+        }
+      }
+      return { tasks: merged };
+    }),
+
+  // Upsert as well: now that the REST refresh can insert rows too
+  // (`syncTasks`), a blind append could duplicate a task whose poll response
+  // landed before its `task_created` frame — and two rows sharing a React key
+  // render incorrectly.
   addTask: (task) =>
-    set((state) => ({
-      tasks: [...state.tasks, task],
-    })),
+    set((state) => {
+      const idx = state.tasks.findIndex((t) => t.id === task.id);
+      if (idx === -1) return { tasks: [...state.tasks, task] };
+      const tasks = state.tasks.slice();
+      tasks[idx] = task;
+      return { tasks };
+    }),
 
   removeTask: (taskId) =>
     set((state) => ({
@@ -105,6 +227,11 @@ export const useStore = create<DashboardState>((set) => ({
       hostPool: data.hostPool,
       queueDepth: data.queueDepth,
     }),
+
+  setConnection: (connection) =>
+    // Guard the write so the liveness poller re-asserting the current
+    // state doesn't spam subscribers of the `connection` slice.
+    set((state) => (state.connection === connection ? state : { connection })),
 
   setHostPool: (hostPool) => set({ hostPool }),
   setForgejoBaseUrl: (url) => set({ forgejoBaseUrl: url }),
