@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import type { Task, AgentResult } from '@orchestrator/shared';
 
 const execFileP = promisify(execFile);
-import { getTasks, getRepo, updateTask, insertTaskEvent } from './db.js';
+import { getTasks, getRepo, updateTaskRaw, insertTaskEvent } from './db.js';
+import { updateTaskWithSync } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
 import { buildPullRequestBody } from './forgejo-linking.js';
 import { getStep } from './checkpoints.js';
@@ -29,8 +30,27 @@ import { sanitizeGitError } from './git-outage.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
+ * Drop the `container_id` of a container that is gone (killed, removed, or
+ * never found). Deliberately raw: no status changes, so there is no Forgejo
+ * label to sync. The `recoverTask` call that always follows on every one of
+ * these paths is what decides the task's new status, and that write broadcasts
+ * the settled row — so the intermediate `orphaned` health this clear would
+ * otherwise imply never needs to reach a client.
+ */
+function clearStaleContainerId(taskId: number): void {
+  updateTaskRaw(taskId, { container_id: null });
+}
+
+/**
  * Startup recovery — examines the actual state of each in-flight task
  * rather than assuming everything is lost.
+ *
+ * Every status transition below goes through `updateTaskWithSync` even though
+ * recovery runs before the HTTP server accepts connections, so no dashboard
+ * can be listening yet. `broadcastDashboardEvent` iterates an empty client Set
+ * and is a no-op in that window; routing through it anyway keeps the timeline
+ * events and the Forgejo `status/*` label sync — which are NOT no-ops — applied
+ * uniformly with every other transition in the codebase.
  */
 export async function onStartup(
   forgejo: ForgejoClient,
@@ -94,7 +114,7 @@ export async function onStartup(
           );
           await stopContainer(container);
           await removeContainer(container);
-          updateTask(task.id, { container_id: null });
+          clearStaleContainerId(task.id);
           await recoverTask(task, forgejo, log);
         } else if (info.State.Status === 'exited') {
           // Container exited — try to process results
@@ -110,7 +130,7 @@ export async function onStartup(
           } catch {
             // Result file missing or corrupt — fall through to recover
             await removeContainer(container);
-            updateTask(task.id, { container_id: null });
+            clearStaleContainerId(task.id);
             await recoverTask(task, forgejo, log);
           }
         } else {
@@ -118,17 +138,17 @@ export async function onStartup(
           try {
             await removeContainer(container);
           } catch { /* best effort */ }
-          updateTask(task.id, { container_id: null });
+          clearStaleContainerId(task.id);
           await recoverTask(task, forgejo, log);
         }
       } catch {
         // Container inspect failed
-        updateTask(task.id, { container_id: null });
+        clearStaleContainerId(task.id);
         await recoverTask(task, forgejo, log);
       }
     } else {
       // No container found
-      updateTask(task.id, { container_id: null });
+      clearStaleContainerId(task.id);
       await recoverTask(task, forgejo, log);
     }
   }
@@ -233,7 +253,7 @@ async function recoverTask(
     } catch { /* best effort */ }
 
     // Merge pr_number (if missing) and status transition into one atomic update.
-    updateTask(task.id, {
+    updateTaskWithSync(task.id, {
       ...(task.pr_number ? {} : { pr_number: createdCheckpoint.pr_number }),
       status: 'in-review',
       container_id: null,
@@ -308,7 +328,7 @@ async function recoverTask(
         } catch { /* best effort */ }
 
         // Merge pr_number persistence and status transition into one atomic update.
-        updateTask(task.id, {
+        updateTaskWithSync(task.id, {
           ...(task.pr_number ? {} : { pr_number: prNumber }),
           status: 'in-review',
           container_id: null,
@@ -378,7 +398,7 @@ async function recoverTask(
             head: task.branch_name,
             base: repo.base_branch,
           });
-          updateTask(task.id, { pr_number: pr.number });
+          updateTaskWithSync(task.id, { pr_number: pr.number });
         } catch (err) {
           log.error(
             { event: 'recovery_pr_creation_failed', task_id: task.id, err },
@@ -396,7 +416,7 @@ async function recoverTask(
       } catch { /* best effort */ }
 
       // Set to in-review without container — fillSlots will pick it up
-      updateTask(task.id, { status: 'in-review', container_id: null });
+      updateTaskWithSync(task.id, { status: 'in-review', container_id: null });
     } else if (task.status === 'in-review') {
       // Review was in progress — re-run review
       log.info(
@@ -412,7 +432,7 @@ async function recoverTask(
       } catch { /* best effort */ }
 
       // fillSlots will detect in-review without container and start review
-      updateTask(task.id, { status: 'in-review', container_id: null });
+      updateTaskWithSync(task.id, { status: 'in-review', container_id: null });
     } else {
       // preparing or other — just re-queue
       resetToQueued(task, 'Task recovered after restart.', forgejo, log);
@@ -522,7 +542,7 @@ async function recoverTask(
           );
         } catch { /* best effort */ }
 
-        updateTask(task.id, { status: 'in-review', container_id: null });
+        updateTaskWithSync(task.id, { status: 'in-review', container_id: null });
         return;
       }
     }
@@ -539,7 +559,7 @@ function resetToQueued(
   log: FastifyBaseLogger
 ): void {
   insertTaskEvent(task.id, 'recovery', `Orchestrator recovered: ${reason}`);
-  updateTask(task.id, {
+  updateTaskWithSync(task.id, {
     status: 'queued',
     container_id: null,
     started_at: null,

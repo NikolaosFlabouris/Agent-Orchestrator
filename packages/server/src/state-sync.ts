@@ -1,5 +1,5 @@
 import type { Task } from '@orchestrator/shared';
-import { getTask, getRepo, updateTask as dbUpdateTask, insertTaskEvent } from './db.js';
+import { getTask, getRepo, updateTaskRaw, insertTaskEvent } from './db.js';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
 import { buildTaskView } from './task-view.js';
 import { sendStreamComplete } from './ws/output.js';
@@ -44,14 +44,16 @@ export function initStateSync(
  * - Broadcast dashboard WebSocket event
  * - Sync Forgejo label if status changed
  *
- * Drop-in replacement for db.updateTask when side effects are desired.
+ * This is the DEFAULT path for every task mutation. `db.updateTaskRaw` is the
+ * exception, reserved for internal bookkeeping writes that change no task
+ * status.
  */
 export function updateTaskWithSync(
   id: number,
-  updates: Parameters<typeof dbUpdateTask>[1]
+  updates: Parameters<typeof updateTaskRaw>[1]
 ): void {
   const before = getTask(id);
-  dbUpdateTask(id, updates);
+  updateTaskRaw(id, updates);
   const after = getTask(id);
 
   if (!after) return;

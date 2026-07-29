@@ -13,7 +13,7 @@ import type { Repo, TaskUpdatedEvent, TaskView } from '@orchestrator/shared';
 import {
   initDatabase,
   insertTask,
-  updateTask,
+  updateTaskRaw,
   updateSetting,
   getSetting,
   getTask,
@@ -285,7 +285,7 @@ describe('updateTaskWithSync broadcast payload', () => {
   it('carries the Forgejo-derived status when a snapshot is warm', async () => {
     seedRepo(1);
     const task = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
-    updateTask(task.id, { status: 'in-review', pr_number: 42 });
+    updateTaskRaw(task.id, { status: 'in-review', pr_number: 42 });
 
     // Warm the cache the way a REST read would: the PR is merged on
     // Forgejo even though the stored row still says in-review.
@@ -334,7 +334,7 @@ describe('dependency evaluation broadcast', () => {
     // after it was read. Broadcasting the captured object would emit
     // status 'in-progress' and blocked: false.
     const stale = getTask(inserted.id)!;
-    updateTask(inserted.id, { status: 'queued' });
+    updateTaskRaw(inserted.id, { status: 'queued' });
 
     const forgejo = {
       getIssue: vi.fn(async () => ({ state: 'open' })),

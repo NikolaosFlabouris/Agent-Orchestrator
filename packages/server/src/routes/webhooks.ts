@@ -19,13 +19,12 @@ import {
   getRepoByOwnerName,
   getTasks,
   insertTask,
-  updateTask,
   getTask,
 } from '../db.js';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { invalidateSnapshot } from '../forgejo-snapshot.js';
-import { notifyTaskCreated } from '../state-sync.js';
+import { notifyTaskCreated, updateTaskWithSync } from '../state-sync.js';
 import {
   syncTaskDependencies,
   reevaluateDependentsOfIssue,
@@ -124,6 +123,22 @@ export function createWebhookRoutes(
 
 // ---------------------------------------------------------------------------
 // Event handlers
+//
+// These handlers write through `updateTaskWithSync`, which also pushes the new
+// `status/*` label back to Forgejo. That label write makes Forgejo emit another
+// `label_updated` event straight back at us, so every transition below has to
+// be a fixed point on the second pass — otherwise the two systems would ping
+// each other forever. They are, because each branch is gated on the status the
+// write just left behind:
+//   • → `cancelled`: both the external-cancel and issue-closed branches require
+//     `!TERMINAL_STATUSES.has(status)`, and `cancelled` is terminal.
+//   • → `merged`: nothing in the `issues` handler reacts to `status/merged`,
+//     and the `pull_request` branch is gated on `TERMINAL_STATUSES` too.
+//   • → `queued`: the re-queue branch requires a status in
+//     REQUEUEABLE_FROM_LABEL, which deliberately excludes `queued`; the echo
+//     lands in the "duplicate queue request" log line instead.
+// Keep that invariant in mind before adding a branch here: any new transition
+// must be unreachable from the label its own sync writes.
 // ---------------------------------------------------------------------------
 
 async function handleIssueEvent(
@@ -165,7 +180,7 @@ async function handleIssueEvent(
         // reset attempt to 1. The prior branch may have been deleted on
         // Forgejo, so trying to rework against it would hit "branch not found".
         if (REQUEUEABLE_FROM_LABEL.has(existing.status)) {
-          updateTask(existing.id, {
+          updateTaskWithSync(existing.id, {
             status: 'queued',
             container_id: null,
             branch_name: null,
@@ -251,7 +266,7 @@ async function handleIssueEvent(
         hasCancelled &&
         !TERMINAL_STATUSES.has(tracked.status)
       ) {
-        updateTask(tracked.id, {
+        updateTaskWithSync(tracked.id, {
           status: 'cancelled',
           completed_at: new Date().toISOString(),
         });
@@ -317,7 +332,7 @@ async function handleIssueEvent(
 
     // If still active, mark as cancelled
     if (!TERMINAL_STATUSES.has(tracked.status)) {
-      updateTask(tracked.id, {
+      updateTaskWithSync(tracked.id, {
         status: 'cancelled',
         completed_at: new Date().toISOString(),
       });
@@ -378,7 +393,7 @@ async function handlePullRequestEvent(
           'PR merged webhook but task already in terminal state'
         );
       } else {
-        updateTask(task.id, {
+        updateTaskWithSync(task.id, {
           status: 'merged',
           completed_at: new Date().toISOString(),
         });

@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => ({
   getProvider: vi.fn(),
   getProviders: vi.fn(),
   getSetting: vi.fn(),
-  updateTask: vi.fn(),
+  updateTaskRaw: vi.fn(),
   insertAttempt: vi.fn(),
   updateAttempt: vi.fn(),
   getRunningAttempt: vi.fn(),
@@ -99,7 +99,7 @@ vi.mock('../../db.js', () => ({
   getProvider: mocks.getProvider,
   getProviders: mocks.getProviders,
   getSetting: mocks.getSetting,
-  updateTask: mocks.updateTask,
+  updateTaskRaw: mocks.updateTaskRaw,
   insertAttempt: mocks.insertAttempt,
   updateAttempt: mocks.updateAttempt,
   getRunningAttempt: mocks.getRunningAttempt,
@@ -261,7 +261,7 @@ beforeEach(() => {
     const t = store.find((x) => x.id === id);
     if (t) Object.assign(t, patch);
   };
-  mocks.updateTask.mockImplementation(applyPatch);
+  mocks.updateTaskRaw.mockImplementation(applyPatch);
   mocks.updateTaskWithSync.mockImplementation(applyPatch);
 
   // enforceTimeouts → getActiveAttempt(null) → early return (no kill).
@@ -401,7 +401,7 @@ describe('processCompletedContainer container_id handling', () => {
     // container_id is preserved — the DB must not forget the lingering
     // container.
     expect(store[0].container_id).toBe('c1');
-    expect(mocks.updateTask).not.toHaveBeenCalledWith(
+    expect(mocks.updateTaskRaw).not.toHaveBeenCalledWith(
       1,
       expect.objectContaining({ container_id: null })
     );
@@ -422,7 +422,7 @@ describe('processCompletedContainer container_id handling', () => {
     await scheduler.tick();
 
     expect(store[0].container_id).toBeNull();
-    expect(mocks.updateTask).toHaveBeenCalledWith(1, { container_id: null });
+    expect(mocks.updateTaskRaw).toHaveBeenCalledWith(1, { container_id: null });
   });
 });
 

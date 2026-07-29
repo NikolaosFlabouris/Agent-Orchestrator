@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises';
 import type { Task } from '@orchestrator/shared';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
-import { getRepo, getTask, updateTask, getDb } from './db.js';
+import { getRepo, getTask, getDb } from './db.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
 import {

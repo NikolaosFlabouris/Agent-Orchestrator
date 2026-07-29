@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import type { Task, Repo } from '@orchestrator/shared';
 
 const execFileP = promisify(execFile);
-import { getRepo, getTask, updateTask } from '../db.js';
+import { getRepo, getTask, updateTaskRaw } from '../db.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { ForgejoApiError } from '../forgejo.js';
 import type { ForgejoClient, ForgejoPullRequest } from '../forgejo.js';
@@ -48,7 +48,9 @@ function clearSalvageDeferral(task: Task): void {
   if (fresh.salvage_backoff_level === 0 && fresh.salvage_next_attempt_at === null) {
     return;
   }
-  updateTask(task.id, {
+  // Raw on purpose: deferred-salvage bookkeeping only — no status change, so
+  // there is nothing to broadcast and no label to sync.
+  updateTaskRaw(task.id, {
     salvage_backoff_level: 0,
     salvage_next_attempt_at: null,
   });
@@ -480,7 +482,11 @@ export async function postDevAgent(
         const level = freshSalvageLevel(task) + 1;
         const delayMs = computeBackoffMs(level);
         const nextAt = new Date(Date.now() + delayMs).toISOString();
-        updateTask(task.id, {
+        // Raw on purpose: backoff bookkeeping only — the task stays
+        // `in-progress`, so there is no status change to broadcast and no
+        // label to sync. The `salvage_deferred` event recorded below is what
+        // explains the pause on the task's timeline.
+        updateTaskRaw(task.id, {
           salvage_backoff_level: level,
           salvage_next_attempt_at: nextAt,
         });
@@ -518,15 +524,15 @@ export async function postDevAgent(
       }
 
       // Structural failure (bad credentials, protected branch, missing git
-      // identity, …) — unchanged terminal behaviour. Clear any deferral
-      // state so the retry sweep doesn't pick the failed task back up.
-      updateTask(task.id, {
-        salvage_backoff_level: 0,
-        salvage_next_attempt_at: null,
-      });
+      // identity, …) — unchanged terminal behaviour. Clearing the deferral
+      // state (so the retry sweep doesn't pick the failed task back up) is
+      // merged into the same write as the status change: one UPDATE, one
+      // broadcast.
       updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
+        salvage_backoff_level: 0,
+        salvage_next_attempt_at: null,
       });
       recordTaskEvent(
         task.id,
@@ -598,9 +604,9 @@ export async function postDevAgent(
 
       // Always persist pr_number when the task row doesn't have it yet — this
       // covers the case where a previous run wrote the checkpoint but crashed
-      // before updateTask completed.
+      // before the pr_number write completed.
       if (!task.pr_number) {
-        updateTask(task.id, { pr_number: createResult.pr_number });
+        updateTaskWithSync(task.id, { pr_number: createResult.pr_number });
       }
 
       // Record side-effect events only when this run freshly executed the

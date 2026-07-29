@@ -4,7 +4,6 @@ import type { Task } from '@orchestrator/shared';
 import {
   getRepo,
   getTask,
-  updateTask,
   getReviewFeedbackHistory,
   getLatestAttempt,
   updateAttempt,
