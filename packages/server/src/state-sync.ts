@@ -1,6 +1,7 @@
 import type { Task } from '@orchestrator/shared';
 import { getTask, getRepo, updateTask as dbUpdateTask, insertTaskEvent } from './db.js';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
+import { buildTaskView } from './task-view.js';
 import { sendStreamComplete } from './ws/output.js';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
@@ -61,10 +62,15 @@ export function updateTaskWithSync(
     insertTaskEvent(id, `status_${updates.status}`, message);
   }
 
-  // Broadcast dashboard event
+  // Broadcast dashboard event. The payload is the fully enriched view —
+  // identical to what GET /api/tasks returns — because the client store
+  // replaces the whole row on `task_updated`; sending the raw DB row would
+  // strip the repo tuple, dependency/blocked state, health, and the
+  // resolved profile chains off whatever the client already had.
+  // `buildTaskView` is synchronous and does no network I/O.
   broadcastDashboardEvent({
     type: 'task_updated',
-    task: after,
+    task: buildTaskView(after),
   });
 
   // Sync Forgejo label if status changed.
@@ -121,7 +127,7 @@ export function notifyTaskCreated(task: Task): void {
   }
   broadcastDashboardEvent({
     type: 'task_created',
-    task,
+    task: buildTaskView(task),
   });
 }
 

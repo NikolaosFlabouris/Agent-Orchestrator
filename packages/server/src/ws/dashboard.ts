@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { getTasks, getQueuedTasks, getSettingInt } from '../db.js';
 import { getActiveResources } from '../queue.js';
+import { buildTaskView, loadProfileDefaults } from '../task-view.js';
 import type {
   DashboardSnapshot,
   DashboardEvent,
@@ -81,10 +82,16 @@ export function buildHostPool(): HostPool {
   };
 }
 
-function buildSnapshot(): DashboardSnapshot {
+/** Initial payload for a newly-connected dashboard. Tasks carry the same
+ *  enriched `TaskView` `GET /api/tasks` returns — the client store replaces
+ *  rows wholesale from these events, so anything less downgrades them.
+ *  Synchronous by construction: `buildTaskView` reads SQLite plus the
+ *  snapshot cache and never touches Forgejo or Docker. Exported for tests. */
+export function buildSnapshot(): DashboardSnapshot {
+  const defaults = loadProfileDefaults();
   return {
     type: 'snapshot',
-    tasks: getTasks(),
+    tasks: getTasks().map((task) => buildTaskView(task, { defaults })),
     hostPool: buildHostPool(),
     queueDepth: getQueuedTasks().length,
     paused: getPausedState(),

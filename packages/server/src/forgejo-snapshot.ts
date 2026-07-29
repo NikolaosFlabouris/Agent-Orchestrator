@@ -8,7 +8,11 @@
  * webhooks should call `invalidateSnapshot` on relevant events so the UI
  * doesn't wait out the TTL for state changes that were already announced.
  *
- * Two read paths:
+ * Three read paths:
+ *
+ * - `peekSnapshot(taskId)` — cache-only, synchronous. Returns the cached
+ *   entry (even if expired) or null. Never fetches, never schedules a
+ *   refresh. For callers that must not do network I/O at all.
  *
  * - `getSnapshot(task, forgejo)` — single-task lookup. Stale-while-revalidate:
  *   if a cached entry exists (even expired), return it immediately and kick
@@ -91,6 +95,22 @@ export function _clearSnapshotCache(): void {
  */
 export function invalidateSnapshot(taskId: number): void {
   cache.delete(taskId);
+}
+
+/**
+ * Cache-only read. Returns whatever entry is cached for this task — even an
+ * expired one — and `null` when nothing is cached. NEVER issues a Forgejo
+ * call and never schedules a background refresh, unlike `getSnapshot`.
+ *
+ * For the synchronous WebSocket broadcast path, which runs on hot paths
+ * (including the scheduler tick) and cannot await network I/O. A `null`
+ * result means the payload carries the stored `task.status` instead of a
+ * derived one — the documented degradation in `status-derivation.ts`.
+ * Serving an expired entry is deliberate: it is strictly better evidence
+ * than none, and any REST read or webhook will refresh/invalidate it.
+ */
+export function peekSnapshot(taskId: number): Snapshot | null {
+  return cache.get(taskId)?.value ?? null;
 }
 
 /**

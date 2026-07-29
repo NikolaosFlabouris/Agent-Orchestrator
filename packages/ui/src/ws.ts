@@ -1,37 +1,20 @@
-import type { TaskResponse, StatusResponse } from './api.js';
+import type {
+  DashboardEvent,
+  DashboardSnapshot,
+  AgentOutputEvent,
+  HostPool,
+} from '@orchestrator/shared';
 
 type DashboardHandler = (event: DashboardWsEvent) => void;
 type OutputHandler = (event: OutputWsEvent) => void;
 
-export interface HostPool {
-  memory_used_mb: number;
-  memory_total_mb: number;
-  cpu_used_cores: number;
-  cpu_total_cores: number;
-}
-
-export interface DashboardSnapshot {
-  type: 'snapshot';
-  tasks: TaskResponse[];
-  hostPool: HostPool;
-  queueDepth: number;
-  paused: boolean;
-}
-
-export type DashboardWsEvent =
-  | DashboardSnapshot
-  | { type: 'task_updated'; task: TaskResponse }
-  | { type: 'task_created'; task: TaskResponse }
-  | { type: 'status_changed'; paused: boolean; hostPool: HostPool; queueDepth: number }
-  | {
-      type: 'resource_changed';
-      resource: 'providers' | 'models' | 'profiles';
-    };
-
-export type OutputWsEvent =
-  | { type: 'output'; taskId: number; data: string; timestamp: string }
-  | { type: 'replay'; taskId: number; data: string }
-  | { type: 'stream_complete'; taskId: number };
+// The wire contract is owned by `@orchestrator/shared` and emitted by the
+// server's single task serializer — the client re-exports it rather than
+// re-declaring it, so a server-side change that alters an event payload is
+// a compile error here instead of a silent runtime downgrade of the store.
+export type { DashboardSnapshot, HostPool };
+export type DashboardWsEvent = DashboardEvent;
+export type OutputWsEvent = AgentOutputEvent;
 
 /**
  * Dashboard WebSocket connection with exponential backoff reconnection.
