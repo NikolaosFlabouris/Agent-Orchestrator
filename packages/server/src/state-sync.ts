@@ -135,7 +135,9 @@ export function notifyStreamComplete(taskId: number): void {
  * Broadcast that a new task was created.
  */
 export function notifyTaskCreated(task: Task): void {
-  insertTaskEvent(task.id, 'task_created', `Task created for issue #${task.issue_id}`);
+  broadcastTaskEvent(
+    insertTaskEvent(task.id, 'task_created', `Task created for issue #${task.issue_id}`)
+  );
   if (_forgejo) {
     const repo = getRepo(task.repo_id);
     if (repo) {

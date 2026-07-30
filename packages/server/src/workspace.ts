@@ -8,7 +8,10 @@ import type { HarnessConfigFile } from './harnesses/types.js';
 import { getRepo } from './db.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { FastifyBaseLogger } from 'fastify';
-import { insertTaskEvent } from './db.js';
+// Timeline rows go through `recordTaskEvent`, not the bare db insert, so the
+// prep-time progress notes stream to an open Task Detail page as they happen
+// rather than surfacing on the next status-change refetch.
+import { recordTaskEvent } from './state-sync.js';
 import { describeGitExecFailure } from './git-outage.js';
 import { WORKSPACES_ROOT, CACHES_ROOT } from './constants.js';
 
@@ -339,7 +342,7 @@ export async function prepareWorkspace(
     await git(['clone', authUrl, workdir], workdir, log, {
       timeoutMs: 300_000, // 5 minute timeout for clone
     });
-    insertTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
+    recordTaskEvent(task.id, 'workspace_cloned', `Workspace cloned for ${repo.owner}/${repo.name}`);
   } else {
     // Workspace exists — update remote URL (token rotation)
     await git(['remote', 'set-url', 'origin', authUrl], workdir, log);
@@ -353,7 +356,7 @@ export async function prepareWorkspace(
       workdir,
       log
     );
-    insertTaskEvent(task.id, 'branch_created', `Branch ${task.branch_name} created from ${repo.base_branch}`);
+    recordTaskEvent(task.id, 'branch_created', `Branch ${task.branch_name} created from ${repo.base_branch}`);
   } else {
     // Rework: checkout the existing branch as-is
     await verifyWorkspaceState(task, log);

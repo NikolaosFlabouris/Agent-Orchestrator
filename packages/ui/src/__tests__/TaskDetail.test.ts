@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   handleDashboardEvent,
   appendTaskEvent,
+  applyTaskEvent,
 } from '../views/TaskDetail.js';
-import type { TaskEventResponse } from '../api.js';
+import type { TaskDetailResponse, TaskEventResponse } from '../api.js';
 import type { DashboardWsEvent } from '../ws.js';
 
 // How TaskDetail reacts to the dashboard stream (issue #149). The timeline
@@ -27,19 +28,26 @@ function taskEvent(event: TaskEventResponse): DashboardWsEvent {
   return { type: 'task_event', taskId: event.task_id, event };
 }
 
-/** Drives the component's handler against a tiny state double. */
+function detail(events: TaskEventResponse[]): TaskDetailResponse {
+  return { id: 42, events } as unknown as TaskDetailResponse;
+}
+
+/** Drives the component's handler against a state double that stands in for
+ *  `setTask`. `appendEvent` runs the component's OWN updater (`applyTaskEvent`)
+ *  rather than a reimplementation, so a regression in that closure fails here. */
 function harness(taskId: number | undefined, events: TaskEventResponse[] = []) {
   const refetch = vi.fn();
-  let current = events;
+  let current: TaskDetailResponse | null = detail(events);
   return {
     refetch,
-    events: () => current,
+    task: () => current,
+    events: () => current?.events ?? [],
     send(event: DashboardWsEvent) {
       handleDashboardEvent(event, {
         taskId,
         refetch,
         appendEvent: (r) => {
-          current = appendTaskEvent(current, r);
+          current = applyTaskEvent(current, r);
         },
       });
     },
@@ -156,5 +164,34 @@ describe('appendTaskEvent', () => {
     // streamed row and a refetched one must reach it in the same shape.
     const legacy = row({ id: 7, created_at: '2026-05-12 12:31:59' });
     expect(appendTaskEvent([], legacy)[0]).toEqual(legacy);
+  });
+});
+
+// The `setTask` updater itself. Covered directly because a regression here —
+// dropping the identity check, or spreading the rows into the wrong key —
+// would leave every routing test above green while breaking the live timeline.
+describe('applyTaskEvent', () => {
+  it('returns a NEW task whose events end with the appended row', () => {
+    const prev = detail([row({ id: 7 })]);
+
+    const next = applyTaskEvent(prev, row({ id: 8, message: 'Branch created' }));
+
+    expect(next).not.toBe(prev);
+    expect(next!.events.map((e) => e.id)).toEqual([7, 8]);
+    expect(next!.events.at(-1)!.message).toBe('Branch created');
+    // Only `events` moves — the rest of the loaded task is preserved.
+    expect(next!.id).toBe(prev.id);
+    expect(prev.events.map((e) => e.id)).toEqual([7]);
+  });
+
+  it('returns the SAME task object for a duplicate row id', () => {
+    const prev = detail([row({ id: 7 })]);
+
+    // Identity is what makes React skip the re-render.
+    expect(applyTaskEvent(prev, row({ id: 7 }))).toBe(prev);
+  });
+
+  it('is a no-op before the task has loaded', () => {
+    expect(applyTaskEvent(null, row({ id: 7 }))).toBeNull();
   });
 });

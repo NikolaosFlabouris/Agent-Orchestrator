@@ -6,8 +6,8 @@ import { promisify } from 'node:util';
 import type { Task, AgentResult } from '@orchestrator/shared';
 
 const execFileP = promisify(execFile);
-import { getTasks, getRepo, updateTaskRaw, insertTaskEvent } from './db.js';
-import { updateTaskWithSync } from './state-sync.js';
+import { getTasks, getRepo, updateTaskRaw } from './db.js';
+import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
 import { buildPullRequestBody } from './forgejo-linking.js';
 import { getStep } from './checkpoints.js';
@@ -238,7 +238,7 @@ async function recoverTask(
       'Checkpoint: PR was already created. Transitioning to in-review.'
     );
 
-    insertTaskEvent(
+    recordTaskEvent(
       task.id,
       'recovery',
       `Orchestrator recovered: PR #${createdCheckpoint.pr_number} already created (checkpoint). Transitioning to in-review.`
@@ -313,7 +313,7 @@ async function recoverTask(
       }
 
       if (prNumber) {
-        insertTaskEvent(
+        recordTaskEvent(
           task.id,
           'recovery',
           `Orchestrator recovered: branch verified (checkpoint), PR #${prNumber} created/found. Transitioning to in-review.`
@@ -519,7 +519,7 @@ async function recoverTask(
             { event: 'recovery_push_failed', task_id: task.id, err },
             'Recovery salvage push failed'
           );
-          insertTaskEvent(
+          recordTaskEvent(
             task.id,
             'salvage_push_failed',
             `Recovery salvage push failed: ${detail}. ` +
@@ -558,7 +558,7 @@ function resetToQueued(
   forgejo: ForgejoClient,
   log: FastifyBaseLogger
 ): void {
-  insertTaskEvent(task.id, 'recovery', `Orchestrator recovered: ${reason}`);
+  recordTaskEvent(task.id, 'recovery', `Orchestrator recovered: ${reason}`);
   updateTaskWithSync(task.id, {
     status: 'queued',
     container_id: null,

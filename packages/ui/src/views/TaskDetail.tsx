@@ -79,6 +79,22 @@ export function appendTaskEvent(
   return [...current, row];
 }
 
+/** Fold one streamed timeline row into the loaded task — the `setTask`
+ *  updater, lifted out of the component so the state transition is testable
+ *  without a DOM.
+ *
+ *  Returns the SAME object when the row is a duplicate (or nothing is loaded
+ *  yet), which is load-bearing: React bails out of the re-render when the
+ *  updater returns the current state. */
+export function applyTaskEvent(
+  prev: TaskDetailResponse | null,
+  row: TaskEventResponse
+): TaskDetailResponse | null {
+  if (!prev) return prev;
+  const events = appendTaskEvent(prev.events, row);
+  return events === prev.events ? prev : { ...prev, events };
+}
+
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -117,14 +133,7 @@ export function TaskDetail() {
       refetch: (target) => {
         api.getTask(target).then(setTask).catch(() => {});
       },
-      appendEvent: (row) =>
-        setTask((prev) => {
-          if (!prev) return prev;
-          const events = appendTaskEvent(prev.events, row);
-          // Same array back = duplicate row; keep the identity so React
-          // skips the re-render entirely.
-          return events === prev.events ? prev : { ...prev, events };
-        }),
+      appendEvent: (row) => setTask((prev) => applyTaskEvent(prev, row)),
     })
   );
 

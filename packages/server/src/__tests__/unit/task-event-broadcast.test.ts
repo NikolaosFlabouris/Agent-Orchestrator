@@ -12,6 +12,8 @@
  * stay silent — this fires from hot paths during a run.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
@@ -22,7 +24,11 @@ import type {
 } from '@orchestrator/shared';
 import { initDatabase, insertTask, getTaskEvents } from '../../db.js';
 import { dashboardWs } from '../../ws/dashboard.js';
-import { recordTaskEvent, updateTaskWithSync } from '../../state-sync.js';
+import {
+  recordTaskEvent,
+  updateTaskWithSync,
+  notifyTaskCreated,
+} from '../../state-sync.js';
 
 type SocketHandler = (socket: WebSocket) => void;
 
@@ -173,5 +179,58 @@ describe('updateTaskWithSync', () => {
     expect(getTaskEvents(task.id)).toHaveLength(0);
     // …while the task itself is still broadcast on both writes.
     expect(received().filter((e) => e.type === 'task_updated')).toHaveLength(2);
+  });
+});
+
+describe('notifyTaskCreated', () => {
+  it('streams its timeline row too, not just the task_created event', () => {
+    const task = insertTask({ issue_id: 10, repo_id: 1, status: 'queued' });
+
+    notifyTaskCreated(task);
+
+    const frames = taskEventFrames();
+    expect(frames).toHaveLength(1);
+    expect(frames[0].event.event_type).toBe('task_created');
+    expect(frames[0].event).toEqual(getTaskEvents(task.id)[0]);
+    expect(received().filter((e) => e.type === 'task_created')).toHaveLength(1);
+  });
+});
+
+/**
+ * The streaming guarantee is structural, not per-call-site: a timeline row
+ * reaches an open Task Detail page because it was written through a helper
+ * that broadcasts, never because its author remembered to broadcast. A bare
+ * `insertTaskEvent` elsewhere in the server is therefore a silent regression —
+ * the row persists and renders on the next full refetch, so nothing fails
+ * except liveness. This catches that at the source level.
+ */
+describe('timeline write paths', () => {
+  it('routes every call site through a broadcasting helper', () => {
+    const srcRoot = path.resolve(__dirname, '../..');
+
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== '__tests__' && entry.name !== 'node_modules') {
+            walk(full);
+          }
+          continue;
+        }
+        if (!entry.name.endsWith('.ts')) continue;
+        // db.ts defines it; state-sync.ts is the one module allowed to call it,
+        // and every one of its calls is wrapped in `broadcastTaskEvent`.
+        const rel = path.relative(srcRoot, full);
+        if (rel === 'db.ts' || rel === 'state-sync.ts') continue;
+        if (/\binsertTaskEvent\b/.test(fs.readFileSync(full, 'utf-8'))) {
+          offenders.push(rel);
+        }
+      }
+    };
+    walk(srcRoot);
+
+    // Use `recordTaskEvent` from state-sync.js instead — same arguments.
+    expect(offenders).toEqual([]);
   });
 });

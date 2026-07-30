@@ -44,10 +44,12 @@ export interface TaskCreatedEvent {
 // if a delete path is added later, restore both the type and the
 // matching client handler at the same commit. (F3)
 
-/** A timeline row was appended for a task. Emitted by `recordTaskEvent`
- *  (and by the status-change insert inside `updateTaskWithSync`), so every
- *  granular progress note — workspace cloned, branch created, PR created,
- *  salvage deferred — reaches an open Task Detail page as it happens.
+/** A timeline row was appended for a task. Emitted by `recordTaskEvent` (and
+ *  by the `task_created` and status-change inserts inside state-sync), so
+ *  every granular progress note — workspace cloned, branch created, PR
+ *  created, salvage deferred — reaches an open Task Detail page as it
+ *  happens. `state-sync.ts` is the only module that calls `insertTaskEvent`
+ *  directly, so a new call site streams without opting in.
  *
  *  Deliberately the SMALLEST payload in the union: this fires from hot
  *  paths during an active run, so it carries the inserted row only, never
