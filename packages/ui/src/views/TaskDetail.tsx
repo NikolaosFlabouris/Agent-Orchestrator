@@ -5,10 +5,11 @@ import type {
   TaskDetailResponse,
   TaskDependencyResponse,
   AttemptResponse,
+  TaskEventResponse,
   TaskAction,
 } from '../api.js';
 import { connectOutputWs } from '../ws.js';
-import type { OutputWsEvent } from '../ws.js';
+import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { useDashboardEvents } from '../components/LiveData.js';
 import { Timeline } from '../components/Timeline.js';
@@ -28,6 +29,55 @@ const EXTENDABLE_STATUSES = new Set(['failed']);
 const MAX_ATTEMPTS_EDITABLE_STATUSES = new Set([
   'queued', 'preparing', 'in-progress', 'in-review', 'changes-needed',
 ]);
+
+/** What TaskDetail does with one frame off the shared dashboard stream.
+ *  Split out of the component (and exported) so the routing is testable
+ *  without a DOM:
+ *
+ *  - `task_event` — a single timeline row for this task. Folded straight
+ *    into local state; deliberately NOT a refetch, because these fire
+ *    continuously while a task runs and each one would otherwise cost a
+ *    `GET /api/tasks/:id`.
+ *  - `task_updated` — the task row changed. The event carries the task but
+ *    not its attempts/events, so this one does refetch.
+ *  - everything else (`task_created`, `status_changed`, `snapshot`) is for
+ *    the dashboard store, not for this view.
+ */
+export function handleDashboardEvent(
+  event: DashboardWsEvent,
+  handlers: {
+    taskId: number | undefined;
+    refetch: (id: number) => void;
+    appendEvent: (row: TaskEventResponse) => void;
+  }
+): void {
+  const { taskId, refetch, appendEvent } = handlers;
+  if (taskId === undefined) return;
+  if (event.type === 'task_event' && event.taskId === taskId) {
+    appendEvent(event.event);
+  } else if (event.type === 'task_updated' && event.task.id === taskId) {
+    refetch(taskId);
+  }
+}
+
+/** Append a streamed timeline row, ignoring one we already hold.
+ *
+ *  The same row can arrive twice: a `task_updated` refetch racing the
+ *  `task_event` frame returns the full `events` array, which already
+ *  contains it. Dedupe is by row id — the only stable identity here.
+ *
+ *  Rows are appended in arrival order, matching the server's
+ *  `ORDER BY created_at ASC, id ASC`; timestamps are normalized at render
+ *  time by `Timeline`, so a streamed row and a refetched one display
+ *  identically even for the legacy naive-timestamp format (issue #72). */
+export function appendTaskEvent(
+  events: TaskEventResponse[] | undefined,
+  row: TaskEventResponse
+): TaskEventResponse[] {
+  const current = events ?? [];
+  if (current.some((e) => e.id === row.id)) return current;
+  return [...current, row];
+}
 
 export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
@@ -58,19 +108,25 @@ export function TaskDetail() {
 
   // Live-refresh: listen on the app-wide /ws/dashboard stream (owned by
   // <LiveData>, not opened here — a second socket would receive full
-  // snapshots of every task purely so we could filter for one id) and refetch
-  // the full task whenever a task_updated event for this task arrives. The WS
-  // broadcast carries the task row only, so we re-fetch via api.getTask to
-  // also pick up the refreshed attempts + events lists. Other event types
-  // (task_created, status_changed, snapshot) are ignored — TaskDetail only
-  // cares about its own task.
+  // snapshots of every task purely so we could filter for one id). See
+  // `handleDashboardEvent` for what each event type does.
   const taskId = task?.id;
-  useDashboardEvents((event) => {
-    if (taskId === undefined) return;
-    if (event.type === 'task_updated' && event.task.id === taskId) {
-      api.getTask(taskId).then(setTask).catch(() => {});
-    }
-  });
+  useDashboardEvents((event) =>
+    handleDashboardEvent(event, {
+      taskId,
+      refetch: (target) => {
+        api.getTask(target).then(setTask).catch(() => {});
+      },
+      appendEvent: (row) =>
+        setTask((prev) => {
+          if (!prev) return prev;
+          const events = appendTaskEvent(prev.events, row);
+          // Same array back = duplicate row; keep the identity so React
+          // skips the re-render entirely.
+          return events === prev.events ? prev : { ...prev, events };
+        }),
+    })
+  );
 
   // Load agent profiles into store if not already cached
   useEffect(() => {

@@ -638,6 +638,29 @@ export {
   resolveEffectiveReviewAgentProfile,
 } from '../task-view.js';
 
+/** How long one `listContainers()` result is reused. Sized to be shorter
+ *  than any UI cadence but long enough that the requests a single dashboard
+ *  refresh fans out — N open tabs polling `GET /api/tasks`, plus the detail
+ *  endpoint and the reports route — collapse onto one Docker round-trip
+ *  instead of one each. Container health is derived from it, so it must
+ *  stay short: a container that vanishes is noticed within this window. */
+const CONTAINER_LIST_TTL_MS = 3_000;
+
+/** In-flight-or-fresh managed-container listing. Holds the PROMISE, not the
+ *  resolved value, so concurrent callers inside the window share the same
+ *  round-trip rather than each starting their own. Every consumer only reads
+ *  the set (`computeTaskHealth` does a `.has`), so handing out one shared
+ *  instance is safe. */
+let containerListCache: {
+  expiresAt: number;
+  promise: Promise<Set<string>>;
+} | null = null;
+
+/** Drop the memoized container listing. Exported for tests. */
+export function _clearManagedContainerCache(): void {
+  containerListCache = null;
+}
+
 export async function loadManagedContainerIds(
   log: Parameters<typeof getContainerDisplayName>[1]
 ): Promise<Set<string> | undefined> {
@@ -646,8 +669,7 @@ export async function loadManagedContainerIds(
   // health derivation. Returning an empty Set here would incorrectly
   // flag every containerised task as orphaned.
   try {
-    const containers = await listContainers();
-    return new Set(containers.map((c) => c.Id));
+    return await cachedManagedContainerIds();
   } catch (err) {
     log.warn(
       { event: 'tasks_route_docker_unavailable', err },
@@ -655,4 +677,28 @@ export async function loadManagedContainerIds(
     );
     return undefined;
   }
+}
+
+function cachedManagedContainerIds(): Promise<Set<string>> {
+  const now = Date.now();
+  if (containerListCache && containerListCache.expiresAt > now) {
+    return containerListCache.promise;
+  }
+
+  const promise = listContainers().then(
+    (containers) => new Set(containers.map((c) => c.Id))
+  );
+  const entry = { expiresAt: now + CONTAINER_LIST_TTL_MS, promise };
+  containerListCache = entry;
+
+  // A rejection must not be served for the rest of the window — a daemon
+  // that came back should be retried by the next caller. Concurrent callers
+  // still share this one failed round-trip. The handler also keeps the
+  // shared promise from surfacing as an unhandled rejection when every
+  // caller happens to be a cache hit.
+  promise.catch(() => {
+    if (containerListCache === entry) containerListCache = null;
+  });
+
+  return promise;
 }

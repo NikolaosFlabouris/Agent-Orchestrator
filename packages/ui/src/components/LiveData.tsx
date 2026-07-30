@@ -49,6 +49,10 @@ export function LiveData({ children }: { children: ReactNode }) {
           // ~25s even when nothing changed. setStatus is idempotent.
           setStatus(event);
           break;
+        // `task_event` is deliberately absent: a timeline row belongs to one
+        // task's detail view, which subscribes via `useDashboardEvents` and
+        // folds it into its own state. Nothing in the store renders it, so
+        // holding it here would only grow memory on every open tab.
         case 'resource_changed':
           // Bump the version counter — every Settings tab + the
           // Dashboard's profilesVersion useEffect subscribes to this and

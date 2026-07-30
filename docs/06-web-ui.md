@@ -532,6 +532,7 @@ All WebSocket events use `type` as the discriminator field (matching the `Dashbo
 {"type": "snapshot", "tasks": [...], "hostPool": {"memory_used_mb": 8192, "memory_total_mb": 32768, "cpu_used_cores": 4, "cpu_total_cores": 12}, "queueDepth": 7, "paused": false}
 {"type": "task_updated", "task": {"id": 42, "status": "in-review", "..."}}
 {"type": "task_created", "task": {"id": 47, "status": "queued", "..."}}
+{"type": "task_event", "taskId": 42, "event": {"id": 918, "task_id": 42, "event_type": "pr_created", "message": "PR #17 created", "created_at": "2026-05-12T12:31:59.123Z"}}
 {"type": "status_changed", "paused": false, "hostPool": {"...": "..."}, "queueDepth": 6}
 {"type": "resource_changed", "resource": "profiles"}
 ```
@@ -540,7 +541,11 @@ Every task payload — in `snapshot`, `task_updated` and `task_created` alike �
 
 One caveat applies to the broadcast path only: it is synchronous and never calls Forgejo or Docker, so `status` is Forgejo-derived only when a snapshot is already cached for that task, and `health` uses the Docker-free derivation (it can report `orphaned` for a null container, but not for a container that vanished). With no cached snapshot the payload carries the stored runtime status — the same degradation `deriveStatus` documents. REST reads keep their stale-while-revalidate snapshot fetch and Docker-derived health.
 
-The UI subscribes to the dashboard WebSocket on load and maintains local state from events. REST endpoints are used for actions and initial page load only.
+`task_event` is the exception to the "full object" rule, deliberately. It carries one `task_events` row and nothing else, because it fires from hot paths during an active run — every `recordTaskEvent` call site emits one, as does the status-change row written by `updateTaskWithSync`. Task Detail appends it to its local timeline (deduplicating by row id, since a concurrent `task_updated` refetch can return the same row) instead of refetching. It is fire-and-forget: there is no ordering or acknowledgement machinery, and a client that misses one converges on the next `GET /api/tasks/:id`, which returns the complete `events` array. Timestamps are normalized at render time, so a streamed row and a fetched row display identically even for legacy naive-format rows (issue #72).
+
+`status_changed` is broadcast from three places: the pause and resume routes, the 25s heartbeat below, and the scheduler whenever a tick actually takes or gives back a resource slot. The scheduler compares a fingerprint of `hostPool` + `queueDepth` before broadcasting, so a tick that changes no slots sends nothing — that is what lets the client's `GET /api/status` poll drop to a backstop cadence.
+
+The UI subscribes to the dashboard WebSocket on load and maintains local state from events. **Push is the primary data path**; REST is used for actions, initial page load, and the reconciliation backstop described below.
 
 ### WebSocket Connection Lifecycle
 
@@ -575,9 +580,22 @@ The snapshot uses the `DashboardSnapshot` type from `events.ts`. The `tasks` arr
 
 **On silence:** a half-open TCP connection (idle NAT timeout, host IP change, suspended laptop) never fires `onclose`, so the backoff above would never engage. The client tracks the time of the last received frame and, after 60s of silence (~2× the heartbeat), closes the socket itself to force the reconnect path. Connection health lives in the store as `connection: 'connected' | 'reconnecting'` and renders in `AppHeader` on every view — a muted "Live" marker when healthy, an amber "Reconnecting — data may be stale" chip when not.
 
-**REST refresh vs snapshot.** The Dashboard's 30s `GET /api/tasks` poll goes through `store.syncTasks`, which upserts every returned row — so the poll heals a `task_created` event that never arrived — and prunes local rows the server omitted, but only when both of these hold:
+**Polling is a reconciliation backstop, not the data path.** The Dashboard keeps two REST timers, both at cadences measured in minutes:
 
-1. **The response is known to be complete.** The route buckets tasks into active / queued / completed and truncates the completed bucket to `limit`, so a response whose completed bucket came back *at* the limit is silent about everything it dropped and nothing may be pruned from it. The client sends `limit` explicitly and compares. Bucketing by the client's own status is *not* a valid substitute: the server buckets on the Forgejo-derived status, which is precisely what this poll exists to discover — a task stored `in-progress` whose issue was just closed externally is bucketed `cancelled` server-side and truncated away, and pruning it on the theory that "active tasks always come back in full" would delete a live row every 30 seconds.
+| Poll | Interval | Why it still exists |
+|------|----------|---------------------|
+| `GET /api/tasks` | 300s | Heals a dropped `task_created` / `task_updated` frame, and re-derives status from Forgejo for a webhook that never arrived. |
+| `GET /api/status` | 60s | Same backstop role for `hostPool` / `queueDepth`, plus per-provider `active_slots`, which has no push equivalent. |
+
+They were 30s and 5s respectively, which was a workaround for a push path that did not cover creation, external mutations, or slot transitions. It now does, so the polls are the safety net for a lost frame or a missed webhook — the same failure mode the server's own `Poller` exists for. They are not removed, only slowed.
+
+The task poll interval is deliberately *not* a multiple of the server's Forgejo snapshot TTL (`DEFAULT_TTL_MS`, 90s in `forgejo-snapshot.ts`). At the old 30s/30s the two resonated: every poll landed exactly as the entries it needed expired, so nearly all of them paid for the full paginated issue+PR walk in `warmRepoSnapshots`. The TTL stays *shorter* than the poll — a TTL longer than the poll period would have the poll re-serve its own cached answer and discover nothing.
+
+`GET /api/tasks` also memoizes its `listContainers()` call behind a 3s TTL, shared with `GET /api/tasks/:id` and the reports route, so N open tabs cost one Docker round-trip rather than N. A Docker failure still yields "unknown" (`undefined`) rather than an empty container set — an empty set would mark every containerised task orphaned.
+
+**REST refresh vs snapshot.** The `GET /api/tasks` poll goes through `store.syncTasks`, which upserts every returned row — so the poll heals a `task_created` event that never arrived — and prunes local rows the server omitted, but only when both of these hold:
+
+1. **The response is known to be complete.** The route buckets tasks into active / queued / completed and truncates the completed bucket to `limit`, so a response whose completed bucket came back *at* the limit is silent about everything it dropped and nothing may be pruned from it. The client sends `limit` explicitly and compares. Bucketing by the client's own status is *not* a valid substitute: the server buckets on the Forgejo-derived status, which is precisely what this poll exists to discover — a task stored `in-progress` whose issue was just closed externally is bucketed `cancelled` server-side and truncated away, and pruning it on the theory that "active tasks always come back in full" would delete a live row on every poll.
 2. **The id was already in the store when the request was issued.** Otherwise a `task_created` arriving over the WebSocket mid-request is pruned by a response that predates it.
 
 Snapshot handling is unchanged: `setSnapshot` still replaces task state wholesale.
@@ -600,7 +618,7 @@ Alerts are shown as a banner at the top of the dashboard for states requiring hu
 ## Design Principles
 
 - The UI talks exclusively to the orchestrator API. No direct Forgejo or Docker access.
-- Real-time updates via WebSocket eliminate polling from the frontend.
+- Real-time updates arrive over the WebSocket; the frontend's remaining REST polls are a reconciliation backstop for a dropped frame, not the path state normally travels.
 - The dashboard is designed for passive monitoring — leave it open, glance at it.
 - Task detail is designed for active investigation — drill in when something needs attention.
 - All destructive actions (cancel, force-fail) require confirmation.

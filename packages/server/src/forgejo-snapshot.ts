@@ -68,7 +68,25 @@ interface CachedEntry {
   expires_at: number;
 }
 
-const DEFAULT_TTL_MS = 30_000;
+/** How long a cached snapshot is considered fresh.
+ *
+ *  Chosen against the dashboard's `GET /api/tasks` backstop poll (300s, see
+ *  `Dashboard.tsx`), and deliberately not equal to it — nor a divisor of it:
+ *
+ *  - Shorter than the poll, so a poll still re-derives external state. That
+ *    is the poll's whole job; a TTL longer than the poll period would make
+ *    it re-serve its own cached answer and discover nothing.
+ *  - Not 30s, and not a divisor of the poll period. When the TTL and the
+ *    poll were both 30s they resonated: every poll landed exactly as the
+ *    entries it needed expired, so practically all of them paid for the full
+ *    paginated issue+PR walk in `warmRepoSnapshots`.
+ *  - Long enough that the readers clustered around one refresh — several
+ *    open tabs, the detail route, the scheduler's `getSnapshot` — share one
+ *    walk instead of each triggering their own.
+ *
+ *  Webhooks call `invalidateSnapshot` on anything that changes issue/PR
+ *  state, so the longer TTL doesn't delay the events that actually matter. */
+const DEFAULT_TTL_MS = 90_000;
 
 // Page through up to 500 (= 10 × 50) issues / PRs per warm call. Most repos
 // fit comfortably in one page; the cap stops a runaway loop on installs with

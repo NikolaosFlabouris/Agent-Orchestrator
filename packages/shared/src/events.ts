@@ -1,3 +1,4 @@
+import type { TaskEvent } from './types.js';
 import type { TaskView } from './task-view.js';
 
 /** WebSocket event types for the dashboard stream.
@@ -43,6 +44,28 @@ export interface TaskCreatedEvent {
 // if a delete path is added later, restore both the type and the
 // matching client handler at the same commit. (F3)
 
+/** A timeline row was appended for a task. Emitted by `recordTaskEvent`
+ *  (and by the status-change insert inside `updateTaskWithSync`), so every
+ *  granular progress note — workspace cloned, branch created, PR created,
+ *  salvage deferred — reaches an open Task Detail page as it happens.
+ *
+ *  Deliberately the SMALLEST payload in the union: this fires from hot
+ *  paths during an active run, so it carries the inserted row only, never
+ *  the task. A client that misses one still converges — the full `events`
+ *  array comes back on the next `GET /api/tasks/:id`, so there is no
+ *  ordering or acknowledgement machinery here.
+ *
+ *  `event.created_at` is whatever the row holds. Rows written since the fix
+ *  for issue #72 are ISO 8601 UTC; the client normalizes on render, which
+ *  is the same path a fetched row takes. */
+export interface TaskEventAppendedEvent {
+  type: 'task_event';
+  /** Denormalised from `event.task_id` so a client can filter without
+   *  reaching into the row. Always equal to `event.task_id`. */
+  taskId: number;
+  event: TaskEvent;
+}
+
 export interface StatusChangedEvent {
   type: 'status_changed';
   paused: boolean;
@@ -64,6 +87,7 @@ export type DashboardEvent =
   | DashboardSnapshot
   | TaskUpdatedEvent
   | TaskCreatedEvent
+  | TaskEventAppendedEvent
   | StatusChangedEvent
   | ResourceChangedEvent;
 

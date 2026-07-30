@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   getLatestAttempt: vi.fn(),
   getActiveAttempt: vi.fn(),
   getTasks: vi.fn(),
+  getQueuedTasks: vi.fn(),
   resolveStageProfileId: vi.fn(),
   // scheduler-pools.js
   countActiveByProvider: vi.fn(),
@@ -50,6 +51,7 @@ const mocks = vi.hoisted(() => ({
   getContainer: vi.fn(),
   // queue.js
   getCandidates: vi.fn(),
+  getActiveResources: vi.fn(),
   getAvailableResources: vi.fn(),
   getTaskResources: vi.fn(),
   fitsInPool: vi.fn(),
@@ -89,6 +91,8 @@ const mocks = vi.hoisted(() => ({
   getHarness: vi.fn(),
   // providers/kinds.js
   buildProviderEnv: vi.fn(),
+  // ws/dashboard.js
+  broadcastStatusChanged: vi.fn(),
 }));
 
 vi.mock('../../db.js', () => ({
@@ -106,6 +110,7 @@ vi.mock('../../db.js', () => ({
   getLatestAttempt: mocks.getLatestAttempt,
   getActiveAttempt: mocks.getActiveAttempt,
   getTasks: mocks.getTasks,
+  getQueuedTasks: mocks.getQueuedTasks,
   resolveStageProfileId: mocks.resolveStageProfileId,
 }));
 
@@ -119,6 +124,13 @@ vi.mock('../../scheduler-pools.js', () => ({
 
 vi.mock('../../forgejo.js', () => ({ ForgejoClient: class {} }));
 
+// The scheduler broadcasts `status_changed` when a tick takes or frees a
+// resource slot. Stubbed here so these suites stay focused; the broadcast
+// itself is covered by scheduler-slot-broadcast.test.ts.
+vi.mock('../../ws/dashboard.js', () => ({
+  broadcastStatusChanged: mocks.broadcastStatusChanged,
+}));
+
 vi.mock('../../docker.js', () => ({
   createAgentContainer: mocks.createAgentContainer,
   startContainer: mocks.startContainer,
@@ -131,6 +143,7 @@ vi.mock('../../docker.js', () => ({
 
 vi.mock('../../queue.js', () => ({
   getCandidates: mocks.getCandidates,
+  getActiveResources: mocks.getActiveResources,
   getAvailableResources: mocks.getAvailableResources,
   getTaskResources: mocks.getTaskResources,
   fitsInPool: mocks.fitsInPool,
@@ -278,6 +291,10 @@ beforeEach(() => {
   mocks.createDependencyPassState.mockReturnValue({});
   // fillSlots early-return: no host capacity.
   mocks.getAvailableResources.mockReturnValue({ memoryMb: 0, cpuCores: 0 });
+  // Slot-transition broadcast inputs: a still pool and an empty queue, so
+  // these suites never trip the `status_changed` push.
+  mocks.getActiveResources.mockReturnValue({ memoryMb: 0, cpuCores: 0 });
+  mocks.getQueuedTasks.mockReturnValue([]);
   mocks.getProviders.mockReturnValue([]);
   mocks.limitMapFromProviders.mockReturnValue(new Map());
   mocks.stripDependencySection.mockImplementation((s: string) => s ?? '');

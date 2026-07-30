@@ -1,4 +1,4 @@
-import type { Task } from '@orchestrator/shared';
+import type { Task, TaskEvent } from '@orchestrator/shared';
 import { getTask, getRepo, updateTaskRaw, insertTaskEvent } from './db.js';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
 import { buildTaskView } from './task-view.js';
@@ -58,10 +58,12 @@ export function updateTaskWithSync(
 
   if (!after) return;
 
-  // Record timeline event on status change
+  // Record timeline event on status change. Streamed by the same helper the
+  // 39 `recordTaskEvent` call sites use, so a status note and a granular
+  // progress note reach an open Task Detail page identically.
   if (updates.status && before?.status !== updates.status) {
     const message = STATUS_LABELS[updates.status] ?? `Status changed to ${updates.status}`;
-    insertTaskEvent(id, `status_${updates.status}`, message);
+    broadcastTaskEvent(insertTaskEvent(id, `status_${updates.status}`, message));
   }
 
   // Broadcast dashboard event. The payload is the fully enriched view —
@@ -91,13 +93,34 @@ export function updateTaskWithSync(
 /**
  * Record a non-status timeline event for a task.
  * Use for granular events like "workspace cloned", "branch created", "PR created", etc.
+ *
+ * Every call also streams the inserted row to connected dashboards, so the
+ * Task Detail timeline is live for all call sites without any of them
+ * needing to know about the WebSocket.
  */
 export function recordTaskEvent(
   taskId: number,
   eventType: string,
   message: string
 ): void {
-  insertTaskEvent(taskId, eventType, message);
+  broadcastTaskEvent(insertTaskEvent(taskId, eventType, message));
+}
+
+/**
+ * Push one persisted timeline row to every connected dashboard.
+ *
+ * Cost per call is one JSON.stringify plus an in-memory socket write per
+ * client — no DB read, no network round-trip beyond the sockets themselves.
+ * That matters because this runs on hot paths during an active run (prep,
+ * salvage, review), which is also why the payload is the row alone rather
+ * than the enriched task `task_updated` carries.
+ */
+function broadcastTaskEvent(event: TaskEvent): void {
+  broadcastDashboardEvent({
+    type: 'task_event',
+    taskId: event.task_id,
+    event,
+  });
 }
 
 /**

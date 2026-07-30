@@ -260,7 +260,8 @@ async function main() {
   // -- Pause / Resume routes --
   // Both routes broadcast `status_changed` to all connected dashboards
   // (F2) so the paused indicator propagates immediately instead of
-  // waiting for each client's 5-second /api/status poll cycle.
+  // waiting for each client's /api/status poll cycle — which is now a
+  // minutes-scale backstop, so this push is the only timely signal.
   app.post("/api/status/pause", async () => {
     scheduler.pause();
     broadcastStatusChanged(true);
