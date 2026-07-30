@@ -36,6 +36,7 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
         </div>
         <div className="flex items-center gap-6 text-sm flex-shrink-0">
           {children}
+          <ConnectionIndicator />
           <UserChip />
           {/* Soft logout — a body-less POST form to the server endpoint,
               which clears the session cookie and redirects to
@@ -47,6 +48,46 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
         </div>
       </div>
     </header>
+  );
+}
+
+/** Health of the shared dashboard WebSocket. Because AppHeader is on every
+ *  authenticated view and the socket is owned app-wide by `LiveData`, this
+ *  indicator is visible everywhere — not just the Dashboard.
+ *
+ *  Healthy is deliberately quiet (a muted dot + "Live"); a dead feed gets an
+ *  amber chip, because the failure mode this exists for is a client that
+ *  looks perfectly healthy while showing minutes-old data. */
+function ConnectionIndicator() {
+  const connection = useStore((s) => s.connection);
+
+  if (connection === 'connected') {
+    return (
+      <span
+        className="flex items-center gap-1.5 text-xs text-gray-500"
+        title="Live updates are connected"
+      >
+        <span
+          className="inline-block h-1.5 w-1.5 rounded-full bg-green-500"
+          aria-hidden="true"
+        />
+        Live
+      </span>
+    );
+  }
+
+  return (
+    <span
+      role="status"
+      className="flex items-center gap-1.5 rounded bg-amber-900 px-2 py-0.5 text-xs font-medium text-amber-300"
+      title="The live update stream is down — retrying with backoff. Displayed data may be stale."
+    >
+      <span
+        className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400"
+        aria-hidden="true"
+      />
+      Reconnecting — data may be stale
+    </span>
   );
 }
 
