@@ -7,8 +7,9 @@ import type {
   AttemptResponse,
   TaskAction,
 } from '../api.js';
-import { connectDashboardWs, connectOutputWs } from '../ws.js';
-import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
+import { connectOutputWs } from '../ws.js';
+import type { OutputWsEvent } from '../ws.js';
+import { useDashboardEvents } from '../live.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { Timeline } from '../components/Timeline.js';
 import { filterLogLine } from '../logFilter.js';
@@ -55,25 +56,25 @@ export function TaskDetail() {
       .catch((err) => setError(err.message));
   }, [id]);
 
-  // Live-refresh: subscribe to /ws/dashboard and refetch the full task whenever
-  // a task_updated event for this task arrives. The WS broadcast carries only
-  // the bare task row, so we re-fetch via api.getTask to also pick up the
-  // refreshed attempts + events lists. Other event types (task_created,
-  // task_removed, status_changed, snapshot) are ignored — TaskDetail only
-  // cares about its own task.
-  useEffect(() => {
-    if (!task) return;
-    const taskId = task.id;
-    const handler = (event: DashboardWsEvent) => {
-      if (event.type === 'task_updated' && event.task.id === taskId) {
-        api.getTask(taskId).then(setTask).catch(() => {});
-      }
-    };
-    return connectDashboardWs(handler);
-    // Only re-subscribe when the underlying task id changes (e.g. navigating
-    // between tasks), not on every refetch that replaces the task object.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task?.id]);
+  // Live-refresh: refetch the full task whenever a task_updated event for
+  // this task arrives. The dashboard broadcast carries the task row only, so
+  // we re-fetch via api.getTask to also pick up the refreshed attempts +
+  // events lists. Other event types (task_created, status_changed, snapshot)
+  // are ignored — TaskDetail only cares about its own task.
+  //
+  // This rides the app-level shared connection (live.tsx) rather than
+  // opening a second dashboard socket of its own, which used to stream full
+  // snapshots of every task here purely to filter for one id.
+  const routeTaskId = id ? parseInt(id, 10) : null;
+  useDashboardEvents((event) => {
+    if (
+      event.type === 'task_updated' &&
+      routeTaskId !== null &&
+      event.task.id === routeTaskId
+    ) {
+      api.getTask(routeTaskId).then(setTask).catch(() => {});
+    }
+  });
 
   // Load agent profiles into store if not already cached
   useEffect(() => {

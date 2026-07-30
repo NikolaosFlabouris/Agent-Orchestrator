@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useStore } from '../store.js';
 import { SignOutButton } from './SignOutButton.js';
@@ -36,6 +37,7 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
         </div>
         <div className="flex items-center gap-6 text-sm flex-shrink-0">
           {children}
+          <ConnectionIndicator />
           <UserChip />
           {/* Soft logout — a body-less POST form to the server endpoint,
               which clears the session cookie and redirects to
@@ -47,6 +49,59 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
         </div>
       </div>
     </header>
+  );
+}
+
+/** How long the shared socket must stay down before the header says so.
+ *  Covers the sub-second gap between mount and the first `onopen`, and a
+ *  fast reconnect, so the chip doesn't flicker on healthy transitions. */
+const STALE_ANNOUNCE_DELAY_MS = 1_500;
+
+/** Liveness of the shared dashboard feed, rendered on every view that
+ *  uses AppHeader (all of them). Muted "Live" marker while healthy; an
+ *  amber chip once the socket has been down long enough to matter, so an
+ *  operator can tell "nothing is happening" from "we stopped hearing
+ *  about it". */
+function ConnectionIndicator() {
+  const connection = useStore((s) => s.connection);
+  const [announceStale, setAnnounceStale] = useState(false);
+
+  useEffect(() => {
+    if (connection === 'connected') {
+      setAnnounceStale(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setAnnounceStale(true),
+      STALE_ANNOUNCE_DELAY_MS
+    );
+    return () => window.clearTimeout(timer);
+  }, [connection]);
+
+  if (connection === 'connected') {
+    return (
+      <span
+        className="flex items-center gap-1.5 text-xs text-gray-500"
+        title="Live updates connected"
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
+        Live
+      </span>
+    );
+  }
+
+  // Down, but not for long enough to be worth reporting — say nothing
+  // rather than claim "Live" or flash amber on the initial connect.
+  if (!announceStale) return null;
+
+  return (
+    <span
+      className="flex items-center gap-1.5 rounded bg-amber-900 px-2 py-0.5 text-xs font-medium text-amber-300"
+      title="The live feed is down — the orchestrator may be restarting. Reconnecting automatically."
+    >
+      <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400" />
+      Reconnecting — data may be stale
+    </span>
   );
 }
 

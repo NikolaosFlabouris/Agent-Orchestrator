@@ -9,15 +9,22 @@ import { Settings } from './views/Settings.js';
 import { Help } from './views/Help.js';
 import { SignedOut } from './views/SignedOut.js';
 import { AuthGate } from './components/AuthGate.js';
+import { LiveDataProvider } from './live.js';
 
 /** Layout route that gates every authenticated view behind a single
  *  AuthGate. Mounted once for the whole authenticated subtree, so
  *  GET /api/me fires exactly once on startup and stays resolved while
- *  the user navigates between views via <Outlet>. */
+ *  the user navigates between views via <Outlet>.
+ *
+ *  LiveDataProvider sits between the gate and the <Outlet> for the same
+ *  reason: it owns the single dashboard WebSocket, so the feed opens once
+ *  identity is known and survives every route change below it. */
 function GatedLayout() {
   return (
     <AuthGate>
-      <Outlet />
+      <LiveDataProvider>
+        <Outlet />
+      </LiveDataProvider>
     </AuthGate>
   );
 }

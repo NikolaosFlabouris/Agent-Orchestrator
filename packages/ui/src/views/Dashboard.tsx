@@ -3,8 +3,8 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
-import { connectDashboardWs } from '../ws.js';
-import type { DashboardWsEvent, HostPool } from '../ws.js';
+import type { HostPool } from '../ws.js';
+import { useTicker } from '../ticker.js';
 import { AlertBanner } from '../components/AlertBanner.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { QueueList } from '../components/QueueList.js';
@@ -59,11 +59,7 @@ export function Dashboard() {
     const {
       setForgejoBaseUrl,
       setHostPool: setHostPoolFn,
-      setSnapshot,
-      updateTask,
-      addTask,
-      setStatus: setStatusFn,
-      bumpResourceVersion,
+      syncTasks,
     } = useStore.getState();
 
     // Pull status immediately and every 5 s. Providers are sampled often so
@@ -89,47 +85,25 @@ export function Dashboard() {
     // reality overrides stale local `failed` rows. Refresh on mount and
     // every 30 s so driver-label / issue-closure changes reach the UI even
     // if a webhook was dropped.
+    //
+    // `syncTasks` (not a per-row updateTask loop): it also inserts rows we
+    // never saw — healing a missed `task_created` — and prunes rows the
+    // server no longer reports, so this refresh converges on the server's
+    // view instead of only ever growing. See store.ts for the prune rule.
     const refreshTasks = () => {
-      api.getTasks().then((res) => {
-        for (const task of res.tasks) updateTask(task);
-      }).catch(() => {});
+      api.getTasks().then((res) => syncTasks(res.tasks)).catch(() => {});
     };
     refreshTasks();
     const tasksTimer = window.setInterval(refreshTasks, 30_000);
 
-    // Connect WebSocket
-    const handler = (event: DashboardWsEvent) => {
-      switch (event.type) {
-        case 'snapshot':
-          setSnapshot(event);
-          break;
-        case 'task_updated':
-          updateTask(event.task);
-          break;
-        case 'task_created':
-          addTask(event.task);
-          break;
-        case 'status_changed':
-          setStatusFn(event);
-          break;
-        case 'resource_changed':
-          // Bump the version counter — every Settings tab + the
-          // Dashboard's profilesVersion useEffect subscribes to this
-          // and refetches when it ticks. No inline fetch here: the
-          // bump is debounced (store.ts), and an inline fetch would
-          // both bypass that debounce and duplicate the request.
-          bumpResourceVersion(event.resource);
-          break;
-      }
-    };
-
-    const disconnect = connectDashboardWs(handler);
+    // The dashboard WebSocket is owned app-level by LiveDataProvider
+    // (live.tsx) so it survives navigation — this view no longer opens
+    // one, and the store stays live while other routes are mounted.
 
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
 
     return () => {
-      disconnect();
       window.clearInterval(timer);
       window.clearInterval(tasksTimer);
     };
@@ -473,11 +447,7 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
           <span className="text-gray-400">
             Attempt {task.attempt}/{task.max_attempts}
           </span>
-          {task.started_at && (
-            <span className="text-gray-500">
-              {elapsed(task.started_at)}
-            </span>
-          )}
+          {task.started_at && <ElapsedTime startedAt={task.started_at} />}
         </div>
       </div>
     </div>
@@ -532,9 +502,7 @@ function CompletedItem({ task }: { task: TaskResponse }) {
         <span className="text-gray-500">
           {task.attempt} attempt{task.attempt !== 1 ? 's' : ''}
         </span>
-        {task.completed_at && (
-          <span className="text-gray-500">{timeAgo(task.completed_at)}</span>
-        )}
+        {task.completed_at && <TimeAgo timestamp={task.completed_at} />}
       </div>
     </div>
   );
@@ -653,6 +621,22 @@ function StatusBadge({ status, label }: { status: string; label?: string }) {
       {label ?? status}
     </span>
   );
+}
+
+/** Live duration for a running task. Subscribes to the shared 1s ticker
+ *  so the clock advances without any server event; kept as its own leaf
+ *  component so a tick re-renders this `<span>` and not the whole card —
+ *  and so the interval exists only while an active task is on screen. */
+function ElapsedTime({ startedAt }: { startedAt: string }) {
+  useTicker(1_000);
+  return <span className="text-gray-500">{elapsed(startedAt)}</span>;
+}
+
+/** "Xm ago" for a completed task. Minute-level granularity, so it rides a
+ *  coarse 30s ticker rather than the per-second one. */
+function TimeAgo({ timestamp }: { timestamp: string }) {
+  useTicker(30_000);
+  return <span className="text-gray-500">{timeAgo(timestamp)}</span>;
 }
 
 function elapsed(startedAt: string): string {

@@ -7,6 +7,7 @@ import type {
   DashboardSnapshot,
   DashboardEvent,
   HostPool,
+  StatusChangedEvent,
 } from '@orchestrator/shared';
 
 const clients = new Set<WebSocket>();
@@ -29,6 +30,22 @@ export function createDashboardWs(opts: {
   return dashboardWs;
 }
 
+/** Heartbeat cadence. Two purposes:
+ *
+ *  1. A protocol-level ping keeps idle NAT/proxy paths from silently
+ *     dropping a connection that legitimately has nothing to say for
+ *     minutes at a time, and gives the server a dead-peer signal.
+ *  2. Browsers cannot observe pong frames from JS, so the same tick also
+ *     sends an application-level frame. That is what lets the client's
+ *     staleness watchdog (`packages/ui/src/ws.ts`) distinguish "quiet" from
+ *     "dead" and reconnect. No new event type: we reuse `status_changed`,
+ *     whose payload is exactly the periodically-refreshed state a
+ *     reconnect-less client would otherwise be missing.
+ *
+ *  The client tolerates roughly two missed beats before reconnecting, so
+ *  keep this comfortably under half DASHBOARD_STALE_TOLERANCE_MS. */
+const PING_INTERVAL_MS = 25_000;
+
 export async function dashboardWs(app: FastifyInstance): Promise<void> {
   app.get('/ws/dashboard', { websocket: true }, (socket) => {
     clients.add(socket);
@@ -37,13 +54,41 @@ export async function dashboardWs(app: FastifyInstance): Promise<void> {
     const snapshot = buildSnapshot();
     socket.send(JSON.stringify(snapshot));
 
-    socket.on('close', () => {
-      clients.delete(socket);
+    // Per-socket heartbeat. `pongSeen` starts true so the first tick never
+    // terminates a socket that simply hasn't been pinged yet.
+    let pongSeen = true;
+    socket.on('pong', () => {
+      pongSeen = true;
     });
 
-    socket.on('error', () => {
+    const heartbeat = setInterval(() => {
+      if (!pongSeen) {
+        // Two consecutive ticks with no pong: the peer is gone but the
+        // TCP connection never closed. Terminate so `close` fires, the
+        // client leaves `clients`, and this interval is cleared below.
+        socket.terminate();
+        return;
+      }
+      pongSeen = false;
+      try {
+        socket.ping();
+        socket.send(JSON.stringify(buildStatusChanged()));
+      } catch {
+        // Send failed on a socket the runtime hasn't closed yet — let the
+        // pong check above (or the close handler) clean it up.
+      }
+    }, PING_INTERVAL_MS);
+
+    // Both handlers must clear the interval: on a long-lived server, a
+    // socket that errors without a clean close would otherwise leak a
+    // timer (and a `clients` entry) per connection, forever.
+    const cleanup = () => {
+      clearInterval(heartbeat);
       clients.delete(socket);
-    });
+    };
+
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
   });
 }
 
@@ -105,10 +150,18 @@ export function buildSnapshot(): DashboardSnapshot {
  *  state only propagated when each client's 5-second status poll
  *  cycled. (F2) */
 export function broadcastStatusChanged(paused: boolean): void {
-  broadcastDashboardEvent({
+  broadcastDashboardEvent(buildStatusChanged(paused));
+}
+
+/** The `status_changed` payload. Shared by the pause/resume broadcast and
+ *  the per-socket heartbeat — synchronous and cheap (one resource read,
+ *  two settings reads, one queue count), so building it per beat is fine
+ *  for the handful of dashboards a deployment has open. */
+function buildStatusChanged(paused = getPausedState()): StatusChangedEvent {
+  return {
     type: 'status_changed',
     paused,
     hostPool: buildHostPool(),
     queueDepth: getQueuedTasks().length,
-  });
+  };
 }
