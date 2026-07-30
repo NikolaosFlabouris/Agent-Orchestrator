@@ -61,8 +61,26 @@ export function Dashboard() {
     const { setForgejoBaseUrl, setHostPool: setHostPoolFn, syncTasks } =
       useStore.getState();
 
-    // Pull status immediately and every 5 s. Providers are sampled often so
-    // the Pools row stays close to live.
+    // Both timers below are RECONCILIATION BACKSTOPS, not the data path.
+    // Everything they fetch is pushed over the WebSocket as it happens:
+    // task creation, every task mutation (including externally-driven ones),
+    // and `status_changed` on each slot acquire/release as well as on
+    // pause/resume. The polls exist only to heal a frame that never arrived
+    // — a dropped event, a missed webhook — which is a real failure mode in
+    // this system, the same one the server's own `Poller` covers. So they
+    // stay, at a cadence measured in minutes rather than seconds.
+    //
+    // `GET /api/status` also carries per-provider `active_slots`, which has
+    // no push equivalent; that is the one thing genuinely sampled here, and
+    // it moves only when a container starts or stops.
+    const STATUS_POLL_MS = 60_000;
+    // Deliberately not a multiple of the server's snapshot TTL (90s, see
+    // `DEFAULT_TTL_MS` in forgejo-snapshot.ts). At the old 30s/30s the two
+    // resonated: every poll arrived just as the cache expired, so nearly all
+    // of them paid for the full paginated Forgejo walk.
+    const TASKS_POLL_MS = 300_000;
+
+    // Pull status on mount and every STATUS_POLL_MS.
     const refresh = () => {
       api.getStatus().then((s) => {
         setForgejoBaseUrl(s.forgejo_base_url);
@@ -76,14 +94,14 @@ export function Dashboard() {
       }).catch(() => {});
     };
     refresh();
-    const timer = window.setInterval(refresh, 5_000);
+    const timer = window.setInterval(refresh, STATUS_POLL_MS);
 
     // Pull the task list through the REST API as well. The dashboard WS
     // snapshot returns raw `tasks.status` (runtime state), whereas the REST
     // response overlays the Forgejo-derived status so closed-issue/merged-PR
     // reality overrides stale local `failed` rows. Refresh on mount and
-    // every 30 s so driver-label / issue-closure changes reach the UI even
-    // if a webhook was dropped.
+    // every TASKS_POLL_MS so driver-label / issue-closure changes reach the
+    // UI even if a webhook was dropped.
     //
     // `syncTasks` (not a per-row updateTask loop): it upserts, so this poll
     // heals a `task_created` event we never received, and it converges on the
@@ -106,7 +124,7 @@ export function Dashboard() {
         .catch(() => {});
     };
     refreshTasks();
-    const tasksTimer = window.setInterval(refreshTasks, 30_000);
+    const tasksTimer = window.setInterval(refreshTasks, TASKS_POLL_MS);
 
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});

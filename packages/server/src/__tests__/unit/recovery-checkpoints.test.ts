@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getRepo: vi.fn(),
   updateTaskRaw: vi.fn(),
   updateTaskWithSync: vi.fn(),
+  recordTaskEvent: vi.fn(),
   insertTaskEvent: vi.fn(),
   listContainers: vi.fn(),
   getContainer: vi.fn(),
@@ -42,10 +43,12 @@ vi.mock('../../db.js', async (importOriginal) => {
   };
 });
 
-// recovery.ts routes every status transition through state-sync now, so the
-// broadcasting wrapper is what the assertions below watch.
+// recovery.ts routes every status transition AND every timeline row through
+// state-sync now, so the broadcasting wrappers are what the assertions below
+// watch.
 vi.mock('../../state-sync.js', () => ({
   updateTaskWithSync: mocks.updateTaskWithSync,
+  recordTaskEvent: mocks.recordTaskEvent,
 }));
 
 vi.mock('../../docker.js', () => ({

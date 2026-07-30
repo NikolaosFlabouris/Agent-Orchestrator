@@ -144,8 +144,11 @@ export function buildSnapshot(): DashboardSnapshot {
  *  full StatusChangedEvent payload (paused + hostPool + queueDepth) so
  *  connected dashboards don't have to issue a follow-up REST poll to
  *  see a freshly-paused / resumed scheduler. Without this, the pause
- *  state only propagated when each client's 5-second status poll
- *  cycled. (F2) */
+ *  state only propagated when each client's status poll cycled. (F2)
+ *
+ *  Also called by the scheduler on a slot acquire/release, which is why
+ *  that poll could be slowed to a backstop cadence — see
+ *  `notifySlotTransition` in scheduler.ts. */
 export function broadcastStatusChanged(paused: boolean): void {
   broadcastDashboardEvent({
     type: 'status_changed',

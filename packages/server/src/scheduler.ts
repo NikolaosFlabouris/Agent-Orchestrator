@@ -26,8 +26,10 @@ import {
   getActiveAttempt,
   getTasks,
   getTasksWithSalvageDue,
+  getQueuedTasks,
   resolveStageProfileId,
 } from './db.js';
+import { broadcastStatusChanged } from './ws/dashboard.js';
 import {
   countActiveByProvider,
   canLaunchInPool,
@@ -47,6 +49,7 @@ import {
 } from './docker.js';
 import {
   getCandidates,
+  getActiveResources,
   getAvailableResources,
   getTaskResources,
   fitsInPool,
@@ -294,6 +297,13 @@ export class Scheduler {
   // Deferred-salvage retry sweep. Same flag-serialisation pattern — a slow
   // push must not let a re-tick start a second salvage for the same task.
   private salvageSweepInFlight = false;
+  // Fingerprint of the host-pool/queue state as of the last `status_changed`
+  // broadcast. The dashboard's hostPool + queueDepth used to move only when
+  // each client's 5s /api/status poll came round; broadcasting on every tick
+  // instead would spam every socket once a minute forever. Comparing this
+  // fingerprint means a frame goes out exactly when a slot is actually taken
+  // or given back. `null` until the first tick primes it (see `_runTick`).
+  private lastSlotSignature: string | null = null;
   // Cross-task circuit breaker for the git host (#144). After
   // GIT_HOST_FAILURE_THRESHOLD consecutive outage-shaped git failures —
   // regardless of which task hit them — workspace prep is gated for that
@@ -425,6 +435,11 @@ export class Scheduler {
     // on Forgejo or that an agent container finished — it just won't
     // start the next thing.
 
+    // Prime the slot fingerprint before any step can move it, so the first
+    // tick after startup compares against reality instead of announcing a
+    // transition that never happened.
+    this.lastSlotSignature ??= this.slotSignature();
+
     // Step 0: Reconcile orphaned tasks (container disappeared or
     // container_id got nulled without finalising the attempt row).
     // Runs before checkCompletedContainers so a just-nulled container_id
@@ -444,6 +459,10 @@ export class Scheduler {
 
     // Step 1: Check for completed containers
     await this.checkCompletedContainers();
+
+    // A finished container gives its slot back; tell the dashboards now
+    // rather than making them wait for a poll.
+    this.notifySlotTransition();
 
     // Step 1.4: Reap orchestrator-managed containers whose task is no longer
     // active. Runs AFTER checkCompletedContainers so a container that just
@@ -471,6 +490,27 @@ export class Scheduler {
 
     // Step 2: Fill empty slots
     await this.fillSlots();
+
+    // …and again for whatever those launches claimed.
+    this.notifySlotTransition();
+  }
+
+  /** Fingerprint of everything a `status_changed` frame reports about slots:
+   *  the host pool's two dimensions plus the queue depth. Pure DB reads, no
+   *  Docker or Forgejo. */
+  private slotSignature(): string {
+    const used = getActiveResources();
+    return `${used.memoryMb}:${used.cpuCores}:${getQueuedTasks().length}`;
+  }
+
+  /** Broadcast `status_changed` iff a slot actually moved since the last
+   *  check. Called at the release and the acquire point of a tick — never
+   *  unconditionally, so an idle tick sends nothing at all. */
+  private notifySlotTransition(): void {
+    const signature = this.slotSignature();
+    if (signature === this.lastSlotSignature) return;
+    this.lastSlotSignature = signature;
+    broadcastStatusChanged(this.paused);
   }
 
   /** Retry salvage pushes parked by `postDevAgent` while the git host was

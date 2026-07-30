@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   getLatestAttempt: vi.fn(),
   getActiveAttempt: vi.fn(),
   getTasks: vi.fn(),
+  getQueuedTasks: vi.fn(),
   getTasksWithSalvageDue: vi.fn(),
   resolveStageProfileId: vi.fn(),
   countActiveByProvider: vi.fn(),
@@ -50,6 +51,7 @@ const mocks = vi.hoisted(() => ({
   listContainers: vi.fn(),
   getContainer: vi.fn(),
   getCandidates: vi.fn(),
+  getActiveResources: vi.fn(),
   getAvailableResources: vi.fn(),
   getTaskResources: vi.fn(),
   fitsInPool: vi.fn(),
@@ -80,6 +82,8 @@ const mocks = vi.hoisted(() => ({
   reapOrphanedContainers: vi.fn(),
   getHarness: vi.fn(),
   buildProviderEnv: vi.fn(),
+  // ws/dashboard.js
+  broadcastStatusChanged: vi.fn(),
 }));
 
 vi.mock('../../db.js', () => ({
@@ -97,6 +101,7 @@ vi.mock('../../db.js', () => ({
   getLatestAttempt: mocks.getLatestAttempt,
   getActiveAttempt: mocks.getActiveAttempt,
   getTasks: mocks.getTasks,
+  getQueuedTasks: mocks.getQueuedTasks,
   getTasksWithSalvageDue: mocks.getTasksWithSalvageDue,
   resolveStageProfileId: mocks.resolveStageProfileId,
 }));
@@ -111,6 +116,13 @@ vi.mock('../../scheduler-pools.js', () => ({
 
 vi.mock('../../forgejo.js', () => ({ ForgejoClient: class {} }));
 
+// The scheduler broadcasts `status_changed` when a tick takes or frees a
+// resource slot. Stubbed here so these suites stay focused; the broadcast
+// itself is covered by scheduler-slot-broadcast.test.ts.
+vi.mock('../../ws/dashboard.js', () => ({
+  broadcastStatusChanged: mocks.broadcastStatusChanged,
+}));
+
 vi.mock('../../docker.js', () => ({
   createAgentContainer: mocks.createAgentContainer,
   startContainer: mocks.startContainer,
@@ -123,6 +135,7 @@ vi.mock('../../docker.js', () => ({
 
 vi.mock('../../queue.js', () => ({
   getCandidates: mocks.getCandidates,
+  getActiveResources: mocks.getActiveResources,
   getAvailableResources: mocks.getAvailableResources,
   getTaskResources: mocks.getTaskResources,
   fitsInPool: mocks.fitsInPool,
@@ -278,6 +291,10 @@ beforeEach(() => {
   // Roomy host pool + unconstrained provider pools: the only thing that can
   // stop a launch in these tests is the outage gate under test.
   mocks.getAvailableResources.mockReturnValue({ memoryMb: 65536, cpuCores: 32 });
+  // Slot-transition broadcast inputs: a still pool and an empty queue, so
+  // these suites never trip the `status_changed` push.
+  mocks.getActiveResources.mockReturnValue({ memoryMb: 0, cpuCores: 0 });
+  mocks.getQueuedTasks.mockReturnValue([]);
   mocks.getTaskResources.mockReturnValue({ memoryMb: 1024, cpuCores: 1 });
   mocks.fitsInPool.mockReturnValue(true);
   mocks.getProviders.mockReturnValue([]);
