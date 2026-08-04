@@ -88,6 +88,25 @@ marker() {
   echo "[harness $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$AGENT_LOG"
 }
 
+# Select the agent CLI's stream-json result events from a log stream on stdin,
+# emitting one compact JSON object per matching line (so `tail -1` still yields
+# the newest event and `jq -s` can slurp them all).
+#
+# Order-agnostic BY DESIGN, and parsed rather than substring-matched. This was
+# `grep '^{"type":"result"'` until 2026-08-04, when Claude Code 2.1.221
+# reordered the keys of its final event: the line now starts
+# `{"is_error":true,...}` with `"type":"result"` near the END of the object, so
+# the start-anchored match found nothing. Usage-limit 429s were reported as hard
+# failures (tasks burned every attempt in minutes), result.json carried a raw log
+# tail, and the usage columns stayed NULL. Testing the top-level `.type` of each
+# parsed line survives any future key reordering — and, unlike an unanchored
+# substring grep, does not match an assistant message that merely QUOTES
+# `"type":"result"` inside its text. Never fails the caller: unparseable lines
+# are skipped and any jq error collapses to empty output.
+result_events() {
+  jq -cR 'fromjson? | select(type == "object" and .type == "result")' 2>/dev/null || true
+}
+
 # Usage-limit detector — deliberately Claude Code-specific for now (other
 # CLIs' phrasings get added as they are observed in the wild). A false
 # positive here parks the task until the deadline, so the patterns stay
@@ -282,7 +301,7 @@ while :; do
   fi
 
   RUN_RESULT_LINE=$(tail -c +$(( RUN_START_BYTES + 1 )) "$AGENT_LOG" 2>/dev/null \
-    | grep -a '^{"type":"result"' | tail -1 || true)
+    | result_events | tail -1 || true)
 
   if ! is_usage_limit_result "$RUN_RESULT_LINE"; then
     break # real failure → the orchestrator's retry/attempt path owns it
@@ -324,7 +343,7 @@ elif [ "$AGENT_EXIT" -ne 0 ]; then
   # actionable than tail -5 of a multi-KB JSON blob, where the long init
   # line crowds out the actual failure. The last result line in the log
   # belongs to the final run, so retries don't distort this.
-  RESULT_LINE=$(grep -a '^{"type":"result"' "$AGENT_LOG" 2>/dev/null | tail -1 || true)
+  RESULT_LINE=$(result_events < "$AGENT_LOG" 2>/dev/null | tail -1 || true)
   if [ -n "$RESULT_LINE" ] \
      && [ "$(echo "$RESULT_LINE" | jq -r '.is_error // false' 2>/dev/null)" = "true" ]; then
     RESULT_TEXT=$(echo "$RESULT_LINE" | jq -r '.result // empty' 2>/dev/null)
@@ -363,7 +382,7 @@ fi
 # dollar cost is computed. Never fails the run: any jq error or missing field
 # collapses to an empty USAGE_FIELD.
 USAGE_FIELD=""
-USAGE_JSON=$(grep -a '^{"type":"result"' "$AGENT_LOG" 2>/dev/null | jq -cs '
+USAGE_JSON=$(result_events < "$AGENT_LOG" 2>/dev/null | jq -cs '
   {}
   + ([ .[] | .num_turns? | numbers ]           | if length > 0 then { num_turns: add } else {} end)
   + ([ .[] | .usage.input_tokens? | numbers ]  | if length > 0 then { input_tokens: add } else {} end)

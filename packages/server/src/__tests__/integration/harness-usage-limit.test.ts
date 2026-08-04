@@ -151,6 +151,29 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     '{"type":"result","subtype":"success","is_error":false,"result":"done",' +
     '"num_turns":3,"usage":{"input_tokens":100,"output_tokens":50}}';
 
+  // Claude Code 2.1.221 reordered the keys of the final result event: it now
+  // starts `{"is_error":true,...}` with `"type":"result"` near the END. The
+  // harness's start-anchored grep matched nothing, so usage-limit 429s were
+  // reported as hard failures. Emitted via a quoted heredoc (the text carries
+  // an apostrophe) — verbatim shape of the production line.
+  const NEW_ORDER_LIMIT_HEREDOC = [
+    "cat <<'RESULTEOF'",
+    '{"is_error":true,"duration_api_ms":0,"num_turns":2,"api_error_status":429,' +
+      '"result":"You\'ve hit your session limit · resets 3:10pm (UTC)",' +
+      '"type":"result","usage":{"input_tokens":20,"output_tokens":7}}',
+    'RESULTEOF',
+  ].join('\n');
+
+  // Emitted AFTER the real result event: an assistant message whose TEXT quotes
+  // `"type":"result"`. A plain unanchored substring grep would select this and
+  // `tail -1` would then classify on the decoy instead of the 429.
+  const DECOY_ASSISTANT_HEREDOC = [
+    "cat <<'DECOYEOF'",
+    '{"type":"assistant","message":{"content":[{"type":"text",' +
+      '"text":"the harness greps for \\"type\\":\\"result\\" at line start"}]}}',
+    'DECOYEOF',
+  ].join('\n');
+
   it('retries in-container after an unparseable usage-limit failure — falls back to the fixed poll and succeeds', async () => {
     const dirs = setupDirs('usage-retry-success');
 
@@ -212,6 +235,108 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     const prompt = fs.readFileSync(path.join(dirs.taskDir, 'prompt.md'), 'utf-8');
     expect(prompt).toContain('Interrupted Earlier Run');
     expect(prompt.match(/usage-limit-interruption-note/g)).toHaveLength(1);
+  });
+
+  it('new key order (Claude Code 2.1.221) → classified, structured [API 429] error, usage recorded', async () => {
+    const dirs = setupDirs('new-key-order');
+
+    // Production shape of the 2.1.221 result event ("type" near the end),
+    // followed by a decoy assistant message that quotes the substring. The
+    // harness must still find the REAL event: if it selected the decoy,
+    // tail -1 would classify on it and none of the three consumers would work.
+    // Against a 1-minute budget the harness gives up rather than waiting, so
+    // this stays a one-run, fast test. (Reset-time parsing has its own tests;
+    // whether this line's wall-clock "3:10pm" lands inside the 12h clamp
+    // depends on the time of day, so the wait flavour isn't asserted here.)
+    const agentCommand = [
+      TRUST_REPO,
+      'echo run >> /output/.mock-run-count',
+      NEW_ORDER_LIMIT_HEREDOC,
+      DECOY_ASSISTANT_HEREDOC,
+      'exit 1',
+    ].join('\n');
+
+    const { exitCode } = await runHarness(dirs, {
+      role: 'develop',
+      issue_id: 7,
+      branch_name: 'main',
+      attempt: 1,
+      max_runtime_minutes: 1,
+      agent_command: agentCommand,
+      install_commands: [],
+    });
+
+    expect(exitCode).toBe(0);
+
+    const result = JSON.parse(
+      fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
+    );
+    expect(result.status).toBe('failure');
+    // Consumer 2: structured error extraction, not a raw log tail
+    expect(result.error_message).toContain('[API 429]');
+    expect(result.error_message).toContain('session limit');
+    // Consumer 3: per-run usage summed from the mid-object result event
+    expect(result.usage).toEqual({ num_turns: 2, input_tokens: 20, output_tokens: 7 });
+
+    // Consumer 1: usage-limit classification (would be silent on the decoy)
+    const log = fs.readFileSync(path.join(dirs.outputDir, 'progress.log'), 'utf-8');
+    expect(log).toContain('Provider usage limit detected');
+    expect(log).toContain('runtime budget nearly exhausted');
+
+    const runs = fs.readFileSync(path.join(dirs.outputDir, '.mock-run-count'), 'utf-8');
+    expect(runs.trim().split('\n')).toHaveLength(1);
+  });
+
+  it('new key order → parks the container and retries, summing usage across both key orders', async () => {
+    const dirs = setupDirs('new-key-order-retry');
+
+    // Same mid-object "type" placement, but with text carrying no parseable
+    // reset time, so the harness takes the fixed-poll retry path and actually
+    // relaunches. Second run emits the OLD key order — the usage sum must span
+    // both formats.
+    const newOrderUnparseable =
+      '{"is_error":true,"num_turns":1,"result":"Claude AI usage limit reached",' +
+      '"type":"result","usage":{"input_tokens":10,"output_tokens":5}}';
+
+    const agentCommand = [
+      TRUST_REPO,
+      'if [ -f /output/.mock-second-run ]; then',
+      `  echo '${SUCCESS_LINE}'`,
+      '  exit 0',
+      'fi',
+      'touch /output/.mock-second-run',
+      `echo '${newOrderUnparseable}'`,
+      DECOY_ASSISTANT_HEREDOC,
+      'exit 1',
+    ].join('\n');
+
+    const { exitCode } = await runHarness(
+      dirs,
+      {
+        role: 'develop',
+        issue_id: 8,
+        branch_name: 'main',
+        attempt: 1,
+        max_runtime_minutes: 5,
+        agent_command: agentCommand,
+        install_commands: [],
+      },
+      ['HARNESS_USAGE_RETRY_SECONDS=2']
+    );
+
+    expect(exitCode).toBe(0);
+
+    const result = JSON.parse(
+      fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
+    );
+    expect(result.status).toBe('success');
+    expect(result.usage).toEqual({ num_turns: 4, input_tokens: 110, output_tokens: 55 });
+
+    const log = fs.readFileSync(path.join(dirs.outputDir, 'progress.log'), 'utf-8');
+    expect(log).toContain('Provider usage limit detected');
+    expect(log).toContain('fixed poll');
+    expect(log).toContain('usage-limit retry 1');
+    expect(log).toContain('Usage-limit wait over');
   });
 
   it('epoch-format message → reset-aware wait until the stated epoch (deadline-aware give-up)', async () => {
