@@ -45,12 +45,25 @@ export function Settings() {
       </AppHeader>
 
       <main className="mx-auto max-w-4xl px-6 py-6">
-        <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit">
+        {/* The five pills add up to ~650px, so on a phone the last two sit
+            past the right edge and are unreachable. `max-w-full` caps the
+            `w-fit` bar at the column width and `overflow-x-auto` turns the
+            excess into a scroll of the bar itself rather than of the
+            document; `shrink-0 whitespace-nowrap` keeps each pill at its
+            natural width instead of letting flex squeeze the labels onto
+            two lines. Wide viewports never overflow, so no scrollbar
+            appears and the bar renders exactly as before. */}
+        <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit max-w-full overflow-x-auto">
           {(Object.keys(TAB_LABELS) as TabKey[]).map((t) => (
             <button
               key={t}
+              type="button"
               onClick={() => setTab(t)}
-              className={`px-4 py-2 rounded text-sm ${
+              aria-pressed={tab === t}
+              /* py-3 makes the pill 44px tall — the minimum comfortable
+                 touch target; `sm:py-2` restores the original height from
+                 the tablet breakpoint up. */
+              className={`shrink-0 whitespace-nowrap px-4 py-3 sm:py-2 rounded text-sm ${
                 tab === t
                   ? 'bg-gray-700 text-white'
                   : 'text-gray-400 hover:text-gray-200'

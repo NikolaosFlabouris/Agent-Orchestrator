@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
@@ -16,6 +16,12 @@ export function GlobalSettings() {
   const [error, setError] = useState<string | null>(null);
   const [capacity, setCapacity] = useState<HostCapacityResponse | null>(null);
   const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+  // One id root for this tab's label/control pairs.
+  const uid = useId();
+  const memoryInputId = `${uid}-memory`;
+  const cpuInputId = `${uid}-cpu`;
+  const defaultProfileId = `${uid}-default-profile`;
+  const reviewProfileId = `${uid}-review-profile`;
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
@@ -53,10 +59,16 @@ export function GlobalSettings() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium mb-1">Host memory pool (MB)</label>
+      {/* `min-w-0` on each cell: a grid item's automatic minimum size is
+          its content's min-content width, which for a number input is
+          wider than a 375px column and would push the document sideways. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="min-w-0">
+          <label htmlFor={memoryInputId} className="block text-sm font-medium mb-1">
+            Host memory pool (MB)
+          </label>
           <input
+            id={memoryInputId}
             type="number"
             value={String(settings.max_agent_memory_mb ?? '')}
             onChange={(e) =>
@@ -80,9 +92,12 @@ export function GlobalSettings() {
             }
           />
         </div>
-        <div>
-          <label className="block text-sm font-medium mb-1">Host CPU pool (cores)</label>
+        <div className="min-w-0">
+          <label htmlFor={cpuInputId} className="block text-sm font-medium mb-1">
+            Host CPU pool (cores)
+          </label>
           <input
+            id={cpuInputId}
             type="number"
             value={String(settings.max_agent_cpu_cores ?? '')}
             onChange={(e) =>
@@ -109,7 +124,7 @@ export function GlobalSettings() {
       </div>
 
       <div>
-        <label className="block text-sm font-medium mb-1">
+        <label htmlFor={defaultProfileId} className="block text-sm font-medium mb-1">
           Default agent profile (implementation)
         </label>
         {(() => {
@@ -127,6 +142,7 @@ export function GlobalSettings() {
           return (
             <>
               <select
+                id={defaultProfileId}
                 value={stored}
                 onChange={(e) =>
                   update(
@@ -185,7 +201,7 @@ export function GlobalSettings() {
       </div>
 
       <div>
-        <label className="block text-sm font-medium mb-1">
+        <label htmlFor={reviewProfileId} className="block text-sm font-medium mb-1">
           Default review agent profile
         </label>
         {(() => {
@@ -201,6 +217,7 @@ export function GlobalSettings() {
           return (
             <>
               <select
+                id={reviewProfileId}
                 value={stored}
                 onChange={(e) =>
                   update(
@@ -250,10 +267,14 @@ export function GlobalSettings() {
         </div>
       )}
 
+      {/* `min-h-11` (44px) is the minimum comfortable touch target; the
+          button's own `py-2` only reaches 36px. Reset at `sm` so the
+          desktop button keeps its original height. */}
       <button
+        type="button"
         onClick={handleSave}
         disabled={saving}
-        className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-6 py-2 rounded text-sm"
+        className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-6 py-2 rounded text-sm"
       >
         {saving ? 'Saving...' : saved ? 'Saved' : 'Save settings'}
       </button>
@@ -286,10 +307,15 @@ function CapacityHint({
       <span className="text-gray-500">
         Detected: <span className="font-mono">{detected}</span> via {sourceLabel}.{' '}
       </span>
+      {/* Inline in a hint paragraph, so the target is grown with padding
+          that the matching negative margin cancels again — the line box
+          is unchanged, only the tappable area grows (16px of text + 2×14
+          = 44px). Both are dropped at `sm`. */}
       <button
         type="button"
         onClick={onUseDetected}
-        className="text-blue-400 hover:text-blue-300 underline"
+        aria-label={`Use detected ${kind === 'memory' ? 'host memory' : 'host CPU'} capacity (${detected})`}
+        className="inline-block -my-3.5 py-3.5 sm:my-0 sm:py-0 text-blue-400 hover:text-blue-300 underline"
       >
         Use detected
       </button>

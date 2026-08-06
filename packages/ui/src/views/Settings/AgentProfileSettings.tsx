@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
@@ -8,6 +8,12 @@ import type {
   HarnessSpec,
   HarnessId,
 } from '../../api.js';
+
+/** Hit-area padding for the inline text buttons in a profile row. The
+ *  negative margin cancels the padding's effect on layout, so only the
+ *  tappable area grows: 20px of `text-sm` plus 2×12px reaches the 44px
+ *  minimum. Dropped from `sm` up, where the rows keep their density. */
+const TOUCH_TARGET_Y = '-my-3 py-3 sm:my-0 sm:py-0';
 
 /** Agent Profiles tab — pair a harness (Claude SDK / Claude Code /
  *  OpenCode / Pi) with a provider+model and harness-specific config. */
@@ -25,6 +31,13 @@ export function AgentProfileSettings() {
   const profilesVersion = useStore((s) => s.resourceVersions.profiles);
   const providersVersion = useStore((s) => s.resourceVersions.providers);
   const modelsVersion = useStore((s) => s.resourceVersions.models);
+  // One id root for this tab's label/control pairs.
+  const uid = useId();
+  const idFieldId = `${uid}-id`;
+  const displayNameId = `${uid}-display-name`;
+  const harnessSelectId = `${uid}-harness`;
+  const timeoutId = `${uid}-timeout`;
+  const modelSelectId = `${uid}-model`;
 
   // Harness registry is code-defined and never mutates at runtime, so
   // we fetch it once.
@@ -183,11 +196,19 @@ export function AgentProfileSettings() {
         profiles.map((p) => {
           const harness = harnesses.find((h) => h.id === p.harness_id);
           return (
+            /* Below `sm` the harness/model/usage summary alone is wider
+               than the card, so a single line would squeeze Edit and
+               Delete off-screen; stacking gives them their own line where
+               they stay reachable. From `sm` up this is the original
+               centred, space-between row. */
             <div
               key={p.id}
-              className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
+              className="bg-gray-900 border border-gray-800 rounded p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
             >
-              <div>
+              {/* `min-w-0` lets this block shrink below its content width
+                  inside the flex row, and `break-words` keeps a long
+                  provider/model pair from spilling past the card. */}
+              <div className="min-w-0 break-words">
                 <span className="font-medium">{p.display_name}</span>
                 <span className="text-gray-500 text-sm ml-2">({p.id})</span>
                 <div className="text-gray-500 text-xs mt-1">
@@ -200,16 +221,20 @@ export function AgentProfileSettings() {
                   {p.tasks_using === 1 ? '' : 's'}
                 </div>
               </div>
-              <div className="flex items-center gap-3 text-sm">
+              <div className="flex flex-wrap items-center gap-3 text-sm sm:shrink-0">
                 <button
+                  type="button"
                   onClick={() => startEdit(p)}
-                  className="text-blue-400 hover:text-blue-300"
+                  aria-label={`Edit agent profile ${p.display_name}`}
+                  className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
                 >
                   Edit
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleDelete(p.id)}
-                  className="text-red-400 hover:text-red-300"
+                  aria-label={`Delete agent profile ${p.display_name}`}
+                  className={`text-red-400 hover:text-red-300 ${TOUCH_TARGET_Y}`}
                 >
                   Delete
                 </button>
@@ -220,8 +245,9 @@ export function AgentProfileSettings() {
       )}
 
       <button
+        type="button"
         onClick={startCreate}
-        className="text-sm text-blue-400 hover:text-blue-300"
+        className="min-h-11 sm:min-h-0 text-sm text-blue-400 hover:text-blue-300"
       >
         + Add agent profile
       </button>
@@ -231,10 +257,18 @@ export function AgentProfileSettings() {
           <h3 className="font-medium">
             {isNew ? 'Add Agent Profile' : `Edit ${editing.display_name}`}
           </h3>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm mb-1">ID</label>
+          {/* `min-w-0` on every cell: a grid item's automatic minimum size
+              is its content's min-content width, and the model select —
+              sized by its longest "provider — model (id)" option — is far
+              wider than a 375px column. `col-span-2` has to be
+              `sm:`-prefixed too — spanning two columns in the one-column
+              mobile grid would create an implicit second column and push
+              the form off-screen. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="min-w-0">
+              <label htmlFor={idFieldId} className="block text-sm mb-1">ID</label>
               <input
+                id={idFieldId}
                 value={editing.id ?? ''}
                 onChange={(e) => setEditing({ ...editing, id: e.target.value })}
                 disabled={!isNew}
@@ -242,9 +276,10 @@ export function AgentProfileSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
               />
             </div>
-            <div>
-              <label className="block text-sm mb-1">Display name</label>
+            <div className="min-w-0">
+              <label htmlFor={displayNameId} className="block text-sm mb-1">Display name</label>
               <input
+                id={displayNameId}
                 value={editing.display_name ?? ''}
                 onChange={(e) =>
                   setEditing({ ...editing, display_name: e.target.value })
@@ -253,9 +288,10 @@ export function AgentProfileSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-sm mb-1">Harness</label>
+            <div className="min-w-0">
+              <label htmlFor={harnessSelectId} className="block text-sm mb-1">Harness</label>
               <select
+                id={harnessSelectId}
                 value={editing.harness_id ?? 'claude-sdk'}
                 onChange={(e) =>
                   setEditing({
@@ -276,11 +312,12 @@ export function AgentProfileSettings() {
                 Supports kinds: {editingHarness.supported_provider_kinds.join(', ')}
               </p>
             </div>
-            <div>
-              <label className="block text-sm mb-1">
+            <div className="min-w-0">
+              <label htmlFor={timeoutId} className="block text-sm mb-1">
                 Timeout (minutes) <span className="text-red-400">*</span>
               </label>
               <input
+                id={timeoutId}
                 type="number"
                 min={1}
                 value={editing.timeout_minutes ?? 2880}
@@ -293,8 +330,14 @@ export function AgentProfileSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">
+            <div className="min-w-0 sm:col-span-2">
+              {/* With no compatible models the branch below renders a
+                  warning instead of the select, so `htmlFor` is only wired
+                  up when there is a control to point at. */}
+              <label
+                htmlFor={modelOptions.length > 0 ? modelSelectId : undefined}
+                className="block text-sm mb-1"
+              >
                 Model
                 <span className="text-gray-500 font-normal">
                   {' '}— filtered to providers compatible with this harness
@@ -309,6 +352,7 @@ export function AgentProfileSettings() {
               ) : (
                 <>
                   <select
+                    id={modelSelectId}
                     value={editing.model_pk ?? 0}
                     onChange={(e) =>
                       setEditing({
@@ -379,22 +423,27 @@ export function AgentProfileSettings() {
               ? 'Select a model compatible with this harness before saving.'
               : undefined;
             return (
+              /* `min-h-11` (44px) is the minimum comfortable touch
+                 target; `px-4 py-2` only reaches 36px. Reset at `sm` so
+                 the desktop buttons keep their original height. */
               <div className="flex gap-3">
                 <button
+                  type="button"
                   onClick={handleSave}
                   disabled={saveDisabled}
                   title={saveTitle}
-                  className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded text-sm"
+                  className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded text-sm"
                 >
                   Save
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
                     setEditing(null);
                     setIsNew(false);
                     setError(null);
                   }}
-                  className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+                  className="min-h-11 sm:min-h-0 text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
                 >
                   Cancel
                 </button>
@@ -423,17 +472,22 @@ function HarnessConfigForm({
   config: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
 }) {
+  // Declared before the early return below — hooks must run on every
+  // render regardless of which harness is selected.
+  const uid = useId();
+  const maxTurnsId = `${uid}-max-turns`;
   if (harnessId === 'claude-code') {
     const maxTurns = typeof config.max_turns === 'number' ? config.max_turns : 100;
     return (
       <div>
-        <label className="block text-sm mb-1">
+        <label htmlFor={maxTurnsId} className="block text-sm mb-1">
           max_turns
           <span className="text-gray-500 font-normal">
             {' '}— passed to <span className="font-mono">claude --max-turns N</span>
           </span>
         </label>
         <input
+          id={maxTurnsId}
           type="number"
           min={1}
           value={maxTurns}

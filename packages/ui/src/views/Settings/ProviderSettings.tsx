@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
@@ -8,6 +8,17 @@ import type {
   ModelResponse,
 } from '../../api.js';
 import { buildProviderSavePayload, type AuthTokenMode } from './providerSavePayload.js';
+
+/** Hit-area padding for the inline text buttons in the provider and
+ *  model rows. The negative margin cancels the padding's effect on
+ *  layout, so only the tappable area grows: 20px of `text-sm` plus
+ *  2×12px reaches the 44px minimum. Dropped from `sm` up, where the rows
+ *  keep their original density. */
+const TOUCH_TARGET_Y = '-my-3 py-3 sm:my-0 sm:py-0';
+
+/** Same idea for the `text-xs` model rows, where the 16px line box needs
+ *  2×14px to clear 44px. */
+const TOUCH_TARGET_Y_XS = '-my-3.5 py-3.5 sm:my-0 sm:py-0';
 
 /** Providers & Models tab — per-provider connection identity (kind,
  *  URL, credential) + nested models list. */
@@ -25,6 +36,16 @@ export function ProviderSettings() {
   const [error, setError] = useState<string | null>(null);
   const providersVersion = useStore((s) => s.resourceVersions.providers);
   const modelsVersion = useStore((s) => s.resourceVersions.models);
+  // One id root for this tab's label/control pairs.
+  const uid = useId();
+  const idFieldId = `${uid}-id`;
+  const displayNameId = `${uid}-display-name`;
+  const kindId = `${uid}-kind`;
+  const concurrencyId = `${uid}-concurrency`;
+  const baseUrlId = `${uid}-base-url`;
+  const apiKeyEnvVarId = `${uid}-api-key-env-var`;
+  const authTokenId = `${uid}-auth-token`;
+  const notesId = `${uid}-notes`;
 
   function refresh(): void {
     api.getProviders().then((r) => setProviders(r.providers)).catch(() => {});
@@ -120,6 +141,12 @@ export function ProviderSettings() {
     ? kinds.find((k) => k.kind === editing.kind)
     : undefined;
 
+  // Mirrors the final arm of the auth-token tri-state below: the only
+  // mode that actually renders an input for the label to point at.
+  const authTokenInputShown =
+    authTokenMode === 'set' ||
+    (authTokenMode === 'keep' && !editing?.has_auth_token);
+
   return (
     <div className="space-y-4">
       <div className="text-sm text-gray-400">
@@ -153,8 +180,9 @@ export function ProviderSettings() {
       )}
 
       <button
+        type="button"
         onClick={startCreate}
-        className="text-sm text-blue-400 hover:text-blue-300"
+        className="min-h-11 sm:min-h-0 text-sm text-blue-400 hover:text-blue-300"
       >
         + Add provider
       </button>
@@ -164,10 +192,17 @@ export function ProviderSettings() {
           <h3 className="font-medium">
             {isNew ? 'Add Provider' : `Edit ${editing.display_name}`}
           </h3>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm mb-1">ID</label>
+          {/* `min-w-0` on every cell: a grid item's automatic minimum size
+              is its content's min-content width, and a select sized by its
+              longest option is far wider than a 375px column. `col-span-2`
+              has to be `sm:`-prefixed too — spanning two columns in the
+              one-column mobile grid would create an implicit second column
+              and push the form off-screen. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="min-w-0">
+              <label htmlFor={idFieldId} className="block text-sm mb-1">ID</label>
               <input
+                id={idFieldId}
                 value={editing.id ?? ''}
                 onChange={(e) => setEditing({ ...editing, id: e.target.value })}
                 disabled={!isNew}
@@ -175,9 +210,10 @@ export function ProviderSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
               />
             </div>
-            <div>
-              <label className="block text-sm mb-1">Display name</label>
+            <div className="min-w-0">
+              <label htmlFor={displayNameId} className="block text-sm mb-1">Display name</label>
               <input
+                id={displayNameId}
                 value={editing.display_name ?? ''}
                 onChange={(e) =>
                   setEditing({ ...editing, display_name: e.target.value })
@@ -186,9 +222,10 @@ export function ProviderSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">Kind</label>
+            <div className="min-w-0 sm:col-span-2">
+              <label htmlFor={kindId} className="block text-sm mb-1">Kind</label>
               <select
+                id={kindId}
                 value={editing.kind ?? 'anthropic'}
                 onChange={(e) => {
                   const newKind = e.target.value as ProviderKind;
@@ -227,12 +264,13 @@ export function ProviderSettings() {
                 <p className="text-xs text-gray-500 mt-1">{editingKindSpec.description}</p>
               )}
             </div>
-            <div>
-              <label className="block text-sm mb-1">
+            <div className="min-w-0">
+              <label htmlFor={concurrencyId} className="block text-sm mb-1">
                 Concurrency limit
                 <span className="text-gray-500 font-normal"> — 0 pauses all profiles using this provider</span>
               </label>
               <input
+                id={concurrencyId}
                 type="number"
                 min={0}
                 value={editing.concurrency_limit ?? 1}
@@ -246,11 +284,12 @@ export function ProviderSettings() {
               />
             </div>
             {editingKindSpec.requires_base_url && (
-              <div>
-                <label className="block text-sm mb-1">
+              <div className="min-w-0">
+                <label htmlFor={baseUrlId} className="block text-sm mb-1">
                   Base URL <span className="text-red-400">*</span>
                 </label>
                 <input
+                  id={baseUrlId}
                   value={editing.base_url ?? ''}
                   onChange={(e) =>
                     setEditing({ ...editing, base_url: e.target.value })
@@ -261,8 +300,8 @@ export function ProviderSettings() {
               </div>
             )}
             {editingKindSpec.container_env_name && (
-              <div className="col-span-2">
-                <label className="block text-sm mb-1">
+              <div className="min-w-0 sm:col-span-2">
+                <label htmlFor={apiKeyEnvVarId} className="block text-sm mb-1">
                   API key env var
                   <span className="text-gray-500 font-normal">
                     {' '}— name of the env var on the orchestrator's host that holds the API key.
@@ -271,6 +310,7 @@ export function ProviderSettings() {
                   </span>
                 </label>
                 <input
+                  id={apiKeyEnvVarId}
                   value={editing.api_key_env_var ?? ''}
                   onChange={(e) =>
                     setEditing({
@@ -283,8 +323,15 @@ export function ProviderSettings() {
                 />
               </div>
             )}
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">
+            <div className="min-w-0 sm:col-span-2">
+              {/* Two of the three modes below render no control at all, so
+                  `htmlFor` is only wired up when the input actually
+                  exists — a dangling `for` would be a label pointing at
+                  nothing in the accessibility tree. */}
+              <label
+                htmlFor={authTokenInputShown ? authTokenId : undefined}
+                className="block text-sm mb-1"
+              >
                 Auth token (inline)
                 <span className="text-gray-500 font-normal">
                   {' '}— optional. For self-hosted servers with bearer auth, OR
@@ -298,7 +345,7 @@ export function ProviderSettings() {
                 // Edit-existing path: don't even render an input field.
                 // The stored value isn't available to the client, so any
                 // input here would be pre-filled with the wrong thing.
-                <div className="flex items-center gap-3 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                <div className="flex flex-wrap items-center gap-3 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
                   <span className="text-gray-300 font-mono">**** (stored)</span>
                   <button
                     type="button"
@@ -306,7 +353,8 @@ export function ProviderSettings() {
                       setAuthTokenMode('set');
                       setAuthTokenDraft('');
                     }}
-                    className="text-blue-400 hover:text-blue-300"
+                    aria-label="Replace the stored auth token"
+                    className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
                   >
                     Replace
                   </button>
@@ -316,20 +364,22 @@ export function ProviderSettings() {
                       setAuthTokenMode('clear');
                       setAuthTokenDraft('');
                     }}
-                    className="text-red-400 hover:text-red-300"
+                    aria-label="Clear the stored auth token"
+                    className={`text-red-400 hover:text-red-300 ${TOUCH_TARGET_Y}`}
                   >
                     Clear
                   </button>
                 </div>
               ) : authTokenMode === 'clear' ? (
-                <div className="flex items-center gap-3 bg-gray-800 border border-yellow-700 rounded px-3 py-2 text-sm">
+                <div className="flex flex-wrap items-center gap-3 bg-gray-800 border border-yellow-700 rounded px-3 py-2 text-sm">
                   <span className="text-yellow-400">
                     Will clear the stored token on save.
                   </span>
                   <button
                     type="button"
                     onClick={() => setAuthTokenMode('keep')}
-                    className="text-blue-400 hover:text-blue-300"
+                    aria-label="Undo clearing the stored auth token"
+                    className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
                   >
                     Undo
                   </button>
@@ -338,8 +388,9 @@ export function ProviderSettings() {
                 // 'set' mode, or 'keep' with no stored token yet (new
                 // providers, or edits to providers that have only an
                 // env-var pointer). Render a fresh input.
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <input
+                    id={authTokenId}
                     type="password"
                     value={authTokenDraft}
                     onChange={(e) => {
@@ -353,7 +404,7 @@ export function ProviderSettings() {
                       editingKindSpec.auth_optional ? '(optional)' : 'paste token'
                     }
                     autoComplete="new-password"
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+                    className="min-w-0 flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
                   />
                   {/* Cancel-set button only relevant when editing a row
                       that already has a stored token — gives the
@@ -366,7 +417,7 @@ export function ProviderSettings() {
                         setAuthTokenMode('keep');
                         setAuthTokenDraft('');
                       }}
-                      className="text-gray-400 hover:text-gray-200 text-sm"
+                      className={`text-gray-400 hover:text-gray-200 text-sm ${TOUCH_TARGET_Y}`}
                     >
                       Keep existing
                     </button>
@@ -376,8 +427,9 @@ export function ProviderSettings() {
             </div>
           </div>
           <div>
-            <label className="block text-sm mb-1">Notes (optional)</label>
+            <label htmlFor={notesId} className="block text-sm mb-1">Notes (optional)</label>
             <textarea
+              id={notesId}
               value={editing.notes ?? ''}
               onChange={(e) =>
                 setEditing({ ...editing, notes: e.target.value || null })
@@ -385,14 +437,19 @@ export function ProviderSettings() {
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm min-h-[60px]"
             />
           </div>
+          {/* `min-h-11` (44px) is the minimum comfortable touch target;
+              `px-4 py-2` only reaches 36px. Reset at `sm` so the desktop
+              buttons keep their original height. */}
           <div className="flex gap-3">
             <button
+              type="button"
               onClick={handleSave}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+              className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
             >
               Save
             </button>
             <button
+              type="button"
               onClick={() => {
                 setEditing(null);
                 setIsNew(false);
@@ -400,7 +457,7 @@ export function ProviderSettings() {
                 setAuthTokenDraft('');
                 setError(null);
               }}
-              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+              className="min-h-11 sm:min-h-0 text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
             >
               Cancel
             </button>
@@ -429,15 +486,22 @@ function ProviderRow({
   const kindSpec = kinds.find((k) => k.kind === provider.kind);
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
-      <div className="flex items-center justify-between">
-        <div>
+      {/* Below `sm` the five-control action cluster alone fills the card,
+          so a single line would squeeze Delete off-screen; stacking gives
+          the cluster its own line where every control stays reachable.
+          From `sm` up this is the original centred, space-between row. */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        {/* `min-w-0` lets this block shrink below its content width inside
+            the flex row, and `break-words` keeps a long display name or id
+            from spilling past the card. */}
+        <div className="min-w-0 break-words">
           <span className="font-medium">{provider.display_name}</span>
           <span className="text-gray-500 text-sm ml-2">({provider.id})</span>
           <span className="text-gray-500 text-sm ml-3">
             kind: {kindSpec?.display_name ?? provider.kind}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex flex-wrap items-center gap-3 text-sm sm:shrink-0">
           <span
             className={
               provider.concurrency_limit === 0
@@ -459,21 +523,32 @@ function ProviderRow({
             {provider.models_count} model{provider.models_count === 1 ? '' : 's'}
           </span>
           <button
+            type="button"
             onClick={onExpand}
-            className="text-blue-400 hover:text-blue-300"
+            aria-expanded={expanded}
+            aria-label={
+              expanded
+                ? `Collapse models for ${provider.display_name}`
+                : `Show models for ${provider.display_name}`
+            }
+            className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
           >
             {expanded ? 'Collapse' : 'Models'}
           </button>
           <button
+            type="button"
             onClick={onEdit}
-            className="text-blue-400 hover:text-blue-300"
+            aria-label={`Edit provider ${provider.display_name}`}
+            className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
           >
             Edit
           </button>
           <button
+            type="button"
             onClick={onDelete}
             disabled={provider.models_count > 0}
-            className="text-red-400 hover:text-red-300 disabled:text-gray-600 disabled:cursor-not-allowed"
+            aria-label={`Delete provider ${provider.display_name}`}
+            className={`text-red-400 hover:text-red-300 disabled:text-gray-600 disabled:cursor-not-allowed ${TOUCH_TARGET_Y}`}
             title={
               provider.models_count > 0
                 ? 'Delete or reassign the provider\'s models first'
@@ -499,6 +574,9 @@ function ProviderModels({ providerId }: { providerId: string }) {
   const [draftName, setDraftName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const modelsVersion = useStore((s) => s.resourceVersions.models);
+  const uid = useId();
+  const draftIdId = `${uid}-model-id`;
+  const draftNameId = `${uid}-model-name`;
 
   function refresh(): void {
     api
@@ -553,15 +631,17 @@ function ProviderModels({ providerId }: { providerId: string }) {
           {models.map((m) => (
             <li
               key={m.id}
-              className="flex items-center justify-between bg-gray-800 rounded px-3 py-1.5 text-xs"
+              className="flex flex-wrap items-center justify-between gap-2 bg-gray-800 rounded px-3 py-1.5 text-xs"
             >
-              <span>
+              <span className="min-w-0 break-words">
                 <span className="font-mono">{m.model_id}</span>
                 <span className="text-gray-500 ml-2">{m.display_name}</span>
               </span>
               <button
+                type="button"
                 onClick={() => handleDelete(m.id)}
-                className="text-red-400 hover:text-red-300"
+                aria-label={`Delete model ${m.model_id}`}
+                className={`shrink-0 text-red-400 hover:text-red-300 ${TOUCH_TARGET_Y_XS}`}
               >
                 Delete
               </button>
@@ -570,42 +650,57 @@ function ProviderModels({ providerId }: { providerId: string }) {
         </ul>
       )}
       {adding ? (
-        <div className="flex items-center gap-2 mt-2">
+        /* Two inputs plus two buttons do not share a line at 375px; below
+           `sm` each input takes a full line of the wrapped row and the two
+           buttons follow on the next one. From `sm` up the inputs go back
+           to `flex-1` and the row is the single line it has always been. */
+        <div className="flex flex-wrap items-center gap-2 mt-2">
+          <label htmlFor={draftIdId} className="sr-only">
+            Model id
+          </label>
           <input
+            id={draftIdId}
             value={draftId}
             onChange={(e) => setDraftId(e.target.value)}
             placeholder="model_id (e.g. claude-sonnet-4-6)"
-            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
+            className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
           />
+          <label htmlFor={draftNameId} className="sr-only">
+            Model display name
+          </label>
           <input
+            id={draftNameId}
             value={draftName}
             onChange={(e) => setDraftName(e.target.value)}
             placeholder="display name"
-            className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+            className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
           />
           <button
+            type="button"
             onClick={handleAdd}
             disabled={!draftId.trim() || !draftName.trim()}
-            className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-3 py-1 rounded text-xs"
+            className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-3 py-1 rounded text-xs"
           >
             Add
           </button>
           <button
+            type="button"
             onClick={() => {
               setAdding(false);
               setDraftId('');
               setDraftName('');
               setError(null);
             }}
-            className="text-gray-400 hover:text-gray-200 px-2 text-xs"
+            className="min-h-11 sm:min-h-0 text-gray-400 hover:text-gray-200 px-2 text-xs"
           >
             Cancel
           </button>
         </div>
       ) : (
         <button
+          type="button"
           onClick={() => setAdding(true)}
-          className="text-xs text-blue-400 hover:text-blue-300"
+          className="min-h-11 sm:min-h-0 text-xs text-blue-400 hover:text-blue-300"
         >
           + Add model
         </button>
