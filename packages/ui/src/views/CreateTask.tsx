@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type { RepoResponse, AgentProfileResponse, IssueResponse } from '../api.js';
@@ -45,6 +45,19 @@ export function CreateTask() {
   // created/edited/deleted on the server. Drives a refetch so this
   // form's dropdown stays in sync with the Agent Profiles tab.
   const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+
+  // One id root for this form's label/control pairs and for the two
+  // control groups (issue radios, dependency checkboxes) whose heading is
+  // a group label rather than a single control's <label>.
+  const uid = useId();
+  const repoSelectId = `${uid}-repo`;
+  const titleInputId = `${uid}-title`;
+  const descriptionInputId = `${uid}-description`;
+  const issueGroupLabelId = `${uid}-issue-label`;
+  const profileSelectId = `${uid}-profile`;
+  const reviewProfileSelectId = `${uid}-review-profile`;
+  const maxAttemptsInputId = `${uid}-max-attempts`;
+  const depsGroupLabelId = `${uid}-dependencies-label`;
 
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
@@ -158,17 +171,27 @@ export function CreateTask() {
       </AppHeader>
 
       <main className="mx-auto max-w-3xl px-6 py-6">
-        {/* Mode tabs */}
-        <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit">
+        {/* Mode tabs. `max-w-full overflow-x-auto` caps the `w-fit` bar at
+            the column width so a narrow viewport scrolls the bar rather
+            than the document, and `shrink-0 whitespace-nowrap` keeps each
+            pill at its natural width instead of letting flex wrap the
+            labels onto two lines. `py-3` makes a pill 44px tall — the
+            minimum comfortable touch target — and `sm:py-2` restores the
+            original height from the tablet breakpoint up. */}
+        <div className="flex gap-1 mb-6 bg-gray-900 rounded-lg p-1 w-fit max-w-full overflow-x-auto">
           <button
+            type="button"
             onClick={() => setMode('create')}
-            className={`px-4 py-2 rounded text-sm ${mode === 'create' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+            aria-pressed={mode === 'create'}
+            className={`shrink-0 whitespace-nowrap px-4 py-3 sm:py-2 rounded text-sm ${mode === 'create' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
           >
             Create and queue
           </button>
           <button
+            type="button"
             onClick={() => setMode('queue')}
-            className={`px-4 py-2 rounded text-sm ${mode === 'queue' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+            aria-pressed={mode === 'queue'}
+            className={`shrink-0 whitespace-nowrap px-4 py-3 sm:py-2 rounded text-sm ${mode === 'queue' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200'}`}
           >
             Queue existing
           </button>
@@ -183,8 +206,11 @@ export function CreateTask() {
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Repo selector */}
           <div>
-            <label className="block text-sm font-medium mb-1">Repository</label>
+            <label htmlFor={repoSelectId} className="block text-sm font-medium mb-1">
+              Repository
+            </label>
             <select
+              id={repoSelectId}
               value={repoId ?? ''}
               onChange={(e) => setRepoId(e.target.value ? parseInt(e.target.value, 10) : null)}
               className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
@@ -201,8 +227,11 @@ export function CreateTask() {
           {mode === 'create' ? (
             <>
               <div>
-                <label className="block text-sm font-medium mb-1">Title</label>
+                <label htmlFor={titleInputId} className="block text-sm font-medium mb-1">
+                  Title
+                </label>
                 <input
+                  id={titleInputId}
                   type="text"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
@@ -211,25 +240,42 @@ export function CreateTask() {
                 />
               </div>
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-sm font-medium">Description</label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  {/* Only a <label> while the textarea it names exists —
+                      in preview mode there is no labelable control, so
+                      the same text renders as a plain heading. */}
+                  {showPreview ? (
+                    <span className="text-sm font-medium">Description</span>
+                  ) : (
+                    <label htmlFor={descriptionInputId} className="text-sm font-medium">
+                      Description
+                    </label>
+                  )}
+                  {/* Padding grows the tap target to 44px and the matching
+                      negative margin cancels it again, so the row's height
+                      is unchanged; both drop at `sm`. */}
                   <button
                     type="button"
                     onClick={() => setShowPreview(!showPreview)}
-                    className="text-xs text-blue-400 hover:text-blue-300"
+                    aria-pressed={showPreview}
+                    className="-my-3.5 py-3.5 sm:my-0 sm:py-0 text-xs text-blue-400 hover:text-blue-300"
                   >
                     {showPreview ? 'Edit' : 'Preview'}
                   </button>
                 </div>
                 {showPreview ? (
-                  <div className="bg-gray-900 border border-gray-700 rounded p-4 text-sm prose prose-invert max-w-none min-h-[150px]">
+                  /* `overflow-x-auto` so a wide fenced code block or table
+                     in the rendered markdown scrolls inside the card
+                     rather than widening the document. */
+                  <div className="bg-gray-900 border border-gray-700 rounded p-4 text-sm prose prose-invert max-w-none min-h-[150px] overflow-x-auto break-words">
                     <ReactMarkdown>{description}</ReactMarkdown>
                   </div>
                 ) : (
                   <textarea
+                    id={descriptionInputId}
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[150px]"
+                    className="w-full max-w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[150px]"
                     placeholder={`Describe the task...\n\n## Dependencies\n- [ ] #38\n- [ ] #39`}
                   />
                 )}
@@ -237,13 +283,21 @@ export function CreateTask() {
             </>
           ) : (
             <div>
-              <label className="block text-sm font-medium mb-1">Issue</label>
+              {/* A group heading, not a control label — each radio has its
+                  own wrapping <label>, so this names the group instead. */}
+              <div id={issueGroupLabelId} className="block text-sm font-medium mb-1">
+                Issue
+              </div>
               {!repoId ? (
                 <p className="text-gray-500 text-sm">Select a repository first</p>
               ) : issues.length === 0 ? (
                 <p className="text-gray-500 text-sm">No queueable issues found</p>
               ) : (
-                <div className="space-y-2 max-h-64 overflow-y-auto">
+                <div
+                  role="radiogroup"
+                  aria-labelledby={issueGroupLabelId}
+                  className="space-y-2 max-h-64 overflow-y-auto"
+                >
                   {issues.map((issue) => (
                     <label
                       key={issue.id}
@@ -259,12 +313,16 @@ export function CreateTask() {
                         value={issue.id}
                         checked={selectedIssueId === issue.id}
                         onChange={() => setSelectedIssueId(issue.id)}
-                        className="accent-blue-500"
+                        className="accent-blue-500 shrink-0"
                       />
-                      <span className="text-blue-400 font-mono text-sm">
+                      <span className="text-blue-400 font-mono text-sm shrink-0">
                         #{issue.id}
                       </span>
-                      <span className="text-sm">{issue.title}</span>
+                      {/* `min-w-0 break-words`: a flex item's automatic
+                          minimum size is its longest word, so without this
+                          a long issue title widens the row past a phone
+                          viewport instead of wrapping. */}
+                      <span className="text-sm min-w-0 break-words">{issue.title}</span>
                     </label>
                   ))}
                 </div>
@@ -272,16 +330,20 @@ export function CreateTask() {
             </div>
           )}
 
-          {/* Overrides */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">
+          {/* Overrides. `min-w-0` on each cell: a grid item's automatic
+              minimum size is its content's min-content width, which for a
+              <select> is its widest option — wider than a 375px column,
+              and enough to push the document sideways. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="min-w-0">
+              <label htmlFor={profileSelectId} className="block text-sm font-medium mb-1">
                 Implementation profile
               </label>
               <select
+                id={profileSelectId}
                 value={agentProfile}
                 onChange={(e) => setAgentProfile(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               >
                 <option value="">Inherit (repo / global default)</option>
                 {profiles.map((p) => (
@@ -291,11 +353,12 @@ export function CreateTask() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
+            <div className="min-w-0">
+              <label htmlFor={reviewProfileSelectId} className="block text-sm font-medium mb-1">
                 Review profile
               </label>
               <select
+                id={reviewProfileSelectId}
                 value={reviewAgentProfile}
                 onChange={(e) => setReviewAgentProfile(e.target.value)}
                 disabled={humanReview}
@@ -304,7 +367,7 @@ export function CreateTask() {
                     ? 'Human review is enabled — the automated review agent does not run.'
                     : undefined
                 }
-                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm disabled:opacity-50"
+                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm disabled:opacity-50"
               >
                 <option value="">
                   Inherit (review default, else implementation profile)
@@ -316,17 +379,18 @@ export function CreateTask() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
+            <div className="min-w-0">
+              <label htmlFor={maxAttemptsInputId} className="block text-sm font-medium mb-1">
                 Max attempts
               </label>
               <input
+                id={maxAttemptsInputId}
                 type="number"
                 value={maxAttempts}
                 onChange={(e) => setMaxAttempts(e.target.value)}
                 min="1"
                 placeholder="Default 7"
-                className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
           </div>
@@ -352,41 +416,53 @@ export function CreateTask() {
 
           {/* Dependencies */}
           <div>
-            <label className="block text-sm font-medium mb-1">
+            {/* Group heading rather than a control label — each checkbox
+                below carries its own wrapping <label>. */}
+            <div id={depsGroupLabelId} className="block text-sm font-medium mb-1">
               Dependencies
               <span className="ml-2 text-xs font-normal text-gray-500">
                 the task stays queued until each selected issue is closed
               </span>
-            </label>
+            </div>
             {!repoId ? (
               <p className="text-gray-500 text-sm">Select a repository first</p>
             ) : depCandidates.filter((i) => mode !== 'queue' || i.id !== selectedIssueId).length === 0 ? (
               <p className="text-gray-500 text-sm">No open issues to depend on</p>
             ) : (
-              <div className="space-y-1 max-h-40 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-2">
+              <div
+                role="group"
+                aria-labelledby={depsGroupLabelId}
+                className="space-y-1 max-h-40 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-2"
+              >
                 {depCandidates
                   .filter((i) => mode !== 'queue' || i.id !== selectedIssueId)
                   .map((issue) => (
+                    /* `py-2` on a phone makes each row tappable without
+                       precision aiming; `sm:py-0.5` keeps the dense list
+                       the desktop layout has always had. */
                     <label
                       key={issue.id}
-                      className="flex items-center gap-2 text-sm cursor-pointer rounded px-1 py-0.5 hover:bg-gray-800"
+                      className="flex items-center gap-2 text-sm cursor-pointer rounded px-1 py-2 sm:py-0.5 hover:bg-gray-800"
                     >
                       <input
                         type="checkbox"
                         checked={dependencies.includes(issue.id)}
                         onChange={() => toggleDependency(issue.id)}
-                        className="accent-blue-500"
+                        className="accent-blue-500 shrink-0"
                       />
-                      <span className="text-blue-400 font-mono">#{issue.id}</span>
-                      <span className="truncate">{issue.title}</span>
+                      <span className="text-blue-400 font-mono shrink-0">#{issue.id}</span>
+                      {/* `min-w-0` so `truncate` can actually shrink the
+                          title — a flex item won't go below its
+                          min-content width without it. */}
+                      <span className="truncate min-w-0">{issue.title}</span>
                     </label>
                   ))}
               </div>
             )}
           </div>
 
-          <div className="flex gap-6">
-            <label className="flex items-center gap-2 text-sm">
+          <div className="flex flex-wrap gap-x-6 gap-y-2">
+            <label className="flex items-center gap-2 text-sm min-h-11 sm:min-h-0">
               <input
                 type="checkbox"
                 checked={humanMerge}
@@ -395,7 +471,7 @@ export function CreateTask() {
               />
               Human merge
             </label>
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex items-center gap-2 text-sm min-h-11 sm:min-h-0">
               <input
                 type="checkbox"
                 checked={humanReview}
@@ -409,7 +485,7 @@ export function CreateTask() {
           <button
             type="submit"
             disabled={submitting}
-            className="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white px-6 py-2 rounded text-sm font-medium"
+            className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white px-6 py-2 rounded text-sm font-medium"
           >
             {submitting
               ? 'Creating...'

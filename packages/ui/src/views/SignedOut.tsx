@@ -17,9 +17,14 @@ export function SignedOut() {
           Your orchestrator session has ended. You can sign back in at
           any time.
         </p>
+        {/* The page's only control, and on a phone the only thing to aim
+            at: `min-h-11` (44px) is the minimum comfortable touch target,
+            which `py-2` alone falls short of. `inline-flex` centres the
+            label inside that taller box; from `sm` up the min-height is
+            released, so the button keeps its original size. */}
         <a
           href="/auth/login"
-          className="inline-block px-4 py-2 rounded bg-blue-700 text-white text-sm font-medium hover:bg-blue-600"
+          className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-4 py-2 rounded bg-blue-700 text-white text-sm font-medium hover:bg-blue-600"
         >
           Sign in
         </a>

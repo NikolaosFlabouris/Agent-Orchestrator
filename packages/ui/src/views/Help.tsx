@@ -22,7 +22,11 @@ export function Help() {
         }
       />
 
-      <main className="mx-auto max-w-4xl px-6 py-6 grid grid-cols-[200px_1fr] gap-8">
+      {/* A fixed 200px first column leaves ~95px of article on a 375px
+          phone, so the two-column shell only applies from `lg` up; below
+          that the grid is a single column and the TOC stacks above the
+          article as its own row. */}
+      <main className="mx-auto max-w-4xl px-6 py-6 grid grid-cols-1 lg:grid-cols-[200px_1fr] gap-8">
         <TableOfContents />
 
         <div className="space-y-12 min-w-0">
@@ -41,36 +45,97 @@ export function Help() {
   );
 }
 
+const SECTIONS: Array<{ id: string; label: string }> = [
+  { id: 'one-time-setup', label: 'One-time setup' },
+  { id: 'task-lifecycle', label: 'Task lifecycle' },
+  { id: 'providers', label: 'Providers & Models' },
+  { id: 'agent-profiles', label: 'Agent Profiles' },
+  { id: 'repositories', label: 'Repositories' },
+  { id: 'global-settings', label: 'Global Settings' },
+  { id: 'running-tasks', label: 'Running tasks' },
+  { id: 'ui-controls', label: 'UI controls' },
+  { id: 'common-issues', label: 'Common issues' },
+];
+
+/** Two forms of the same list of links, one shown at a time. Only the
+ *  visible one is in the accessibility tree — `display: none` removes the
+ *  other outright — so the duplicated `aria-label` is never ambiguous.
+ *
+ *  Desktop keeps the sticky 200px column byte-for-byte as it was. Below
+ *  `lg` the links stack above the article, where nine of them would push
+ *  the content a screenful down, so they live behind a native
+ *  `<details>` disclosure instead. */
 function TableOfContents() {
-  const sections: Array<{ id: string; label: string }> = [
-    { id: 'one-time-setup', label: 'One-time setup' },
-    { id: 'task-lifecycle', label: 'Task lifecycle' },
-    { id: 'providers', label: 'Providers & Models' },
-    { id: 'agent-profiles', label: 'Agent Profiles' },
-    { id: 'repositories', label: 'Repositories' },
-    { id: 'global-settings', label: 'Global Settings' },
-    { id: 'running-tasks', label: 'Running tasks' },
-    { id: 'ui-controls', label: 'UI controls' },
-    { id: 'common-issues', label: 'Common issues' },
-  ];
   return (
-    <nav className="sticky top-6 self-start text-sm">
-      <div className="text-gray-500 uppercase text-xs tracking-wide mb-2">
-        On this page
-      </div>
-      <ul className="space-y-1">
-        {sections.map((s) => (
-          <li key={s.id}>
-            <a
-              href={`#${s.id}`}
-              className="text-blue-400 hover:text-blue-300"
-            >
-              {s.label}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </nav>
+    <>
+      <details className="group lg:hidden bg-gray-900 border border-gray-800 rounded">
+        {/* `list-none` + the webkit pseudo-element drop the default
+            triangle in favour of the caret below, which is rotated by
+            the open state. `py-3` makes the row 44px — the minimum
+            comfortable touch target. */}
+        <summary className="flex cursor-pointer items-center gap-2 px-3 py-3 text-xs uppercase tracking-wide text-gray-500 list-none [&::-webkit-details-marker]:hidden">
+          <Caret />
+          On this page
+        </summary>
+        <nav aria-label="Table of contents" className="px-3 pb-2 text-sm">
+          <ul>
+            {SECTIONS.map((s) => (
+              <li key={s.id}>
+                {/* Padding (not height) so the 44px target is the link
+                    itself, not a gap next to it. */}
+                <a
+                  href={`#${s.id}`}
+                  className="block py-3 text-blue-400 hover:text-blue-300"
+                >
+                  {s.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      </details>
+
+      <nav
+        aria-label="Table of contents"
+        className="hidden lg:block sticky top-6 self-start text-sm"
+      >
+        <div className="text-gray-500 uppercase text-xs tracking-wide mb-2">
+          On this page
+        </div>
+        <ul className="space-y-1">
+          {SECTIONS.map((s) => (
+            <li key={s.id}>
+              <a
+                href={`#${s.id}`}
+                className="text-blue-400 hover:text-blue-300"
+              >
+                {s.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    </>
+  );
+}
+
+/** Disclosure caret for the mobile TOC, rotated by the parent
+ *  `<details>` open state. Inline so Help keeps its zero-dependency
+ *  footprint; `currentColor` so it inherits the summary's gray. */
+function Caret() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      className="h-3 w-3 shrink-0 transition-transform group-open:rotate-90"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7 4l6 6-6 6" />
+    </svg>
   );
 }
 
@@ -93,7 +158,12 @@ function SubHeading({ children }: { children: React.ReactNode }) {
 
 function Code({ children }: { children: React.ReactNode }) {
   return (
-    <code className="font-mono text-xs bg-gray-800 text-gray-200 px-1.5 py-0.5 rounded">
+    /* `break-words` only kicks in for a token that would otherwise
+       overflow its line — at desktop widths nothing here is long enough,
+       so the rendering is unchanged. Without it a long unbroken
+       identifier (e.g. `default_review_agent_profile_id`) widens the
+       document on a 375px screen. */
+    <code className="font-mono text-xs bg-gray-800 text-gray-200 px-1.5 py-0.5 rounded break-words">
       {children}
     </code>
   );
