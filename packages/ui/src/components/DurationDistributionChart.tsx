@@ -10,6 +10,21 @@ import {
 } from 'recharts';
 import type { DurationDistribution } from '@orchestrator/shared';
 import { formatDuration, formatNumber } from './reportFormat.js';
+import { useMediaQuery, SMALL_SCREEN } from '../hooks/useMediaQuery.js';
+
+/** Category-axis width. 140px fits a full `anthropic/claude-...` key, but on a
+ *  375px card that is most of the plot area — phones get a narrower gutter and
+ *  elided labels instead (the full key is still in the tooltip). */
+const Y_AXIS_WIDTH = 140;
+const Y_AXIS_WIDTH_SMALL = 90;
+/** Roughly what fits in `Y_AXIS_WIDTH_SMALL` at the 11px tick font. */
+const SMALL_LABEL_CHARS = 14;
+
+function elideLabel(value: string): string {
+  return value.length > SMALL_LABEL_CHARS
+    ? `${value.slice(0, SMALL_LABEL_CHARS - 1)}…`
+    : value;
+}
 
 /** Percentile-bar distribution view for per-group durations. Grouped bars
  *  (p50 / p90 / p99) per model/harness make the tail visible — averages
@@ -21,6 +36,7 @@ export function DurationDistributionChart({
 }: {
   groups: DurationDistribution[];
 }) {
+  const small = useMediaQuery(SMALL_SCREEN);
   // Recharts needs a flat row per category; carry the extra summary fields
   // along for the tooltip.
   const data = groups.map((g) => ({
@@ -39,7 +55,11 @@ export function DurationDistributionChart({
       <BarChart
         layout="vertical"
         data={data}
-        margin={{ top: 8, right: 16, left: 8, bottom: 0 }}
+        margin={
+          small
+            ? { top: 8, right: 8, left: 0, bottom: 0 }
+            : { top: 8, right: 16, left: 8, bottom: 0 }
+        }
       >
         <CartesianGrid stroke="#1f2937" horizontal={false} />
         <XAxis
@@ -55,7 +75,10 @@ export function DurationDistributionChart({
           stroke="#6b7280"
           fontSize={11}
           tickLine={false}
-          width={140}
+          width={small ? Y_AXIS_WIDTH_SMALL : Y_AXIS_WIDTH}
+          tickFormatter={
+            small ? (v: string | number) => elideLabel(String(v)) : undefined
+          }
         />
         <Tooltip
           contentStyle={{
