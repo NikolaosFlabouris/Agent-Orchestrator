@@ -145,7 +145,7 @@ services:
   # Enable the bundled instance only when you want it:
   #   docker compose --profile bundled-forgejo up -d
   forgejo:
-    image: codeberg.org/forgejo/forgejo:14
+    image: codeberg.org/forgejo/forgejo:16
     container_name: forgejo
     restart: unless-stopped
     # Gated behind a compose profile so the default `docker compose up -d`

@@ -43,7 +43,7 @@ networks:
 
 services:
   server:
-    image: codeberg.org/forgejo/forgejo:14
+    image: codeberg.org/forgejo/forgejo:16
     container_name: forgejo
     environment:
       - USER_UID=1000

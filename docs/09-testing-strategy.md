@@ -74,7 +74,7 @@ Spin up a Forgejo container as a test fixture. Run against the real API:
 # test/docker-compose.test.yml
 services:
   forgejo:
-    image: codeberg.org/forgejo/forgejo:14
+    image: codeberg.org/forgejo/forgejo:16
     ports:
       - "3001:3000"
     volumes:
