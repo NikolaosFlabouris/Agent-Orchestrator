@@ -31,7 +31,9 @@ The main view shows system state at a glance. Designed to be left open on a moni
 
 **Queue section:** ordered list of pending tasks, each showing issue number, title, target repository, dependency status (blocked/ready), and drag handles for reordering. An "Add task" button at the bottom.
 
-**Recent completions section:** last N completed tasks showing issue number, title, result (merged/failed), time since completion, and attempt count.
+**Recent completions section:** last N completed tasks showing issue number, title, result (merged/failed), time since completion, and attempt count. N is chosen from a select in the section header (5 / 10 / 20 / 50 / 100, default 10, not persisted across reloads); changing it refetches immediately, and both the poll's `limit` and the `completedLimit` handed to `syncTasks` become `max(20, N)` — they must stay equal or the store prunes live rows out of a truncated response.
+
+**Rows navigate as real links.** Every clickable task row (active card, queue row, recent completion) is a *stretched link*: the row is `relative`, its title is a react-router `<Link>`, and an `after:absolute after:inset-0` overlay on that anchor makes the whole row clickable through it. The row is therefore an `<a href="/tasks/:id">` — middle-click and ctrl/cmd+click open a new tab, and the anchor supplies keyboard activation, so no `role="link"` / `tabIndex` / Enter-Space `onKeyDown` emulation is needed. Anything inside the row that must stay separately clickable — the Forgejo issue-number link, the queue drag handle — is a *sibling* of the task link (never a child: nested `<a>` is invalid) and is raised above the overlay with `relative z-10`.
 
 ### Task Detail View
 
