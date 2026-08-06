@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useId, useLayoutEffect, useState, useRef, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type {
@@ -113,6 +113,15 @@ export function TaskDetail() {
   const profiles = useStore((s) => s.agentProfiles);
   const setAgentProfiles = useStore((s) => s.setAgentProfiles);
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
+  // The button that opens the Extend modal, so focus can be handed back to
+  // it when the modal closes (it is the only way in, so it is always the
+  // element the user came from).
+  const extendTriggerRef = useRef<HTMLButtonElement>(null);
+  // One id root for this view's label/control pairs and the dialog title.
+  const uid = useId();
+  const agentProfileSelectId = `${uid}-agent-profile`;
+  const reviewProfileSelectId = `${uid}-review-profile`;
+  const extendTitleId = `${uid}-extend-title`;
 
   useEffect(() => {
     if (!id) return;
@@ -136,6 +145,19 @@ export function TaskDetail() {
       appendEvent: (row) => setTask((prev) => applyTaskEvent(prev, row)),
     })
   );
+
+  // Escape closes the Extend modal, matching the Cancel button (including
+  // the focus hand-back). Bound on the document rather than the panel so it
+  // fires wherever focus sits inside the dialog.
+  useEffect(() => {
+    if (!extendModalOpen) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      closeExtendModal();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [extendModalOpen]);
 
   // Load agent profiles into store if not already cached
   useEffect(() => {
@@ -183,6 +205,15 @@ export function TaskDetail() {
     }
   }
 
+  /** The single exit from the Extend modal: unmount it and return focus to
+   *  the button that opened it, so keyboard users are not dropped onto
+   *  <body> when the panel (and whatever held focus inside it) disappears. */
+  function closeExtendModal() {
+    setExtendModalOpen(false);
+    setExtendError(null);
+    extendTriggerRef.current?.focus();
+  }
+
   async function handleExtend() {
     if (!task || actionPending) return;
     setActionPending(true);
@@ -191,7 +222,7 @@ export function TaskDetail() {
       await api.patchTask(task.id, { action: 'extend', additional_attempts: extendAmount });
       const updated = await api.getTask(task.id);
       setTask(updated);
-      setExtendModalOpen(false);
+      closeExtendModal();
     } catch (err) {
       setExtendError(err instanceof Error ? err.message : 'Extend failed');
     } finally {
@@ -437,11 +468,18 @@ export function TaskDetail() {
               </div>
             )}
             <div className="mt-2 flex items-center gap-2 flex-wrap">
-              <label className="text-xs text-gray-500">Implementation profile:</label>
+              <label htmlFor={agentProfileSelectId} className="text-xs text-gray-500">
+                Implementation profile:
+              </label>
+              {/* The option labels carry the inherited profile name, so this
+                  select's intrinsic width is far past 375px; `min-w-0
+                  max-w-full` lets it shrink to the wrapped line instead of
+                  widening the document. Neither binds at desktop width. */}
               <select
+                id={agentProfileSelectId}
                 value={task.agent_profile_id ?? ''}
                 onChange={(e) => handleAgentProfileChange(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+                className="min-w-0 max-w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
               >
                 <option value="">
                   Inherit
@@ -469,8 +507,11 @@ export function TaskDetail() {
               )}
             </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap">
-              <label className="text-xs text-gray-500">Review profile:</label>
+              <label htmlFor={reviewProfileSelectId} className="text-xs text-gray-500">
+                Review profile:
+              </label>
               <select
+                id={reviewProfileSelectId}
                 value={task.review_agent_profile_id ?? ''}
                 onChange={(e) => handleReviewProfileChange(e.target.value)}
                 disabled={task.has_human_review_label === true}
@@ -479,7 +520,7 @@ export function TaskDetail() {
                     ? 'Human review is enabled — the automated review agent does not run for this task.'
                     : undefined
                 }
-                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs disabled:opacity-50"
+                className="min-w-0 max-w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs disabled:opacity-50"
               >
                 <option value="">
                   Inherit
@@ -521,8 +562,13 @@ export function TaskDetail() {
           </>
         }
       >
-        <div className="text-right">
-          <div className="flex items-center gap-2 justify-end">
+        {/* Below `lg` AppHeader moves this slot into its disclosure panel,
+            which stacks its children from the left — so the right-alignment
+            and the `justify-end` rows only apply from `lg` up, where the
+            block sits in the header's right column exactly as before. Each
+            row wraps rather than compressing the title column beside it. */}
+        <div className="min-w-0 lg:text-right">
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
             <StatusBadge status={task.status} />
             {task.blocked && (
               <span
@@ -536,7 +582,7 @@ export function TaskDetail() {
             )}
             {task.health === 'orphaned' && <HealthBadge health={task.health} />}
           </div>
-          <div className="text-sm text-gray-400 mt-1 flex items-center gap-2 justify-end">
+          <div className="text-sm text-gray-400 mt-1 flex flex-wrap items-center gap-2 lg:justify-end">
             {editingMaxAttempts && MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) ? (
               <>
                 <span>Attempt {task.attempt}/</span>
@@ -555,6 +601,11 @@ export function TaskDetail() {
                   }}
                   autoFocus
                   disabled={maxAttemptsPending}
+                  /* aria-label rather than a <label for>: AppHeader renders
+                     this slot twice below `lg` (the hidden desktop copy and
+                     the disclosure panel), so an id here would not be
+                     unique in the document. */
+                  aria-label="Max attempts"
                   className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-sm text-right"
                 />
                 <button
@@ -588,7 +639,7 @@ export function TaskDetail() {
             )}
           </div>
           {maxAttemptsError && (
-            <div className="text-xs text-red-400 mt-1 text-right">
+            <div className="text-xs text-red-400 mt-1 lg:text-right">
               {maxAttemptsError}
             </div>
           )}
@@ -597,7 +648,11 @@ export function TaskDetail() {
 
       {/* Actions bar */}
       <div className="border-b border-gray-800 bg-gray-900/50 px-6 py-3">
-        <div className="mx-auto max-w-7xl flex gap-3">
+        {/* Up to six buttons live here; at 375px they do not fit on one
+            line, and without wrapping the overflowing ones are simply
+            unreachable. `gap-3` already supplies the row gap, so desktop
+            (which never wraps) is unchanged. */}
+        <div className="mx-auto max-w-7xl flex flex-wrap gap-3">
           {ACTIVE_STATUSES.has(task.status) && (
             <button
               onClick={() => handleAction({ action: 'cancel' })}
@@ -646,6 +701,7 @@ export function TaskDetail() {
            )}
            {EXTENDABLE_STATUSES.has(task.status) && (
              <button
+               ref={extendTriggerRef}
                onClick={() => { setExtendAmount(1); setExtendError(null); setExtendModalOpen(true); }}
                disabled={actionPending}
                className="text-sm px-3 py-1.5 rounded border border-orange-800 text-orange-400 hover:bg-orange-950 disabled:opacity-50"
@@ -668,19 +724,36 @@ export function TaskDetail() {
 
       {/* Extend modal */}
       {extendModalOpen && task && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="bg-gray-900 border border-gray-700 rounded-lg p-6 w-80 shadow-xl">
-            <h2 className="text-lg font-semibold mb-4">Extend Task</h2>
+        /* `p-4` on the overlay keeps a visible margin around the panel at
+            any viewport, and `w-full max-w-sm` lets it shrink to fit inside
+            that margin instead of being clipped below 320px — the old fixed
+            `w-80` touched the screen edges already at 375px. Wide viewports
+            get the `max-w-sm` cap, so the panel stays a fixed-width box. */
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={extendTitleId}
+            className="bg-gray-900 border border-gray-700 rounded-lg p-6 w-full max-w-sm shadow-xl"
+          >
+            <h2 id={extendTitleId} className="text-lg font-semibold mb-4">Extend Task</h2>
             <p className="text-sm text-gray-400 mb-4">
               Grant additional attempts without resetting any existing work or PR.
             </p>
             <div className="mb-3">
-              <label className="block text-xs text-gray-500 mb-1">Additional attempts</label>
+              <label htmlFor={`${uid}-extend-amount`} className="block text-xs text-gray-500 mb-1">
+                Additional attempts
+              </label>
+              {/* The panel mounts on open, so autoFocus lands focus inside
+                  the dialog every time it is shown — and `closeExtendModal`
+                  hands it back to the Extend button on the way out. */}
               <input
+                id={`${uid}-extend-amount`}
                 type="number"
                 min={1}
                 max={10}
                 value={extendAmount}
+                autoFocus
                 onChange={(e) => {
                   const v = parseInt(e.target.value, 10);
                   if (!isNaN(v)) setExtendAmount(Math.min(10, Math.max(1, v)));
@@ -711,7 +784,7 @@ export function TaskDetail() {
             )}
             <div className="flex gap-3 justify-end">
               <button
-                onClick={() => { setExtendModalOpen(false); setExtendError(null); }}
+                onClick={closeExtendModal}
                 disabled={actionPending}
                 className="text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
               >
@@ -1038,7 +1111,10 @@ function AgentOutput({
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800 text-sm">
+      {/* "N verbose lines hidden" beside the Verbose/Terse toggle and the
+          Live chip overflows 375px; the gaps only take effect once a line
+          wraps, so the desktop bar is the same single row as before. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2 border-b border-gray-800 text-sm">
         <div className="flex items-center gap-3">
           <span className="text-gray-400">progress.log</span>
           {hiddenCount > 0 && (
@@ -1095,8 +1171,13 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      {/* Role, status, verdict, duration and the harness/model id do not fit
+          one 375px line. Wrapping (plus `min-w-0` so each cluster may shrink
+          rather than push the card wider) keeps every field readable; at
+          desktop widths nothing wraps and `justify-between` still spreads
+          the two clusters to the card edges exactly as before. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           <span className="text-sm font-medium">
             Attempt {attempt.attempt_number}
           </span>
@@ -1110,10 +1191,13 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-4 text-sm text-gray-400">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-400">
           <span>{duration}</span>
           {attempt.model_id && (
-            <span className="font-mono text-xs">
+            /* `break-words` is the safety net for a long harness/model id,
+               which has no space to wrap at: it only engages when the id is
+               wider than the line, so desktop is untouched. */
+            <span className="font-mono text-xs min-w-0 break-words">
               {attempt.harness_id ? `${attempt.harness_id} · ` : ''}
               {attempt.model_id}
             </span>
