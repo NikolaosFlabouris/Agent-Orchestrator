@@ -38,6 +38,7 @@ import { ChartCard } from '../components/ChartCard.js';
 import { DurationDistributionChart } from '../components/DurationDistributionChart.js';
 import { FunnelChart } from '../components/FunnelChart.js';
 import { ActivityHeatmap } from '../components/ActivityHeatmap.js';
+import { useMediaQuery, SMALL_SCREEN } from '../hooks/useMediaQuery.js';
 import {
   formatDuration,
   formatPercent,
@@ -605,6 +606,10 @@ const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
 };
 
 function StatusBreakdown({ overview }: { overview: ReportsOverview }) {
+  // `interval={0}` forces a tick for every status, which collides into an
+  // unreadable smear on a 375px-wide chart; below `sm` let Recharts drop
+  // labels that don't fit (the bars stay, and the tooltip names each one).
+  const small = useMediaQuery(SMALL_SCREEN);
   const rows = (Object.entries(overview.status_counts) as [TaskStatus, number][])
     .filter(([, count]) => count > 0)
     .map(([status, count]) => ({ status, count }))
@@ -615,7 +620,7 @@ function StatusBreakdown({ overview }: { overview: ReportsOverview }) {
       <ResponsiveContainer width="100%" height={240}>
         <BarChart data={rows} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
           <CartesianGrid stroke={COLORS.grid} vertical={false} />
-          <XAxis dataKey="status" stroke={COLORS.axis} fontSize={10} tickLine={false} interval={0} angle={-25} textAnchor="end" height={60} />
+          <XAxis dataKey="status" stroke={COLORS.axis} fontSize={10} tickLine={false} interval={small ? 'preserveStartEnd' : 0} angle={-25} textAnchor="end" height={60} />
           <YAxis stroke={COLORS.axis} fontSize={11} tickLine={false} allowDecimals={false} />
           <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
           <Bar dataKey="count" name="Tasks" radius={[2, 2, 0, 0]}>
@@ -774,18 +779,38 @@ function LeaderboardSection({
               {LEADERBOARD_COLUMNS.map((col) => (
                 <th
                   key={col.key}
-                  className={`cursor-pointer py-2 pr-4 font-medium select-none hover:text-gray-300 ${
+                  scope="col"
+                  // The sort control is a real <button> so it is reachable and
+                  // operable from the keyboard; `aria-sort` on the cell tells
+                  // assistive tech which column is sorted, and which way.
+                  aria-sort={
+                    sortKey === col.key
+                      ? sortDir === 'asc'
+                        ? 'ascending'
+                        : 'descending'
+                      : 'none'
+                  }
+                  className={`py-2 pr-4 font-medium ${
                     col.numeric ? 'text-right' : ''
                   }`}
-                  onClick={() => onSort(col.key)}
                 >
-                  {col.label}
-                  {sortKey === col.key && (
-                    <span className="ml-1">{sortDir === 'asc' ? '▲' : '▼'}</span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => onSort(col.key)}
+                    className="cursor-pointer select-none border-0 bg-transparent p-0 hover:text-gray-300"
+                  >
+                    {col.label}
+                    {sortKey === col.key && (
+                      <span className="ml-1" aria-hidden="true">
+                        {sortDir === 'asc' ? '▲' : '▼'}
+                      </span>
+                    )}
+                  </button>
                 </th>
               ))}
-              <th className="py-2 pr-4 font-medium">Verdicts</th>
+              <th scope="col" className="py-2 pr-4 font-medium">
+                Verdicts
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -1100,13 +1125,13 @@ function ReliabilitySection({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wide text-gray-500">
-                  <th className="py-2 pr-4 font-medium">Repo</th>
-                  <th className="py-2 pr-4 text-right font-medium">Timeout</th>
-                  <th className="py-2 pr-4 text-right font-medium">Detected</th>
-                  <th className="py-2 pr-4 text-right font-medium">Recovered</th>
-                  <th className="py-2 pr-4 text-right font-medium">Exhausted</th>
-                  <th className="py-2 pr-4 text-right font-medium">Prep fail</th>
-                  <th className="py-2 pr-4 text-right font-medium">Deferred</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Repo</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Timeout</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Detected</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Recovered</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Exhausted</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Prep fail</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Deferred</th>
                 </tr>
               </thead>
               <tbody>
@@ -1281,13 +1306,15 @@ function AllTasksSection({
         </span>
       }
       actions={
-        <div className="flex flex-wrap items-center gap-2">
+        // `w-full` below `sm` so the search field's own `w-full` resolves
+        // against the header row rather than the field's intrinsic size.
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
           <input
             type="search"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search issue # or title…"
-            className="w-48 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 placeholder-gray-500"
+            className="w-full rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 placeholder-gray-500 sm:w-48"
           />
           <select
             value={status}
@@ -1333,14 +1360,14 @@ function AllTasksSection({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-800 text-left text-xs uppercase tracking-wide text-gray-500">
-                  <th className="py-2 pr-4 font-medium">Issue</th>
-                  <th className="py-2 pr-4 font-medium">Title</th>
-                  <th className="py-2 pr-4 font-medium">Repo</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 pr-4 font-medium">Model / harness</th>
-                  <th className="py-2 pr-4 text-right font-medium">Attempts</th>
-                  <th className="py-2 pr-4 font-medium">Created</th>
-                  <th className="py-2 pr-4 font-medium">Completed</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Issue</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Title</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Repo</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Status</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Model / harness</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-medium">Attempts</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Created</th>
+                  <th scope="col" className="py-2 pr-4 font-medium">Completed</th>
                 </tr>
               </thead>
               <tbody>
