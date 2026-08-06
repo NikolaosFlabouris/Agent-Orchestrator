@@ -761,12 +761,16 @@ export function TaskDetail() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
               />
             </div>
+            {/* `min-h-11` (44px) is the minimum comfortable touch target;
+                these presets only reach 26px and the confirm row 32px. Reset
+                at `sm` so the desktop modal keeps its original button
+                heights. */}
             <div className="flex gap-2 mb-4">
               {[1, 3, 5].map((n) => (
                 <button
                   key={n}
                   onClick={() => setExtendAmount(n)}
-                  className={`text-xs px-3 py-1 rounded border transition-colors ${
+                  className={`min-h-11 sm:min-h-0 text-xs px-3 py-1 rounded border transition-colors ${
                     extendAmount === n
                       ? 'border-blue-600 text-blue-300 bg-blue-950'
                       : 'border-gray-700 text-gray-400 hover:border-gray-600'
@@ -786,14 +790,14 @@ export function TaskDetail() {
               <button
                 onClick={closeExtendModal}
                 disabled={actionPending}
-                className="text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={handleExtend}
                 disabled={actionPending}
-                className="text-sm px-4 py-1.5 rounded border border-orange-700 text-orange-300 bg-orange-950/50 hover:bg-orange-950 disabled:opacity-50"
+                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5 rounded border border-orange-700 text-orange-300 bg-orange-950/50 hover:bg-orange-950 disabled:opacity-50"
               >
                 {actionPending ? 'Extending…' : 'Confirm'}
               </button>

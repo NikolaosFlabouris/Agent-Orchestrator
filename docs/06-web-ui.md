@@ -75,6 +75,24 @@ The Settings page has five tabs:
 
 **Credentials (read-only).** Shows which orchestrator-only env vars are set in `.env` (`FORGEJO_*`, `ORCHESTRATOR_URL`). Provider credentials are configured per-provider on the Providers & Models tab — this tab no longer enumerates LLM provider keys.
 
+## Responsive Layout
+
+Every route (`/`, `/reports`, `/tasks/:id`, `/tasks/new`, `/settings`, `/help`, `/signed-out`) is expected to render without document-level horizontal overflow down to **375px** — the narrowest mainstream phone. The desktop layout is the design target; small screens are a supported degradation of it, not a separate design.
+
+The conventions below apply to `packages/ui/src`. When adding UI, follow them rather than inventing a new pattern.
+
+**Mobile-first utilities, `sm:` / `lg:` restore the desktop layout.** Tailwind v4 runs zero-config, so the default breakpoints apply (`sm` 640px, `md` 768px, `lg` 1024px) and every variant is `min-width`. Write the phone rendering as the unprefixed base and reinstate the original desktop rendering at a prefixed variant — `flex flex-col … sm:flex-row`, `grid-cols-1 … sm:grid-cols-3`. Prefer `sm:` for the stack-vs-row switch in content and form grids; reserve `lg:` for the app shell, where the header's controls need the full desktop width. Both directions matter: an unprefixed utility that only makes sense on a phone will leak onto desktop.
+
+**Rows wrap, they don't shrink.** A `flex` row holding more than one child needs either `flex-wrap` (plus a `gap-y-*`, since a bare `gap-x` leaves wrapped lines touching) or `min-w-0` on the children that may shrink. A flex child defaults to `min-width: auto`, so without `min-w-0` a long issue title or an unbreakable model id widens the whole document instead of truncating. Pair `min-w-0` with `truncate` (ellipsis) or `break-words` (wrap mid-token) depending on whether the text must stay one line.
+
+**Wide tables scroll, they don't reflow.** Every `<table>` lives inside an `overflow-x-auto` wrapper, as does the activity heatmap, whose 24 hour-columns are fixed-width by construction. These containers scroll *themselves* on a phone — that is the intended behaviour, and a horizontal scrollbar inside one of them is not an overflow bug. The same trick caps the Settings and Create Task tab bars (`w-fit max-w-full overflow-x-auto`), so pills past the right edge stay reachable. Only the document must never scroll sideways.
+
+**The AppHeader collapses below `lg`.** `AppHeader` renders one row: a left column (back link, title, meta) and a right column of view-specific controls plus the user chip and Sign out. That right column does not fit under 1024px, so below `lg` everything except the connection indicator moves into a disclosure panel hung off the bottom of the sticky header, toggled by a hamburger button. The controls are not duplicated in the source — one copy of `children` is switched with `hidden` / `lg:contents`, so at `lg` and above the cluster is exactly the row it has always been, and the hidden copy is out of both the layout and the accessibility tree. The panel also sizes its own links, buttons, and inputs to the 44px touch target, so views pass their controls in with desktop styling and get phone sizing for free.
+
+**Touch targets are ≥44px, and only on touch widths.** Controls a phone user taps carry `min-h-11` (44px) with `sm:min-h-0` resetting the desktop height, or padding written as `py-3 sm:py-2`. Where padding would shift the desktop layout sideways, an absolutely-positioned `::after` inflates the hit area instead without changing the rendered box — see the queue drag handle in `QueueList.tsx`. Table sort headers are the deliberate exception: they sit inside a horizontally scrolling table where a 44px row would change every desktop row's height.
+
+**JS width-awareness goes through `useMediaQuery`.** Tailwind classes cover layout, but a few values are plain JavaScript — Recharts axis widths, tick intervals, chart heights. `packages/ui/src/hooks/useMediaQuery.ts` exports `useMediaQuery(query)` (a `useSyncExternalStore` wrapper over `matchMedia`, re-rendering exactly when the breakpoint is crossed) and the `SMALL_SCREEN` constant for "below `sm`". It returns `false` when `matchMedia` is unavailable, so phrase queries such that `false` means the desktop rendering. Charts themselves size with `<ResponsiveContainer width="100%">` — never a fixed pixel width.
+
 ## Orchestrator API
 
 The UI consumes the following REST and WebSocket endpoints:
