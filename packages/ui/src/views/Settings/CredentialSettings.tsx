@@ -29,9 +29,17 @@ export function CredentialSettings() {
         // credentials, so just using it would collide for every
         // orchestrator row. Including scope+name disambiguates.
         key={`${cred.scope}-${cred.name}-${cred.provider_id ?? ''}`}
-        className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3"
+        /* Env-var names plus the "for provider …" suffix run past 375px,
+           so the row wraps and the status keeps its own end of the line
+           rather than being pushed off-screen. Wide viewports never wrap,
+           and `gap-2` only shows once the two halves would otherwise
+           touch — so the desktop row is unchanged. */
+        className="flex flex-wrap items-center justify-between gap-2 bg-gray-900 border border-gray-800 rounded p-3"
       >
-        <div>
+        {/* `min-w-0` lets this block shrink below its content width inside
+            the flex row, and `break-words` keeps a long env-var name from
+            spilling past the card. */}
+        <div className="min-w-0 break-words">
           <span className="font-mono text-sm">{cred.name}</span>
           {cred.provider_id && (
             <span className="text-gray-500 text-xs ml-2">
@@ -40,9 +48,9 @@ export function CredentialSettings() {
           )}
         </div>
         {cred.configured ? (
-          <span className="text-green-400 text-sm">configured</span>
+          <span className="shrink-0 text-green-400 text-sm">configured</span>
         ) : (
-          <span className="text-red-400 text-sm">not set</span>
+          <span className="shrink-0 text-red-400 text-sm">not set</span>
         )}
       </div>
     );

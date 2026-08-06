@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../../api.js';
 import { useStore } from '../../store.js';
 import type {
@@ -22,6 +22,13 @@ const INSTALL_STEP_KINDS: InstallStepKind[] = [
   'go-mod-download',
 ];
 
+/** Hit-area padding for the inline text buttons that sit in a list row
+ *  or a compact editor line. The negative margin cancels the padding's
+ *  effect on layout, so only the tappable area grows: 20px of `text-sm`
+ *  plus 2×12px reaches the 44px minimum. Dropped from `sm` up, where a
+ *  pointer is the likely input device and the rows keep their density. */
+const TOUCH_TARGET_Y = '-my-3 py-3 sm:my-0 sm:py-0';
+
 /** Repositories tab — per-repo profile/branch/memory/cpu/merge config
  *  and the install-steps editor. */
 export function RepoSettings() {
@@ -32,6 +39,15 @@ export function RepoSettings() {
   const [isNew, setIsNew] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const profilesVersion = useStore((s) => s.resourceVersions.profiles);
+  // One id root for this tab's label/control pairs.
+  const uid = useId();
+  const repoSelectId = `${uid}-repo`;
+  const baseBranchId = `${uid}-base-branch`;
+  const implProfileId = `${uid}-impl-profile`;
+  const reviewProfileId = `${uid}-review-profile`;
+  const memoryId = `${uid}-memory`;
+  const cpuId = `${uid}-cpu`;
+  const mergeStrategyId = `${uid}-merge-strategy`;
 
   useEffect(() => {
     api.getRepos().then((r) => setRepos(r.repos)).catch(() => {});
@@ -72,11 +88,19 @@ export function RepoSettings() {
           ? profiles.find((p) => p.id === repo.review_agent_profile_id)
           : null;
         return (
+          /* Below `sm` the profile summary alone is wider than the row, so
+             a single line would either squeeze Edit off-screen or stretch
+             the document; stacking puts the button on its own line where
+             it stays reachable. From `sm` up the row is the original
+             centred, space-between line. */
           <div
             key={repo.id}
-            className="bg-gray-900 border border-gray-800 rounded p-4 flex items-center justify-between"
+            className="bg-gray-900 border border-gray-800 rounded p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
           >
-            <div>
+            {/* `min-w-0` lets this block shrink below its content width
+                inside the flex row, and `break-words` keeps an unbroken
+                owner/name pair from spilling past the card. */}
+            <div className="min-w-0 break-words">
               <span className="font-medium">
                 {repo.owner}/{repo.name}
               </span>
@@ -97,8 +121,10 @@ export function RepoSettings() {
               )}
             </div>
             <button
+              type="button"
               onClick={() => { setEditing({ ...repo }); setIsNew(false); }}
-              className="text-sm text-blue-400 hover:text-blue-300"
+              aria-label={`Edit ${repo.owner}/${repo.name}`}
+              className={`self-start sm:self-auto shrink-0 text-sm text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y}`}
             >
               Edit
             </button>
@@ -107,6 +133,7 @@ export function RepoSettings() {
       })}
 
       <button
+        type="button"
         onClick={() => {
           setEditing({
             base_branch: 'main',
@@ -119,7 +146,7 @@ export function RepoSettings() {
           setIsNew(true);
           api.getAvailableRepos().then((r) => setAvailableRepos(r.repos)).catch(() => {});
         }}
-        className="text-sm text-blue-400 hover:text-blue-300"
+        className="min-h-11 sm:min-h-0 text-sm text-blue-400 hover:text-blue-300"
       >
         + Add repository
       </button>
@@ -134,12 +161,19 @@ export function RepoSettings() {
               {error}
             </div>
           )}
-          <div className="grid grid-cols-2 gap-4">
+          {/* `min-w-0` on every cell: a grid item's automatic minimum size
+              is its content's min-content width, and a select sized by its
+              longest option is far wider than a 375px column. `col-span-2`
+              has to be `sm:`-prefixed too — spanning two columns in the
+              one-column mobile grid would create an implicit second column
+              and push the form off-screen. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {isNew && (
-              <div className="col-span-2">
-                <label className="block text-sm mb-1">Repository</label>
+              <div className="min-w-0 sm:col-span-2">
+                <label htmlFor={repoSelectId} className="block text-sm mb-1">Repository</label>
                 {availableRepos.length > 0 ? (
                   <select
+                    id={repoSelectId}
                     value={editing.owner && editing.name ? `${editing.owner}/${editing.name}` : ''}
                     onChange={(e) => {
                       const selected = availableRepos.find((r) => r.full_name === e.target.value);
@@ -159,19 +193,21 @@ export function RepoSettings() {
                 )}
               </div>
             )}
-            <div>
-              <label className="block text-sm mb-1">Base branch</label>
+            <div className="min-w-0">
+              <label htmlFor={baseBranchId} className="block text-sm mb-1">Base branch</label>
               <input
+                id={baseBranchId}
                 value={editing.base_branch ?? 'main'}
                 onChange={(e) => setEditing({ ...editing, base_branch: e.target.value })}
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-sm mb-1">
+            <div className="min-w-0">
+              <label htmlFor={implProfileId} className="block text-sm mb-1">
                 Default implementation profile
               </label>
               <select
+                id={implProfileId}
                 value={editing.agent_profile_id ?? ''}
                 onChange={(e) =>
                   setEditing({
@@ -205,11 +241,12 @@ export function RepoSettings() {
                   </p>
                 )}
             </div>
-            <div>
-              <label className="block text-sm mb-1">
+            <div className="min-w-0">
+              <label htmlFor={reviewProfileId} className="block text-sm mb-1">
                 Default review profile
               </label>
               <select
+                id={reviewProfileId}
                 value={editing.review_agent_profile_id ?? ''}
                 onChange={(e) =>
                   setEditing({
@@ -248,9 +285,10 @@ export function RepoSettings() {
                   </p>
                 )}
             </div>
-            <div>
-              <label className="block text-sm mb-1">Memory (MB)</label>
+            <div className="min-w-0">
+              <label htmlFor={memoryId} className="block text-sm mb-1">Memory (MB)</label>
               <input
+                id={memoryId}
                 type="number"
                 value={editing.container_memory_mb ?? ''}
                 onChange={(e) => setEditing({ ...editing, container_memory_mb: e.target.value ? parseInt(e.target.value, 10) : null })}
@@ -258,9 +296,10 @@ export function RepoSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-sm mb-1">CPU cores</label>
+            <div className="min-w-0">
+              <label htmlFor={cpuId} className="block text-sm mb-1">CPU cores</label>
               <input
+                id={cpuId}
                 type="number"
                 value={editing.container_cpu_cores ?? ''}
                 onChange={(e) => setEditing({ ...editing, container_cpu_cores: e.target.value ? parseInt(e.target.value, 10) : null })}
@@ -268,12 +307,13 @@ export function RepoSettings() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
               />
             </div>
-            <div className="col-span-2">
-              <label className="block text-sm mb-1">
+            <div className="min-w-0 sm:col-span-2">
+              <label htmlFor={mergeStrategyId} className="block text-sm mb-1">
                 Merge strategy
                 <span className="text-gray-500 font-normal"> — preferred PR merge style; resolved against the repo's Forgejo-side allowed list at merge time</span>
               </label>
               <select
+                id={mergeStrategyId}
                 value={editing.merge_strategy ?? 'squash'}
                 onChange={(e) =>
                   setEditing({
@@ -303,16 +343,21 @@ export function RepoSettings() {
               setEditing(next);
             }}
           />
+          {/* `min-h-11` (44px) is the minimum comfortable touch target;
+              `px-4 py-2` only reaches 36px. Reset at `sm` so the desktop
+              buttons keep their original height. */}
           <div className="flex gap-3">
             <button
+              type="button"
               onClick={handleSave}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+              className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
             >
               Save
             </button>
             <button
+              type="button"
               onClick={() => { setEditing(null); setIsNew(false); setError(null); }}
-              className="text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
+              className="min-h-11 sm:min-h-0 text-gray-400 hover:text-gray-200 px-4 py-2 text-sm"
             >
               Cancel
             </button>
@@ -334,6 +379,12 @@ function InstallStepsEditor({
   onChangeSteps: (steps: InstallStep[]) => void;
   onChangeAllowScript: (allow: boolean) => void;
 }) {
+  const uid = useId();
+  // The heading labels the whole editor rather than one control, so it is
+  // a group label (see the `role="group"` below) and the per-step controls
+  // carry their own names.
+  const groupLabelId = `${uid}-install-steps`;
+
   function updateStep(idx: number, next: InstallStep) {
     const copy = [...steps];
     copy[idx] = next;
@@ -349,24 +400,30 @@ function InstallStepsEditor({
   }
 
   return (
-    <div className="space-y-2">
-      <label className="block text-sm font-medium">
+    <div className="space-y-2" role="group" aria-labelledby={groupLabelId}>
+      <div id={groupLabelId} className="text-sm font-medium">
         Install steps
         <span className="text-gray-500 font-normal">
           {' '}— run sequentially before the agent, under a shared cache lock
         </span>
-      </label>
+      </div>
       {steps.length === 0 && (
         <p className="text-xs text-gray-500">
           No install steps configured. The agent will start without dependency install.
         </p>
       )}
       {steps.map((step, i) => (
+        /* A `w-56` select plus two `flex-1` inputs plus the remove button
+           cannot share one line at 375px. Below `sm` each control takes a
+           full line of the wrapped row instead; from `sm` up every child
+           reverts to its original width and the row is the single line it
+           has always been. */
         <div
           key={i}
-          className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded p-2"
+          className="flex flex-wrap items-center gap-2 bg-gray-800 border border-gray-700 rounded p-2"
         >
           <select
+            aria-label={`Install step ${i + 1} kind`}
             value={step.kind}
             onChange={(e) => {
               const newKind = e.target.value as InstallStepKind | 'script';
@@ -376,7 +433,7 @@ function InstallStepsEditor({
                 updateStep(i, { kind: newKind, cwd: step.cwd });
               }
             }}
-            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono w-56 shrink-0"
+            className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono min-w-0 w-full sm:w-56 shrink-0"
           >
             {INSTALL_STEP_KINDS.map((k) => (
               <option key={k} value={k}>{INSTALL_STEP_LABELS[k]}</option>
@@ -388,23 +445,29 @@ function InstallStepsEditor({
           {step.kind === 'script' && (
             <input
               type="text"
+              aria-label={`Install step ${i + 1} script path`}
               value={(step as { path: string }).path}
               onChange={(e) => updateStep(i, { ...step, path: e.target.value })}
               placeholder="scripts/setup.sh (relative to cwd)"
-              className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
+              className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
             />
           )}
           <input
             type="text"
+            aria-label={`Install step ${i + 1} working directory`}
             value={step.cwd ?? ''}
             onChange={(e) => updateStep(i, { ...step, cwd: e.target.value || undefined })}
             placeholder="cwd (relative to /repo, optional)"
-            className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
+            className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono"
           />
+          {/* `ml-auto` parks the × at the right end of its own wrapped
+              line on mobile; from `sm` the flex-1 inputs already consume
+              the free space, so it is dropped and nothing moves. */}
           <button
             type="button"
             onClick={() => removeStep(i)}
-            className="text-red-400 hover:text-red-300 px-2 text-sm"
+            className="ml-auto sm:ml-0 min-h-11 min-w-11 sm:min-h-0 sm:min-w-0 text-red-400 hover:text-red-300 px-2 text-sm"
+            aria-label={`Remove install step ${i + 1}`}
             title="Remove step"
           >
             ×
@@ -413,13 +476,14 @@ function InstallStepsEditor({
       ))}
       <div className="flex items-center gap-2">
         <select
+          aria-label="Add install step"
           value=""
           onChange={(e) => {
             if (!e.target.value) return;
             addStep(e.target.value as InstallStepKind | 'script');
             e.target.value = '';
           }}
-          className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+          className="min-w-0 max-w-full min-h-11 sm:min-h-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
         >
           <option value="">+ Add install step…</option>
           {INSTALL_STEP_KINDS.map((k) => (
