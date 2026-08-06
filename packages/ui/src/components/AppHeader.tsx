@@ -33,6 +33,20 @@ export interface AppHeaderProps {
   children?: ReactNode;
 }
 
+/** Touch sizing for the disclosure panel's controls. The views hand the
+ *  same `children` to both the desktop row and the panel, so a view-level
+ *  `min-h-11` would also stretch the desktop header; applying it here — on
+ *  a container that is `lg:hidden` — reaches only the phone rendering, and
+ *  covers every call site at once (export buttons, nav links, the pause
+ *  toggle, Sign out) instead of six near-identical per-view edits.
+ *  `flex`+`items-center` so the 44px box centres its own label rather than
+ *  leaving the text on the top edge; inputs are replaced elements and take
+ *  the height alone. */
+const PANEL_TOUCH_TARGETS =
+  '[&_a]:flex [&_a]:min-h-11 [&_a]:items-center ' +
+  '[&_button]:flex [&_button]:min-h-11 [&_button]:items-center ' +
+  '[&_input]:min-h-11';
+
 export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -107,7 +121,7 @@ export function AppHeader({ back, title, meta, children }: AppHeaderProps) {
              `-mx-6` against the header's own px-6. `lg:hidden` so a
              resize to desktop can't leave a stray panel on screen while
              the (hidden) toggle still reads as expanded. */
-          className="lg:hidden -mx-6 mt-4 flex flex-col items-start gap-4 border-t border-gray-800 bg-gray-900 px-6 py-4 text-sm"
+          className={`lg:hidden -mx-6 mt-4 flex flex-col items-start gap-4 border-t border-gray-800 bg-gray-900 px-6 py-4 text-sm ${PANEL_TOUCH_TARGETS}`}
         >
           {children}
           <UserChip />

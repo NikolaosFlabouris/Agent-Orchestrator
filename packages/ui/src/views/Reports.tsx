@@ -392,23 +392,34 @@ function FilterBar({
   return (
     <div className="border-b border-gray-800 bg-gray-900/60 px-6 py-3">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-3">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-xs uppercase tracking-wide text-gray-500">From</span>
-          <input
-            type="date"
-            value={from}
-            max={to}
-            onChange={(e) => onFromChange(e.target.value)}
-            className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
-          />
-          <span className="text-xs uppercase tracking-wide text-gray-500">To</span>
-          <input
-            type="date"
-            value={to}
-            min={from}
-            onChange={(e) => onToChange(e.target.value)}
-            className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
-          />
+        {/* Two native date inputs are ~135px each in Chrome and have no
+            shrinkable intrinsic width, so label + input + label + input is
+            ~345px against the 327px available at 375px — the row overflowed
+            the document. Each label now travels with its own input in a
+            non-wrapping subgroup and the pair wraps between the subgroups.
+            The subgroup gap matches the old flat `gap-2`, so at any width
+            that fits one line the row is the same box as before. */}
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-gray-500">From</span>
+            <input
+              type="date"
+              value={from}
+              max={to}
+              onChange={(e) => onFromChange(e.target.value)}
+              className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-gray-500">To</span>
+            <input
+              type="date"
+              value={to}
+              min={from}
+              onChange={(e) => onToChange(e.target.value)}
+              className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-sm text-gray-200"
+            />
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -882,6 +893,9 @@ function RepoScorecard({ board }: { board: ReportsLeaderboard }) {
             <div className="mb-3 truncate font-mono text-sm text-gray-200" title={row.label}>
               {row.label}
             </div>
+            {/* Unprefixed `grid-cols-2` on purpose: each stat stacks a
+                short uppercase `text-xs` label over its value, so the pair
+                still fits the ~130px column a 375px screen leaves here. */}
             <dl className="grid grid-cols-2 gap-y-2 text-sm">
               <ScoreStat label="Throughput" value={formatNumber(row.task_count)} />
               <ScoreStat label="Success" value={formatPercent(row.success_rate)} />
@@ -1378,7 +1392,14 @@ function AllTasksSection({
             </table>
           </div>
 
-          <div className="mt-4 flex items-center justify-between text-xs text-gray-400">
+          {/* This row sits outside the table's `overflow-x-auto`, so it
+              widens the document rather than scrolling: the counter plus the
+              Prev/page/Next cluster is ~320px against the ~295px a 375px
+              screen leaves inside the card. Wrapping drops the cluster onto
+              its own line there; `justify-between` already spreads the two
+              far wider than `gap-x-3` on any width that fits one line, so
+              desktop is unchanged. */}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-xs text-gray-400">
             <span>
               {total > 0
                 ? `Showing ${shownFrom}–${shownTo} of ${formatNumber(total)}`
