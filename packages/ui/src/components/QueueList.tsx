@@ -4,20 +4,55 @@ import {
   DndContext,
   closestCenter,
   PointerSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   useDraggable,
   useDroppable,
 } from '@dnd-kit/core';
-import type { DragEndEvent } from '@dnd-kit/core';
+import type { DragEndEvent, PointerSensorOptions } from '@dnd-kit/core';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useStore } from '../store.js';
 import { api } from '../api.js';
 import type { TaskResponse } from '../api.js';
 
+/** `PointerSensor` answers to touch as well as mouse and pen, which makes it
+ *  unusable as-is next to a `TouchSensor`: a finger fires `pointerdown` AND
+ *  `touchstart`, and dnd-kit instantiates a sensor per activator without
+ *  deduplicating them. Both would then run — the pointer one starting a
+ *  reorder after 5px of movement, i.e. exactly the scroll-stealing behaviour
+ *  the touch sensor's press delay exists to prevent, and dispatching a second
+ *  drag start when the delay later elapses. Narrowing the activator to
+ *  non-touch pointers hands touch to the `TouchSensor` alone and leaves
+ *  mouse and pen input on the original code path. */
+class NonTouchPointerSensor extends PointerSensor {
+  static activators = [
+    {
+      eventName: 'onPointerDown' as const,
+      handler: (event: ReactPointerEvent, options: PointerSensorOptions) =>
+        event.nativeEvent.pointerType !== 'touch' &&
+        PointerSensor.activators[0].handler(event, options),
+    },
+  ];
+}
+
 export function QueueList({ tasks }: { tasks: TaskResponse[] }) {
   const [items, setItems] = useState(tasks);
+  // Two sensors, two very different activation rules. The pointer sensor
+  // keeps its 5px distance constraint — with a mouse, a small drag is
+  // unambiguous. On touch, "moved 5px" is indistinguishable from the start
+  // of a page scroll, so the touch sensor instead requires a 250ms press
+  // held within 5px: below that the browser keeps the gesture and the page
+  // scrolls normally, and only a deliberate press-and-hold starts a
+  // reorder. (The handle is also left without `touch-action: none` for the
+  // same reason — the browser must stay free to claim a scroll.)
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+    useSensor(NonTouchPointerSensor, {
+      activationConstraint: { distance: 5 },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 250, tolerance: 5 },
+    })
   );
 
   // Sync local optimistic state with the parent's task list whenever
@@ -124,7 +159,16 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
         {...listeners}
         role="button"
         aria-label="Drag to reorder queue position"
-        className="text-gray-600 select-none cursor-grab active:cursor-grabbing px-1"
+        /* The glyph's own box is only ~17x24px (line-height 1.5 on 16px
+           text) — well under the 44x44px comfortable touch target. Rather
+           than pad the span, which would widen the handle column and shift
+           every row's content sideways on desktop, an empty
+           absolutely-positioned ::after inflates the hit area to ~45x48px
+           across the row's own padding. Pointer and touch events landing on
+           a pseudo-element are dispatched to its originating element, so
+           the drag listeners on this span receive them, and nothing about
+           the rendered layout changes at any width. */
+        className="relative text-gray-600 select-none cursor-grab active:cursor-grabbing px-1 after:absolute after:-inset-x-3.5 after:-inset-y-3 after:content-['']"
       >
         ::
       </span>
@@ -138,9 +182,13 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
             goToTask();
           }
         }}
-        className="flex-1 flex items-center justify-between cursor-pointer"
+        /* `min-w-0` so the flex child may actually shrink (its default
+           `min-width: auto` is what let a long issue title push the position
+           metadata off-screen), and the row splits into two stacked lines
+           below `sm` — `sm:` reinstates the original single row. */
+        className="min-w-0 flex-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-0 cursor-pointer"
       >
-        <div>
+        <div className="min-w-0 truncate">
           {issueHref ? (
             <a
               href={issueHref}
@@ -163,7 +211,7 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
             </span>
           )}
         </div>
-        <div className="text-sm text-gray-400 flex items-center gap-2">
+        <div className="text-sm text-gray-400 flex flex-wrap items-center gap-x-2 gap-y-1 sm:flex-nowrap">
           {task.blocked && (
             <span
               className="px-2 py-0.5 rounded text-xs font-medium bg-amber-900 text-amber-300"

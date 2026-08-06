@@ -222,13 +222,17 @@ export function Dashboard() {
              return (
                <span
                  key={p.id}
-                 className={
+                 /* `break-words` only engages when a single provider name is
+                    wider than the strip, so desktop is untouched; without it
+                    a long unbroken display name widens the document at
+                    375px instead of wrapping. */
+                 className={`min-w-0 break-words ${
                    isPaused
                      ? 'text-yellow-400'
                      : full
                        ? 'text-orange-400'
                        : 'text-gray-300'
-                 }
+                 }`}
                  title={
                    isPaused
                      ? `${p.display_name}: paused (concurrency_limit = 0)`
@@ -254,7 +258,10 @@ export function Dashboard() {
                href={`${forgejoBaseUrl}/${r.owner}/${r.name}`}
                target="_blank"
                rel="noreferrer noopener"
-               className="text-gray-300 hover:text-blue-300"
+               /* Same rationale as the Pools strip: `owner/name` has no
+                  natural break opportunity, so a long repo slug would
+                  overflow the viewport rather than wrap. */
+               className="min-w-0 break-words text-gray-300 hover:text-blue-300"
              >
                {r.owner}/{r.name} ↗
              </a>
@@ -385,7 +392,10 @@ function ToolChip({ task }: { task: TaskResponse }) {
   return (
     <>
       <span
-        className={`text-xs font-mono truncate ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
+        /* `truncate` is whitespace-nowrap, so without `max-w-full` a long
+           profile name is free to push past the card edge at 375px — the
+           cap only binds below the widths desktop ever reaches. */
+        className={`text-xs font-mono truncate max-w-full ${isOverride ? 'text-blue-400' : 'text-gray-500'}`}
         title={`${name} (${sourceLabel})`}
       >
         {isOverride && <span className="mr-0.5">•</span>}
@@ -393,7 +403,7 @@ function ToolChip({ task }: { task: TaskResponse }) {
       </span>
       {reviewDiffers && (
         <span
-          className={`text-xs font-mono truncate ${reviewIsOverride ? 'text-blue-400' : 'text-gray-500'}`}
+          className={`text-xs font-mono truncate max-w-full ${reviewIsOverride ? 'text-blue-400' : 'text-gray-500'}`}
           title={`Review: ${reviewName} (${reviewSourceLabel})`}
         >
           ⮑ {reviewTruncated}
@@ -434,16 +444,23 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
       }}
       className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer"
     >
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      {/* Below `sm` the metadata cluster gets its own line under the title
+          instead of being squeezed against it; `sm:` restores the original
+          single centred row (flex `gap: normal` computes to 0, so
+          `sm:gap-0` is the same box the row has always had). */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-0">
+        <div className="flex min-w-0 items-center gap-2">
           {task.health === 'orphaned' && (
             <span
-              className="inline-block w-2 h-2 rounded-full bg-orange-400"
+              className="inline-block shrink-0 w-2 h-2 rounded-full bg-orange-400"
               title="Orphaned — container has disappeared. Orchestrator will attempt recovery."
               aria-label="Orphaned"
             />
           )}
-          <div>
+          {/* `min-w-0` lets this block shrink inside the flex row and
+              `truncate` ends the line with an ellipsis rather than pushing
+              the issue title (and the metadata behind it) off-screen. */}
+          <div className="min-w-0 truncate">
             {issueHref ? (
               <a
                 href={issueHref}
@@ -467,7 +484,10 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-4 text-sm">
+        {/* Wraps internally at 375px (tool chip / badge / attempt / elapsed
+            are four separate items); `sm:flex-nowrap` plus the unchanged
+            4-unit column gap keeps the desktop row identical. */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm sm:flex-nowrap">
           <ToolChip task={task} />
           <StatusBadge status={task.status} label={phaseLabel[task.status]} />
           <span className="text-gray-400">
@@ -508,9 +528,9 @@ function CompletedItem({ task }: { task: TaskResponse }) {
           goToTask();
         }
       }}
-      className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors cursor-pointer"
+      className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-0 bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors cursor-pointer"
     >
-      <div>
+      <div className="min-w-0 truncate">
         {issueHref ? (
           <a
             href={issueHref}
@@ -528,7 +548,7 @@ function CompletedItem({ task }: { task: TaskResponse }) {
         )}{' '}
         <span>{task.issue_title}</span>
       </div>
-      <div className="flex items-center gap-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm sm:flex-nowrap">
         <ToolChip task={task} />
         <StatusBadge status={task.status} />
         <span className="text-gray-500">
@@ -585,7 +605,13 @@ function KpiStrip() {
         >
           Last 30 days ↗
         </Link>
-        <div className="grid flex-1 grid-cols-3 gap-3">
+        {/* Below `sm` the three tiles cannot sit side by side at 375px —
+            "Success rate" alone wraps its label at a third of that width —
+            so they stack, and `w-full` (no flex-basis of 0) pushes the grid
+            onto its own wrapped line under the "Last 30 days" link. From
+            `sm` up, `sm:w-auto sm:flex-1` restores the original
+            `flex-1 grid-cols-3` row exactly. */}
+        <div className="grid w-full grid-cols-1 gap-3 sm:w-auto sm:flex-1 sm:grid-cols-3">
           <KpiCard
             compact
             label="Merged"
