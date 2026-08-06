@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useId, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ACTIVE_STATUSES, useStore } from '../store.js';
 import { api } from '../api.js';
 import type { StatusResponse, TaskResponse, RepoResponse } from '../api.js';
@@ -13,15 +13,53 @@ import { formatNumber, formatPercent } from '../components/reportFormat.js';
 import { defaultRange, previousRange } from '../components/reportFilter.js';
 import type { ReportsOverview } from '@orchestrator/shared';
 
-// Cap on the homepage Recent list. The full, paginated history lives on the
-// Reports "All tasks" browser (linked via "View all"); the Active and Queue
-// sections stay unbounded as they're operationally important. Tune freely.
-const RECENT_LIMIT = 10;
+// Cap on the homepage Recent list, chosen by the operator from the select in
+// the Recent header. The full, paginated history lives on the Reports "All
+// tasks" browser (linked via "View all"); the Active and Queue sections stay
+// unbounded as they're operationally important. Tune freely.
+const RECENT_LIMIT_OPTIONS = [5, 10, 20, 50, 100];
+const DEFAULT_RECENT_LIMIT = 10;
 
 // `limit` sent with the /api/tasks refresh — the same value the route
 // defaults to, stated explicitly because `syncTasks` needs to know it to
 // tell a complete response from a truncated one before it prunes anything.
 const TASKS_FETCH_LIMIT = 20;
+
+/** How many rows the /api/tasks poll asks for, given the Recent selection.
+ *  The route truncates only the completed bucket to `limit`, so a selection
+ *  above the default has to be requested explicitly or the list can never
+ *  fill; smaller selections keep asking for the default so shrinking the
+ *  list doesn't throw away rows the store already holds. Exported for the
+ *  unit test that pins the fetch-limit/`completedLimit` equality. */
+export function tasksFetchLimit(recentLimit: number): number {
+  return Math.max(TASKS_FETCH_LIMIT, recentLimit);
+}
+
+/** One /api/tasks refresh. Lives outside the component because the poll
+ *  interval (created once, on mount) calls it with whatever the current
+ *  selection is, rather than the one captured when the interval was set up.
+ *
+ *  The REST response overlays the Forgejo-derived status over the raw
+ *  `tasks.status` the WS snapshot carries, so closed-issue/merged-PR reality
+ *  overrides stale local rows.
+ *
+ *  `syncTasks` (not a per-row updateTask loop): it upserts, so this poll
+ *  heals a `task_created` event we never received, and it converges on the
+ *  server's view instead of only ever growing. The id set is captured BEFORE
+ *  the request so a task created over the WebSocket while it's in flight
+ *  isn't pruned by a response that predates it; the limit lets syncTasks
+ *  refuse to prune from a truncated response — which is why the value sent
+ *  as `limit` and the one passed as `completedLimit` must be identical.
+ *  See syncTasks for the full rule. */
+export function refreshTasks(recentLimit: number) {
+  const { tasks, syncTasks } = useStore.getState();
+  const knownIds = new Set(tasks.map((t) => t.id));
+  const limit = tasksFetchLimit(recentLimit);
+  api
+    .getTasks({ limit })
+    .then((res) => syncTasks(res.tasks, { knownIds, completedLimit: limit }))
+    .catch(() => {});
+}
 
 export function Dashboard() {
   // Selector-based subscriptions: each call subscribes only to its
@@ -48,6 +86,15 @@ export function Dashboard() {
 
   const [pools, setPools] = useState<StatusResponse['providers']>([]);
   const [repos, setRepos] = useState<RepoResponse[]>([]);
+  // How many completed tasks the Recent list shows. Deliberately not
+  // persisted — a fresh load starts at the default.
+  const [recentLimit, setRecentLimit] = useState(DEFAULT_RECENT_LIMIT);
+  const recentLimitSelectId = useId();
+  // The task poll is an interval created once on mount, so its callback
+  // reads the selection through a ref instead of closing over it. Putting
+  // `recentLimit` in that effect's deps would instead tear down and rebuild
+  // both polls (resetting their clocks) on every change of the select.
+  const recentLimitRef = useRef(recentLimit);
 
   useEffect(() => {
     // Actions are pulled from `getState()` inside the effect so we
@@ -58,7 +105,7 @@ export function Dashboard() {
     // The dashboard WebSocket is NOT opened here — it's owned app-wide by
     // <LiveData> in main.tsx so it survives navigation. This effect only
     // owns the REST polls, which are per-view.
-    const { setForgejoBaseUrl, setHostPool: setHostPoolFn, syncTasks } =
+    const { setForgejoBaseUrl, setHostPool: setHostPoolFn } =
       useStore.getState();
 
     // Both timers below are RECONCILIATION BACKSTOPS, not the data path.
@@ -96,35 +143,14 @@ export function Dashboard() {
     refresh();
     const timer = window.setInterval(refresh, STATUS_POLL_MS);
 
-    // Pull the task list through the REST API as well. The dashboard WS
-    // snapshot returns raw `tasks.status` (runtime state), whereas the REST
-    // response overlays the Forgejo-derived status so closed-issue/merged-PR
-    // reality overrides stale local `failed` rows. Refresh on mount and
-    // every TASKS_POLL_MS so driver-label / issue-closure changes reach the
-    // UI even if a webhook was dropped.
-    //
-    // `syncTasks` (not a per-row updateTask loop): it upserts, so this poll
-    // heals a `task_created` event we never received, and it converges on the
-    // server's view instead of only ever growing.
-    //
-    // The id set is captured BEFORE the request so a task created over the
-    // WebSocket while it's in flight isn't pruned by a response that predates
-    // it; the limit lets syncTasks refuse to prune from a truncated response.
-    // See syncTasks for the full rule.
-    const refreshTasks = () => {
-      const knownIds = new Set(useStore.getState().tasks.map((t) => t.id));
-      api
-        .getTasks({ limit: TASKS_FETCH_LIMIT })
-        .then((res) =>
-          syncTasks(res.tasks, {
-            knownIds,
-            completedLimit: TASKS_FETCH_LIMIT,
-          })
-        )
-        .catch(() => {});
-    };
-    refreshTasks();
-    const tasksTimer = window.setInterval(refreshTasks, TASKS_POLL_MS);
+    // Pull the task list through the REST API as well, every TASKS_POLL_MS,
+    // so driver-label / issue-closure changes reach the UI even if a webhook
+    // was dropped. (The refresh ON mount is owned by the `recentLimit`
+    // effect below, which also runs on every change of the selection.)
+    const tasksTimer = window.setInterval(
+      () => refreshTasks(recentLimitRef.current),
+      TASKS_POLL_MS
+    );
 
     // Fetch repos once on mount for the Repos strip
     api.getRepos().then((res) => setRepos(res.repos)).catch(() => {});
@@ -134,6 +160,14 @@ export function Dashboard() {
       window.clearInterval(tasksTimer);
     };
   }, []);
+
+  // Fetch on mount, and again whenever the Recent selection changes: picking
+  // a larger count has to fill the list now, not at the next poll tick, and
+  // the store may hold fewer completed rows than the new selection.
+  useEffect(() => {
+    recentLimitRef.current = recentLimit;
+    refreshTasks(recentLimit);
+  }, [recentLimit]);
 
   // Agent profile list is held in the store for display in task rows.
   // Subscribe to the version counter and refetch when it ticks; runs
@@ -160,7 +194,7 @@ export function Dashboard() {
       if (bNull) return 1;
       return b.completed_at!.localeCompare(a.completed_at!);
     });
-  const recentTasks = completedTasks.slice(0, RECENT_LIMIT);
+  const recentTasks = completedTasks.slice(0, recentLimit);
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -315,16 +349,40 @@ export function Dashboard() {
           )}
         </section>
 
-        {/* Recent completions — capped at RECENT_LIMIT; the full history
-            lives on the Reports "All tasks" browser. */}
+        {/* Recent completions — capped at the operator's selection; the full
+            history lives on the Reports "All tasks" browser. */}
         <section>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-medium">
-              Recent
-              {completedTasks.length > RECENT_LIMIT
-                ? ` (${recentTasks.length} of ${completedTasks.length})`
-                : ` (${completedTasks.length})`}
-            </h2>
+          {/* Three items (heading, size select, "View all") do not fit on one
+              375px line, so the row wraps; `sm:flex-nowrap` keeps the desktop
+              row the single line it has always been. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 mb-3 sm:flex-nowrap">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <h2 className="text-lg font-medium">
+                Recent
+                {completedTasks.length > recentLimit
+                  ? ` (${recentTasks.length} of ${completedTasks.length})`
+                  : ` (${completedTasks.length})`}
+              </h2>
+              <label
+                htmlFor={recentLimitSelectId}
+                className="text-xs text-gray-500"
+              >
+                Show
+              </label>
+              <select
+                id={recentLimitSelectId}
+                value={recentLimit}
+                onChange={(e) => setRecentLimit(Number(e.target.value))}
+                title="How many recently completed tasks to list"
+                className="min-h-11 min-w-0 max-w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs sm:min-h-0"
+              >
+                {RECENT_LIMIT_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
             {completedTasks.length > 0 && (
               <Link
                 to="/reports#all-tasks"
@@ -414,15 +472,12 @@ function ToolChip({ task }: { task: TaskResponse }) {
 }
 
 function ActiveTaskCard({ task }: { task: TaskResponse }) {
-  const navigate = useNavigate();
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
 
   const issueHref =
     forgejoBaseUrl && task.repo
       ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
       : null;
-
-  const goToTask = () => navigate(`/tasks/${task.id}`);
 
   const phaseLabel: Record<string, string> = {
     preparing: 'Preparing',
@@ -432,18 +487,14 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
   };
 
   return (
-    <div
-      role="link"
-      tabIndex={0}
-      onClick={goToTask}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          goToTask();
-        }
-      }}
-      className="block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer"
-    >
+    /* Stretched link: the card is the positioning context, and the task
+       title below is a real <Link> whose `after:inset-0` overlay covers it.
+       Navigation therefore goes through an <a href>, so middle-click and
+       ctrl/cmd+click open the task in a new tab — which an onClick+navigate
+       <div role="link"> could never offer. Anything else that must stay
+       clickable (the Forgejo issue link) is raised above the overlay with
+       `relative z-10`. */
+    <div className="relative block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer">
       {/* Below `sm` the metadata cluster gets its own line under the title
           instead of being squeezed against it; `sm:` restores the original
           single centred row (flex `gap: normal` computes to 0, so
@@ -462,12 +513,14 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
               the issue title (and the metadata behind it) off-screen. */}
           <div className="min-w-0 truncate">
             {issueHref ? (
+              /* Sibling of the task link, never a child of it — nested <a>
+                 elements are invalid — and `relative z-10` keeps it above
+                 the stretched overlay so it still opens Forgejo. */
               <a
                 href={issueHref}
                 target="_blank"
                 rel="noreferrer noopener"
-                onClick={(e) => e.stopPropagation()}
-                className="text-blue-400 font-mono text-sm hover:underline"
+                className="relative z-10 text-blue-400 font-mono text-sm hover:underline"
               >
                 #{task.issue_id}
               </a>
@@ -476,7 +529,12 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
                 #{task.issue_id}
               </span>
             )}{' '}
-            <span className="font-medium">{task.issue_title}</span>
+            <Link
+              to={`/tasks/${task.id}`}
+              className="font-medium after:absolute after:inset-0 after:content-['']"
+            >
+              {task.issue_title}
+            </Link>
             {task.repo && (
               <span className="text-gray-500 text-sm ml-2">
                 {task.repo.owner}/{task.repo.name}
@@ -507,7 +565,6 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
 }
 
 function CompletedItem({ task }: { task: TaskResponse }) {
-  const navigate = useNavigate();
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
 
   const issueHref =
@@ -515,29 +572,18 @@ function CompletedItem({ task }: { task: TaskResponse }) {
       ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
       : null;
 
-  const goToTask = () => navigate(`/tasks/${task.id}`);
-
   return (
-    <div
-      role="link"
-      tabIndex={0}
-      onClick={goToTask}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          goToTask();
-        }
-      }}
-      className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-0 bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors cursor-pointer"
-    >
+    /* Stretched link — same pattern as ActiveTaskCard: `relative` row, the
+       title is the real <a href> and its `after:inset-0` overlay makes the
+       whole row open in a new tab on middle- / ctrl-click. */
+    <div className="relative flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-0 bg-gray-900 border border-gray-800 rounded p-3 hover:border-gray-700 transition-colors cursor-pointer">
       <div className="min-w-0 truncate">
         {issueHref ? (
           <a
             href={issueHref}
             target="_blank"
             rel="noreferrer noopener"
-            onClick={(e) => e.stopPropagation()}
-            className="text-blue-400 font-mono text-sm hover:underline"
+            className="relative z-10 text-blue-400 font-mono text-sm hover:underline"
           >
             #{task.issue_id}
           </a>
@@ -546,7 +592,12 @@ function CompletedItem({ task }: { task: TaskResponse }) {
             #{task.issue_id}
           </span>
         )}{' '}
-        <span>{task.issue_title}</span>
+        <Link
+          to={`/tasks/${task.id}`}
+          className="after:absolute after:inset-0 after:content-['']"
+        >
+          {task.issue_title}
+        </Link>
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm sm:flex-nowrap">
         <ToolChip task={task} />

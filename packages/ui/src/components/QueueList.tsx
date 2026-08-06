@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import {
   DndContext,
   closestCenter,
@@ -122,15 +122,12 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
 
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: task.id });
 
-  const navigate = useNavigate();
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
 
   const issueHref =
     forgejoBaseUrl && task.repo
       ? `${forgejoBaseUrl}/${task.repo.owner}/${task.repo.name}/issues/${task.issue_id}`
       : null;
-
-  const goToTask = () => navigate(`/tasks/${task.id}`);
 
   // Combine refs
   const setRef = (node: HTMLDivElement | null) => {
@@ -167,35 +164,35 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
            across the row's own padding. Pointer and touch events landing on
            a pseudo-element are dispatched to its originating element, so
            the drag listeners on this span receive them, and nothing about
-           the rendered layout changes at any width. */
-        className="relative text-gray-600 select-none cursor-grab active:cursor-grabbing px-1 after:absolute after:-inset-x-3.5 after:-inset-y-3 after:content-['']"
+           the rendered layout changes at any width. `z-10` keeps that
+           inflated area above the stretched task link's overlay, which
+           reaches the same couple of pixels from the other side. */
+        className="relative z-10 text-gray-600 select-none cursor-grab active:cursor-grabbing px-1 after:absolute after:-inset-x-3.5 after:-inset-y-3 after:content-['']"
       >
         ::
       </span>
       <div
-        role="link"
-        tabIndex={0}
-        onClick={goToTask}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            goToTask();
-          }
-        }}
         /* `min-w-0` so the flex child may actually shrink (its default
            `min-width: auto` is what let a long issue title push the position
            metadata off-screen), and the row splits into two stacked lines
-           below `sm` — `sm:` reinstates the original single row. */
-        className="min-w-0 flex-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-0 cursor-pointer"
+           below `sm` — `sm:` reinstates the original single row.
+
+           `relative` makes this block the positioning context for the
+           stretched task link inside it, so the overlay covers exactly the
+           area that was clickable before — the drag handle, which sits
+           outside this block, is untouched. */
+        className="relative min-w-0 flex-1 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-0 cursor-pointer"
       >
         <div className="min-w-0 truncate">
           {issueHref ? (
+            /* Sibling of the task link (nested <a> is invalid) and raised
+               above its overlay, so it still opens Forgejo in a new tab
+               without navigating to the task. */
             <a
               href={issueHref}
               target="_blank"
               rel="noreferrer noopener"
-              onClick={(e) => e.stopPropagation()}
-              className="text-blue-400 font-mono text-sm hover:underline"
+              className="relative z-10 text-blue-400 font-mono text-sm hover:underline"
             >
               #{task.issue_id}
             </a>
@@ -204,7 +201,12 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
               #{task.issue_id}
             </span>
           )}{' '}
-          <span>{task.issue_title}</span>
+          <Link
+            to={`/tasks/${task.id}`}
+            className="after:absolute after:inset-0 after:content-['']"
+          >
+            {task.issue_title}
+          </Link>
           {task.repo && (
             <span className="text-gray-500 text-sm ml-2">
               {task.repo.owner}/{task.repo.name}
