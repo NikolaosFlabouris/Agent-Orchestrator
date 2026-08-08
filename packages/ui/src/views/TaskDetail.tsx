@@ -38,17 +38,22 @@ const MAX_ATTEMPTS_EDITABLE_STATUSES = new Set([
  *  refetch? The frame carries the complete `TaskView` but NOT the
  *  detail-only payload (`attempts`, `events`, `forgejo_links`), and those
  *  only change when the run itself moves: a status transition, a new
- *  attempt, or a container coming/going. Everything else — queue reorders,
+ *  attempt, a container coming/going, or a PR appearing (`pr_number` is
+ *  written mid-run with no other gate field changing, and `forgejo_links.pr`
+ *  exists only in the detail response — without the refetch the PR chip
+ *  would render without its link; it is set at most once per task, so this
+ *  cannot reintroduce refetch churn). Everything else — queue reorders,
  *  profile-edit echoes, dependency re-evaluations — is fully described by
  *  the frame and costs zero refetches. Pure and exported for tests. */
 export function taskUpdateNeedsRefetch(
-  prev: Pick<TaskResponse, 'status' | 'attempt' | 'container_id'>,
-  next: Pick<TaskResponse, 'status' | 'attempt' | 'container_id'>
+  prev: Pick<TaskResponse, 'status' | 'attempt' | 'container_id' | 'pr_number'>,
+  next: Pick<TaskResponse, 'status' | 'attempt' | 'container_id' | 'pr_number'>
 ): boolean {
   return (
     prev.status !== next.status ||
     prev.attempt !== next.attempt ||
-    prev.container_id !== next.container_id
+    prev.container_id !== next.container_id ||
+    prev.pr_number !== next.pr_number
   );
 }
 
@@ -193,8 +198,23 @@ export function TaskDetail() {
       },
       appendEvent: (row) => setTask((prev) => applyTaskEvent(prev, row)),
       current: () => taskRef.current,
+      // The frame carries some fields it never populates faithfully:
+      // `container_name` is resolved only by the detail GET (list/WS frames
+      // always carry null), and `has_human_review_label` is null when the
+      // WS snapshot cache is cold. Keep the loaded values when the frame's
+      // are null so a queue-reorder frame can't degrade the detail view.
       merge: (frame) =>
-        setTask((prev) => (prev ? { ...prev, ...frame } : prev)),
+        setTask((prev) =>
+          prev
+            ? {
+                ...prev,
+                ...frame,
+                container_name: frame.container_name ?? prev.container_name,
+                has_human_review_label:
+                  frame.has_human_review_label ?? prev.has_human_review_label,
+              }
+            : prev
+        ),
     })
   );
 

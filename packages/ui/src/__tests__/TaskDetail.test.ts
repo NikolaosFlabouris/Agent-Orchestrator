@@ -44,6 +44,7 @@ function detail(
     status: 'queued',
     attempt: 1,
     container_id: null,
+    pr_number: null,
     queue_position: 3,
     events,
     ...fields,
@@ -51,7 +52,8 @@ function detail(
 }
 
 /** A `task_updated` frame for the loaded task, differing from the harness's
- *  baseline (`detail()`) only in `fields`. */
+ *  baseline (`detail()`) only in `fields`. Like every real list/WS frame, it
+ *  carries `container_name: null` — only the detail GET resolves the name. */
 function updated(fields: Partial<TaskResponse> = {}): DashboardWsEvent {
   return {
     type: 'task_updated',
@@ -60,6 +62,8 @@ function updated(fields: Partial<TaskResponse> = {}): DashboardWsEvent {
       status: 'queued',
       attempt: 1,
       container_id: null,
+      container_name: null,
+      pr_number: null,
       queue_position: 3,
       ...fields,
     } as never,
@@ -90,7 +94,16 @@ function harness(
         },
         current: () => current,
         merge: (frame) => {
-          current = current ? { ...current, ...frame } : current;
+          current = current
+            ? {
+                ...current,
+                ...frame,
+                container_name: frame.container_name ?? current.container_name,
+                has_human_review_label:
+                  frame.has_human_review_label ??
+                  current.has_human_review_label,
+              }
+            : current;
         },
       });
     },
@@ -157,7 +170,7 @@ describe('TaskDetail dashboard-event handling', () => {
   // profile-edit echoes included — so it must merge the frame instead of
   // refetching, and pay for the full GET /api/tasks/:id only when the
   // detail-only payload (attempts/events/forgejo_links) may have moved:
-  // a status, attempt, or container change.
+  // a status, attempt, container, or pr_number change.
 
   it('merges a queue-reorder task_updated without refetching', () => {
     const h = harness(42);
@@ -185,13 +198,34 @@ describe('TaskDetail dashboard-event handling', () => {
   });
 
   it('preserves the detail-only payload across a merge', () => {
-    const h = harness(42, [row({ id: 7 })]);
+    const h = harness(42, [row({ id: 7 })], {
+      container_name: 'agent-owner-repo-42',
+      has_human_review_label: true,
+    });
 
     h.send(updated({ queue_position: 9 }));
 
     // The frame is a TaskView — no attempts/events/forgejo_links — so a
     // wholesale replace would strip them. The merge must not.
     expect(h.events().map((e) => e.id)).toEqual([7]);
+    // Fields the frame carries but never populates faithfully — the frame's
+    // container_name is always null (only the detail GET resolves it), and
+    // has_human_review_label is null when the snapshot cache is cold — must
+    // keep their loaded values instead of being clobbered by the spread.
+    expect(h.task()!.container_name).toBe('agent-owner-repo-42');
+    expect(h.task()!.has_human_review_label).toBe(true);
+  });
+
+  it('refetches when the PR appeared', () => {
+    const h = harness(42);
+
+    h.send(updated({ pr_number: 7 }));
+
+    // pr_number is written mid-run with no status/attempt/container change,
+    // and forgejo_links.pr exists only in the detail response — without the
+    // refetch the PR chip would render without its link.
+    expect(h.task()!.pr_number).toBe(7);
+    expect(h.refetch).toHaveBeenCalledWith(42);
   });
 
   it('refetches when the status changed', () => {
@@ -243,16 +277,17 @@ describe('TaskDetail dashboard-event handling', () => {
   });
 });
 
-// The pure refetch predicate on its own: the three fields that gate the
+// The pure refetch predicate on its own: the four fields that gate the
 // full GET /api/tasks/:id, and nothing else.
 describe('taskUpdateNeedsRefetch', () => {
   const base = {
     status: 'in-progress',
     attempt: 2,
     container_id: 'abc',
+    pr_number: null,
   } as unknown as TaskResponse;
 
-  it('is false when status, attempt and container are unchanged', () => {
+  it('is false when the gate fields are unchanged', () => {
     expect(
       taskUpdateNeedsRefetch(base, {
         ...base,
@@ -262,7 +297,7 @@ describe('taskUpdateNeedsRefetch', () => {
     ).toBe(false);
   });
 
-  it('is true when any of the three gate fields changed', () => {
+  it('is true when any of the four gate fields changed', () => {
     expect(
       taskUpdateNeedsRefetch(base, { ...base, status: 'in-review' })
     ).toBe(true);
@@ -270,6 +305,7 @@ describe('taskUpdateNeedsRefetch', () => {
     expect(
       taskUpdateNeedsRefetch(base, { ...base, container_id: null })
     ).toBe(true);
+    expect(taskUpdateNeedsRefetch(base, { ...base, pr_number: 7 })).toBe(true);
   });
 });
 
