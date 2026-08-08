@@ -13,6 +13,7 @@ import {
 import type { DragEndEvent, PointerSensorOptions } from '@dnd-kit/core';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useStore } from '../store.js';
+import { RetryIn } from './LiveTime.js';
 import { api } from '../api.js';
 import type { TaskResponse } from '../api.js';
 
@@ -222,6 +223,18 @@ function DraggableQueueItem({ task }: { task: TaskResponse }) {
                 .join(', ')}`}
             >
               blocked
+            </span>
+          )}
+          {/* A task waiting out a workspace-prep backoff otherwise looks
+              exactly like an idle queued one. Plain text, no `relative z-10`:
+              the chip is not interactive, so the stretched task link may keep
+              covering it and the whole row stays clickable. */}
+          {task.prep_backoff_level > 0 && (
+            <span
+              className="px-2 py-0.5 rounded text-xs font-medium bg-amber-900 text-amber-300"
+              title={`Workspace prep failed ${task.prep_failure_count}× — the orchestrator is backing off before the next try`}
+            >
+              prep retry <RetryIn at={task.prep_next_attempt_at} />
             </span>
           )}
           <span>Position {task.queue_position}</span>

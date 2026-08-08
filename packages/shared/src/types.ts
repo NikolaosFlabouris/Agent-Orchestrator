@@ -135,6 +135,14 @@ export interface Attempt {
   additions: number | null;
   /** Lines deleted in the PR. Raw count; NULL = unknown. */
   deletions: number | null;
+  /** Why a non-successful run ended, copied verbatim from the harness's
+   *  result.json `error_message` at completion. NULL on successful
+   *  attempts, on pre-v32 rows, and when the harness reported no message —
+   *  the UI simply shows nothing rather than inventing a reason. */
+  error_message: string | null;
+  /** Process exit code reported by the harness for a non-successful run.
+   *  NULL = unknown (see error_message); never conflate with a real 0. */
+  exit_code: number | null;
 }
 
 /** Per-run effort metrics emitted by the in-container harness into

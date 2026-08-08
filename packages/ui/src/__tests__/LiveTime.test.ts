@@ -9,7 +9,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { subscribeTick, elapsed, timeAgo } from '../components/LiveTime.js';
+import {
+  subscribeTick,
+  elapsed,
+  retryIn,
+  timeAgo,
+} from '../components/LiveTime.js';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -112,6 +117,42 @@ describe('elapsed', () => {
   it('rolls up into minutes and hours', () => {
     expect(elapsed('2026-01-01T11:55:00Z')).toBe('5m');
     expect(elapsed('2026-01-01T09:30:00Z')).toBe('2h 30m');
+  });
+});
+
+describe('retryIn', () => {
+  it('counts down to a scheduled retry', () => {
+    // 3m12s out, read from the injected clock rather than Date.now().
+    expect(retryIn('2026-01-01T12:03:12Z', Date.parse('2026-01-01T12:00:00Z')))
+      .toBe('in 3m 12s');
+    expect(retryIn('2026-01-01T12:00:45Z', Date.parse('2026-01-01T12:00:00Z')))
+      .toBe('in 45s');
+    expect(retryIn('2026-01-01T13:30:00Z', Date.parse('2026-01-01T12:00:00Z')))
+      .toBe('in 1h 30m');
+  });
+
+  it('defaults to the live clock', () => {
+    // System time is pinned to 12:00:00Z by the suite-wide beforeEach.
+    expect(retryIn('2026-01-01T12:02:00Z')).toBe('in 2m 0s');
+  });
+
+  it('reads "now" once the timestamp has passed', () => {
+    const now = Date.parse('2026-01-01T12:00:00Z');
+    expect(retryIn('2026-01-01T12:00:00Z', now)).toBe('now');
+    expect(retryIn('2026-01-01T11:58:00Z', now)).toBe('now');
+  });
+
+  it('reads "now" when nothing is scheduled or the value is unparseable', () => {
+    const now = Date.parse('2026-01-01T12:00:00Z');
+    expect(retryIn(null, now)).toBe('now');
+    expect(retryIn('not-a-date', now)).toBe('now');
+  });
+
+  it('rounds up, so a countdown never displays a second early', () => {
+    // 90.4s remaining is "1m 31s", not "1m 30s" — the retry has not
+    // happened yet at the moment the label is read.
+    expect(retryIn('2026-01-01T12:01:30.400Z', Date.parse('2026-01-01T12:00:00Z')))
+      .toBe('in 1m 31s');
   });
 });
 

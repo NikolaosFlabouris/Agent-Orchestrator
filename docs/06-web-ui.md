@@ -29,7 +29,7 @@ The main view shows system state at a glance. Designed to be left open on a moni
 
 **Active tasks section:** each active task shows issue number and title, target repository, current phase (implementing/reviewing), attempt number, elapsed time, and a stop button.
 
-**Queue section:** ordered list of pending tasks, each showing issue number, title, target repository, dependency status (blocked/ready), and drag handles for reordering. An "Add task" button at the bottom.
+**Queue section:** ordered list of pending tasks, each showing issue number, title, target repository, dependency status (blocked/ready), and drag handles for reordering. A task whose workspace prep is in backoff also carries an amber "prep retry in …" chip (plain text, not interactive, so the stretched row link still covers it). An "Add task" button at the bottom.
 
 **Recent completions section:** last N completed tasks showing issue number, title, result (merged/failed), time since completion, and attempt count. N is chosen from a select in the section header (5 / 10 / 20 / 50 / 100, default 10, not persisted across reloads); changing it refetches immediately, and both the poll's `limit` and the `completedLimit` handed to `syncTasks` become `max(20, N)` — they must stay equal or the store prunes live rows out of a truncated response.
 
@@ -39,7 +39,7 @@ The main view shows system state at a glance. Designed to be left open on a moni
 
 Accessed by clicking any task (active, queued, or completed). Shows full task lifecycle:
 
-**Header:** issue number, title, repo, branch name, PR number (linked to Forgejo), current status, elapsed time.
+**Header:** issue number, title, repo, branch name, PR number (linked to Forgejo), current status, elapsed time. Two amber lines appear under the attempt counter when the task is in a git-outage backoff, each with a live "in Xm Ys" countdown: *"Workspace prep failed ×N — retry in …"* while a queued task is waiting out `prep_next_attempt_at`, and *"Completed work is held locally — push retry in …"* while `salvage_next_attempt_at` is set (finished agent work that has not reached the git host yet). Without them a task in either state is indistinguishable from an idle queued one.
 
 **Actions bar:** Cancel, Force Approve, Force Fail, Reset buttons (context-dependent). Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
 
@@ -47,7 +47,7 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Agent output panel:** live-streaming terminal-like display of agent output during execution. For completed tasks, shows the stored log.
 
-**Attempt history:** for tasks with multiple attempts, shows each attempt's duration, role (develop/review), result, the snapshotted `harness_id` and `model_id`, and review feedback received.
+**Attempt history:** for tasks with multiple attempts, shows each attempt's duration, role (develop/review), result, the snapshotted `harness_id` and `model_id`, and review feedback received. A *running* attempt shows a live-ticking elapsed time against the timeout snapshotted at its launch (`3m / 30m`), turning yellow past 80% of that budget — the point past which the orchestrator will kill the run. A `failed` or `timeout` attempt shows the harness-reported reason in red (`attempts.error_message`, plus `(exit code N)` when known); attempts predating schema v32 have no reason stored and show none.
 
 **Links:** direct links to the Forgejo issue, PR, and raw agent log file.
 

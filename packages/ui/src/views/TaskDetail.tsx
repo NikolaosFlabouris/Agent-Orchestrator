@@ -13,6 +13,7 @@ import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { useDashboardEvents } from '../components/LiveData.js';
 import { Timeline } from '../components/Timeline.js';
+import { Elapsed, RetryIn, useTicker } from '../components/LiveTime.js';
 import { filterLogLine } from '../logFilter.js';
 import { useStore } from '../store.js';
 
@@ -589,7 +590,11 @@ export function TaskDetail() {
                 blocked
               </span>
             )}
-            {task.health === 'orphaned' && <HealthBadge health={task.health} />}
+            {/* Only `orphaned` is worth a badge. `idle` is the health of every
+                queued and terminal task, so rendering it would put a badge on
+                most of the dashboard while saying nothing — hence the guard
+                here and the orphaned-only `HealthBadge`. */}
+            {task.health === 'orphaned' && <HealthBadge />}
           </div>
           <div className="text-sm text-gray-400 mt-1 flex flex-wrap items-center gap-2 lg:justify-end">
             {editingMaxAttempts && MAX_ATTEMPTS_EDITABLE_STATUSES.has(task.status) ? (
@@ -650,6 +655,22 @@ export function TaskDetail() {
           {maxAttemptsError && (
             <div className="text-xs text-red-400 mt-1 lg:text-right">
               {maxAttemptsError}
+            </div>
+          )}
+          {/* Git-outage backoff state. Without these two lines a task waiting
+              out a workspace-prep backoff is indistinguishable from an idle
+              queued one, and finished-but-unpushed work looks like nothing
+              happened at all. Amber matches the other degraded-state hints. */}
+          {task.status === 'queued' && task.prep_backoff_level > 0 && (
+            <div className="text-xs text-amber-400 mt-1 lg:text-right">
+              Workspace prep failed ×{task.prep_failure_count} — retry{' '}
+              <RetryIn at={task.prep_next_attempt_at} />
+            </div>
+          )}
+          {task.salvage_next_attempt_at != null && (
+            <div className="text-xs text-amber-400 mt-1 lg:text-right">
+              Completed work is held locally — push retry{' '}
+              <RetryIn at={task.salvage_next_attempt_at} />
             </div>
           )}
         </div>
@@ -1283,6 +1304,52 @@ function AgentOutput({
   );
 }
 
+/** True once a running attempt has burned more than 80% of the timeout
+ *  snapshotted at its launch — the point at which the elapsed time is worth
+ *  looking at, because the orchestrator will kill the run at 100%. False
+ *  when no snapshot exists (pre-v22 attempts): there is no budget to be near.
+ *  Pure; `now` is injected so tests need no clock. */
+export function isNearTimeout(
+  startedAt: string,
+  timeoutMinutes: number | null,
+  now: number = Date.now()
+): boolean {
+  if (timeoutMinutes == null || timeoutMinutes <= 0) return false;
+  const started = new Date(startedAt).getTime();
+  if (Number.isNaN(started)) return false;
+  return now - started > timeoutMinutes * 60_000 * 0.8;
+}
+
+/** Live "elapsed / budget" for a running attempt, e.g. `3m / 30m`.
+ *
+ *  Subscribes to the shared 1s ticker in its own right even though the
+ *  nested `Elapsed` already does: the near-timeout tint is decided here, so
+ *  this component must re-render for the text to turn yellow. Same shared
+ *  interval — no extra timer. */
+function RunningDuration({
+  startedAt,
+  timeoutMinutes,
+}: {
+  startedAt: string;
+  timeoutMinutes: number | null;
+}) {
+  useTicker(1_000);
+  const near = isNearTimeout(startedAt, timeoutMinutes);
+  return (
+    <span
+      className={near ? 'text-yellow-400' : undefined}
+      title={
+        timeoutMinutes == null
+          ? 'Running'
+          : `Running — the orchestrator stops this attempt at ${timeoutMinutes}m`
+      }
+    >
+      <Elapsed startedAt={startedAt} />
+      {timeoutMinutes != null && ` / ${timeoutMinutes}m`}
+    </span>
+  );
+}
+
 function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
   const duration =
     attempt.started_at && attempt.completed_at
@@ -1293,6 +1360,15 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
       : attempt.started_at
         ? 'running'
         : '-';
+  // Non-null `started_at` on a running attempt is what makes a live elapsed
+  // time meaningful; without it there is nothing to count from.
+  const runningSince =
+    attempt.status === 'running' ? attempt.started_at : null;
+  const failureReason =
+    (attempt.status === 'failed' || attempt.status === 'timeout') &&
+    attempt.error_message
+      ? attempt.error_message
+      : null;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded p-4">
@@ -1317,7 +1393,14 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
           )}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-400">
-          <span>{duration}</span>
+          {runningSince ? (
+            <RunningDuration
+              startedAt={runningSince}
+              timeoutMinutes={attempt.timeout_minutes_snapshot}
+            />
+          ) : (
+            <span>{duration}</span>
+          )}
           {attempt.model_id && (
             /* `break-words` is the safety net for a long harness/model id,
                which has no space to wrap at: it only engages when the id is
@@ -1330,6 +1413,16 @@ function AttemptRow({ attempt }: { attempt: AttemptResponse }) {
         </div>
       </div>
       <AttemptUsage attempt={attempt} />
+      {/* Why the attempt ended (v32), straight from the harness's
+          result.json. Above the review feedback because it explains the
+          badge beside the attempt number; `break-words` keeps a long
+          single-token message (a path, a URL) inside the card at 375px. */}
+      {failureReason && (
+        <div className="mt-2 text-xs text-red-400 break-words">
+          {failureReason}
+          {attempt.exit_code != null && ` (exit code ${attempt.exit_code})`}
+        </div>
+      )}
       {attempt.feedback && (
         <div className="mt-3 text-xs text-gray-400 border-t border-gray-800 pt-2">
           <details>
@@ -1398,8 +1491,10 @@ function AttemptUsage({ attempt }: { attempt: AttemptResponse }) {
   );
 }
 
-function HealthBadge({ health }: { health: 'healthy' | 'orphaned' | 'idle' }) {
-  if (health === 'healthy' || health === 'idle') return null;
+/** The orphaned-container warning. Deliberately not a general health badge:
+ *  `healthy` needs no chrome and `idle` describes every queued/terminal task,
+ *  so the call site renders this only for `orphaned`. */
+function HealthBadge() {
   return (
     <span
       className="px-2 py-1 rounded text-xs font-medium bg-orange-900 text-orange-200 border border-orange-700"
