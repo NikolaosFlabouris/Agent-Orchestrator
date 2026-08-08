@@ -72,9 +72,17 @@ Two modes:
 
 Both modes result in the same outcome: a Forgejo issue with `status/queued` that the orchestrator will pick up on its next tick. Users who want to create issues without immediately queuing them should use Forgejo directly — the orchestrator UI is specifically for dispatching work to agents.
 
+### Reports View
+
+`/reports` — the aggregate view (KPI strip, throughput, leaderboards, duration distributions, funnel, heatmap, reliability panel) over a date range and an optional repo subset, plus the paginated All Tasks browser at `#all-tasks`.
+
+**The filter bar is the query string.** `?from=YYYY-MM-DD&to=YYYY-MM-DD&repos=1,3`, so a filtered view is bookmarkable and survives a reload; `repos` absent means all repos and both dates absent means the default last-90-day window (`DEFAULT_REPORT_WINDOW_DAYS` on the backend). The URL is the single source of truth — there is no mirrored `useState` — and `parseReportParams` / `serializeReportParams` in `Reports.tsx` are the pure round-trip pair, unit-tested in `reportParams.test.ts`. Malformed input degrades rather than errors: a date that isn't `YYYY-MM-DD` falls back to that bound's default (per bound, so one bad date doesn't lose the other) and non-numeric repo ids are dropped individually. Filter writes use `{ replace: true }` — the bar is a control surface, not navigation, so dragging a date picker must not bury the page the operator arrived from under history entries.
+
+**It refreshes itself.** The page is meant to be left open, so a `refreshTick` re-runs both fetches (aggregate bundle and All Tasks) on a 5-minute interval, and on `focus`/`visibilitychange` when the last successful fetch is older than 60s — the guard is what stops an alt-tab to copy a number from re-running eleven aggregate queries. A background refresh never shows the full-page "Loading reports…" state, which is gated on `loading && !data`, and never resets the All Tasks pagination (the offset-reset effect is deliberately not keyed on the tick).
+
 ### Settings View
 
-The Settings page has five tabs:
+The Settings page has five tabs. **The active tab is the URL**, not component state: the route is `/settings/:tab?` and the segment is one of `global` / `repos` / `providers` / `profiles` / `credentials`, so `/settings/providers` deep-links and a reload keeps the tab. The bare `/settings` and any unknown segment `<Navigate replace>` to `/settings/global` (the segment is validated by the pure `parseSettingsTab` in `Settings.tsx`, which rejects `Object.prototype` keys), so every pre-existing plain `/settings` link still works. The pills are react-router `<Link>`s carrying `aria-current="page"`, not buttons — same reason as the dashboard rows: only a real anchor gives middle-click / ctrl+click "open in new tab".
 
 **Global Settings.** Host resource pool (`max_agent_memory_mb`, `max_agent_cpu_cores`), the fallback `default_agent_profile_id` (implementation stage), and the optional `default_review_agent_profile_id` (review stage; unset = reviews use the implementation profile). The UI exposes profile pickers for both; deletion is gated on a profile not being either global default.
 
@@ -92,7 +100,7 @@ Any path that matches no route renders `NotFound` — the standard dark page she
 
 ## Responsive Layout
 
-Every route (`/`, `/reports`, `/tasks/:id`, `/tasks/new`, `/settings`, `/help`, `/signed-out`, and the catch-all 404) is expected to render without document-level horizontal overflow down to **375px** — the narrowest mainstream phone. The desktop layout is the design target; small screens are a supported degradation of it, not a separate design.
+Every route (`/`, `/reports`, `/tasks/:id`, `/tasks/new`, `/settings/:tab?`, `/help`, `/signed-out`, and the catch-all 404) is expected to render without document-level horizontal overflow down to **375px** — the narrowest mainstream phone. The desktop layout is the design target; small screens are a supported degradation of it, not a separate design.
 
 The conventions below apply to `packages/ui/src`. When adding UI, follow them rather than inventing a new pattern.
 

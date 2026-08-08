@@ -46,7 +46,10 @@ function App() {
           <Route path="/reports" element={<Reports />} />
           <Route path="/tasks/:id" element={<TaskDetail />} />
           <Route path="/tasks/new" element={<CreateTask />} />
-          <Route path="/settings" element={<Settings />} />
+          {/* Optional `:tab` so every existing plain `/settings` link keeps
+              working — Settings redirects the bare (and any unknown) form to
+              the default tab. */}
+          <Route path="/settings/:tab?" element={<Settings />} />
           <Route path="/help" element={<Help />} />
           {/* Catch-all, inside the gated layout so an unknown path still
               renders the app chrome instead of a blank page. */}
