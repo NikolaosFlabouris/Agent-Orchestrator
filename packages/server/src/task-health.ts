@@ -18,14 +18,6 @@ export const HEALTH_ACTIVE_STATUSES = new Set<Task['status']>([
   'changes-needed',
 ]);
 
-/** Most recent `running` attempt, if any. */
-export function findRunningAttempt(attempts: Attempt[]): Attempt | undefined {
-  for (let i = attempts.length - 1; i >= 0; i--) {
-    if (attempts[i].status === 'running') return attempts[i];
-  }
-  return undefined;
-}
-
 /**
  * Health with full Docker knowledge: `managedContainerIds` is the set of
  * container ids the daemon reports, so a container that vanished out from

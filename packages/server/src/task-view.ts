@@ -25,13 +25,17 @@
 import type {
   Task,
   TaskView,
+  Attempt,
+  Repo,
   AgentProfileSource,
   ReviewAgentProfileSource,
 } from '@orchestrator/shared';
 import { DRIVER_LABELS } from '@orchestrator/shared';
 import {
   getRepo,
-  getAttempts,
+  getRepos,
+  getActiveAttempt,
+  getRunningAttempts,
   getTaskDependencies,
   getSetting,
 } from './db.js';
@@ -39,7 +43,6 @@ import { isBlocked, unsatisfiedDepIssues } from './dependency-state.js';
 import {
   computeTaskHealth,
   deriveHealthWithoutDocker,
-  findRunningAttempt,
 } from './task-health.js';
 import { getSnapshot, peekSnapshot } from './forgejo-snapshot.js';
 import type { Snapshot } from './forgejo-snapshot.js';
@@ -65,6 +68,33 @@ export interface TaskViewContext {
   /** Pre-resolved global profile defaults. Omit for one-off enrichment;
    *  pass for list/snapshot builds. */
   defaults?: ProfileDefaults;
+  /** Pre-batched running attempt per task id (one WHERE status='running'
+   *  query for the whole list, see `loadTaskViewBatches`). Omit for
+   *  single-task enrichment, which takes the targeted getActiveAttempt
+   *  path instead. */
+  runningAttempts?: Map<number, Attempt>;
+  /** Pre-batched repos by id (one SELECT for the whole list). Omit for
+   *  single-task enrichment. */
+  repos?: Map<number, Repo>;
+}
+
+/** One-query-each batches of the per-task lookups `enrichTask` would
+ *  otherwise issue N times over a list: the running attempt per task
+ *  (bounded by scheduler concurrency — tiny, and free of the completed
+ *  rows' large feedback blobs) and the repos table. Built once per
+ *  `GET /api/tasks` request / WS snapshot and passed via TaskViewContext. */
+export function loadTaskViewBatches(): Pick<
+  TaskViewContext,
+  'runningAttempts' | 'repos'
+> {
+  const runningAttempts = new Map<number, Attempt>();
+  // id ASC + overwrite ⇒ the highest-id running attempt per task wins,
+  // matching getActiveAttempt's `id DESC LIMIT 1`.
+  for (const attempt of getRunningAttempts()) {
+    runningAttempts.set(attempt.task_id, attempt);
+  }
+  const repos = new Map(getRepos().map((repo) => [repo.id, repo]));
+  return { runningAttempts, repos };
 }
 
 /** Read the global profile defaults once. */
@@ -165,10 +195,16 @@ export function resolveEffectiveReviewAgentProfile(
  * `enrichTaskWithDerivation` (async).
  */
 export function enrichTask(task: Task, ctx: TaskViewContext = {}): TaskView {
-  const repo = getRepo(task.repo_id);
-  const attempts = getAttempts(task.id);
+  const repo = ctx.repos ? ctx.repos.get(task.repo_id) : getRepo(task.repo_id);
 
-  const runningAttempt = findRunningAttempt(attempts);
+  // Only the RUNNING attempt feeds the view (health derivation) — loading
+  // the full attempt history here pulled every completed row's feedback
+  // blob per task, per list, per snapshot. getActiveAttempt is the
+  // targeted single-task query; list callers pre-batch via
+  // `loadTaskViewBatches` and pass the map.
+  const runningAttempt = ctx.runningAttempts
+    ? ctx.runningAttempts.get(task.id)
+    : getActiveAttempt(task.id);
   const health = ctx.managedIds
     ? computeTaskHealth(task, ctx.managedIds, runningAttempt)
     : deriveHealthWithoutDocker(task, runningAttempt);
@@ -200,6 +236,10 @@ export function enrichTask(task: Task, ctx: TaskViewContext = {}): TaskView {
 
   // Blocked is presentation-only: computed at read time from the synced
   // dependency rows, never stored, never a TaskStatus.
+  // Deliberately NOT batched into TaskViewContext: task_dependencies is a
+  // narrow indexed table (no blobs), and the list paths are already bounded
+  // by getDashboardTasks — the win would be marginal next to the attempts
+  // N+1 the context removes.
   const dependencies = getTaskDependencies(task.id);
 
   return {

@@ -15,6 +15,7 @@ import {
   enrichTask,
   enrichTaskWithDerivation,
   loadProfileDefaults,
+  loadTaskViewBatches,
 } from '../task-view.js';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
@@ -127,11 +128,18 @@ export function createTaskRoutes(
       );
 
       // The global profile defaults are loop-invariant — resolve them once
-      // rather than issuing 2 settings reads per task.
+      // rather than issuing 2 settings reads per task. Same idea for the
+      // running-attempt and repo lookups: one batch query each for the
+      // whole list instead of two SQLite reads per task.
       const defaults = loadProfileDefaults();
+      const batches = loadTaskViewBatches();
       const enriched = await Promise.all(
         allTasks.map((t) =>
-          enrichTaskWithDerivation(t, forgejo, { managedIds, defaults })
+          enrichTaskWithDerivation(t, forgejo, {
+            managedIds,
+            defaults,
+            ...batches,
+          })
         )
       );
 

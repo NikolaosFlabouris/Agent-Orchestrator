@@ -1418,6 +1418,20 @@ export function getActiveAttempt(taskId: number): Attempt | undefined {
     .get(taskId) as Attempt | undefined;
 }
 
+/** Every currently-running attempt, across all tasks — the batch counterpart
+ *  of {@link getActiveAttempt} for list serializers. Bounded by scheduler
+ *  concurrency (at most one running attempt per active task), so the result
+ *  is tiny regardless of history size, and it skips the completed rows whose
+ *  large `feedback` blobs made per-task `getAttempts` calls expensive.
+ *  Ordered by id ASC so a task_id-keyed map built by overwrite keeps the
+ *  highest id per task, matching getActiveAttempt's `id DESC LIMIT 1`
+ *  defence-in-depth. */
+export function getRunningAttempts(): Attempt[] {
+  return getDb()
+    .prepare("SELECT * FROM attempts WHERE status = 'running' ORDER BY id ASC")
+    .all() as Attempt[];
+}
+
 /**
  * Find a running attempt by composite key (for recovery).
  * On restart, activeState is lost — this looks up the attempt row directly.

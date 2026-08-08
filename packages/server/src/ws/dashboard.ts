@@ -2,7 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { getTasks, getQueuedTasks, getSettingInt } from '../db.js';
 import { getActiveResources } from '../queue.js';
-import { buildTaskView, loadProfileDefaults } from '../task-view.js';
+import {
+  buildTaskView,
+  loadProfileDefaults,
+  loadTaskViewBatches,
+} from '../task-view.js';
 import type {
   DashboardSnapshot,
   DashboardEvent,
@@ -131,9 +135,14 @@ export function buildHostPool(): HostPool {
  *  snapshot cache and never touches Forgejo or Docker. Exported for tests. */
 export function buildSnapshot(): DashboardSnapshot {
   const defaults = loadProfileDefaults();
+  // One batch query each for running attempts and repos — enriching N
+  // tasks must not issue per-task attempt-history reads on every connect.
+  const batches = loadTaskViewBatches();
   return {
     type: 'snapshot',
-    tasks: getTasks().map((task) => buildTaskView(task, { defaults })),
+    tasks: getTasks().map((task) =>
+      buildTaskView(task, { defaults, ...batches })
+    ),
     hostPool: buildHostPool(),
     queueDepth: getQueuedTasks().length,
     paused: getPausedState(),
