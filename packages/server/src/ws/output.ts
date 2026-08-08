@@ -6,6 +6,53 @@ import { getTask } from '../db.js';
 import { getOutputDir } from '../workspace.js';
 import type { AgentOutputChunk, AgentOutputReplay, AgentStreamComplete } from '@orchestrator/shared';
 
+/** Largest slice of progress.log a replay frame will carry. A long run can
+ *  leave a log of hundreds of megabytes; sending it as one frame pins that
+ *  much in the server's heap, in the socket buffer, and in the browser tab.
+ *  Past this we send only the tail — the full file stays one click away via
+ *  `GET /api/tasks/:id/log`, which streams it. */
+export const MAX_REPLAY_BYTES = 256 * 1024;
+
+/** Marker prefixed to a truncated replay. It is just another log line to the
+ *  UI, which renders it like any other. */
+export const TRUNCATION_MARKER =
+  '--- log truncated; use Download for the full file ---';
+
+/** Read the replay payload for a log file: the whole file when it is small,
+ *  otherwise the last MAX_REPLAY_BYTES cut forward to the first newline (so
+ *  the frame never opens mid-line, which would corrupt a JSON event line) and
+ *  prefixed with the truncation marker.
+ *
+ *  Returns null when the file is missing, empty, or unreadable — the caller
+ *  sends no replay frame at all in that case. */
+export function buildReplayPayload(logPath: string): string | null {
+  try {
+    const size = fs.statSync(logPath).size;
+    if (size === 0) return null;
+    if (size <= MAX_REPLAY_BYTES) {
+      return fs.readFileSync(logPath, 'utf-8') || null;
+    }
+
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const buffer = Buffer.alloc(MAX_REPLAY_BYTES);
+      const read = fs.readSync(fd, buffer, 0, MAX_REPLAY_BYTES, size - MAX_REPLAY_BYTES);
+      let tail = buffer.subarray(0, read).toString('utf-8');
+      // Drop the partial first line — which also drops the replacement char
+      // a byte-offset read leaves behind when it lands mid-UTF-8-sequence.
+      // If the tail holds no newline at all it is one enormous line — keep it
+      // rather than emit nothing.
+      const nl = tail.indexOf('\n');
+      if (nl !== -1) tail = tail.slice(nl + 1);
+      return `${TRUNCATION_MARKER}\n${tail}`;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /** Map of task ID → set of connected output clients. */
 const outputClients = new Map<number, Set<WebSocket>>();
 
@@ -35,19 +82,17 @@ export async function outputWs(app: FastifyInstance): Promise<void> {
       const outputDir = getOutputDir(task);
       const logPath = path.join(outputDir, 'progress.log');
 
-      if (fs.existsSync(logPath)) {
+      const content = buildReplayPayload(logPath);
+      if (content) {
+        const replay: AgentOutputReplay = {
+          type: 'replay',
+          taskId,
+          data: content,
+        };
         try {
-          const content = fs.readFileSync(logPath, 'utf-8');
-          if (content) {
-            const replay: AgentOutputReplay = {
-              type: 'replay',
-              taskId,
-              data: content,
-            };
-            socket.send(JSON.stringify(replay));
-          }
+          socket.send(JSON.stringify(replay));
         } catch {
-          // Best effort
+          // Best effort — a socket that died between connect and replay.
         }
       }
 
