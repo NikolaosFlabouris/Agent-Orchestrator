@@ -14,9 +14,9 @@ import type { DashboardWsEvent } from '../ws.js';
  *  stays live no matter which view is on screen — Reports and Settings
  *  included.
  *
- *  Views that need the raw event stream (TaskDetail, which refetches its own
- *  task on `task_updated`) call `useDashboardEvents` rather than opening a
- *  second socket. */
+ *  Views that need the raw event stream (TaskDetail, which folds its own
+ *  task's `task_updated` frames into local state) call `useDashboardEvents`
+ *  rather than opening a second socket. */
 export function LiveData({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Actions come from getState() — we only invoke them, so subscribing

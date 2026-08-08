@@ -1123,6 +1123,61 @@ export function getQueuedTasks(): Task[] {
     .all() as Task[];
 }
 
+/** Stored statuses the dashboard list returns in full — the active bucket
+ *  (`ACTIVE_STATUSES` in routes/tasks.ts) plus `queued`. Everything else is
+ *  "completed" and bounded by recency. */
+const DASHBOARD_LIVE_STATUSES = [
+  'preparing',
+  'in-progress',
+  'in-review',
+  'changes-needed',
+  'queued',
+] as const;
+
+/** The dashboard task list with the completed-history bound pushed into SQL,
+ *  mirroring the paginate-first pattern of {@link getReportTasks}: live
+ *  (active + queued) rows in full, in queue order, followed by the
+ *  `completedLimit` most recently completed rows. Without the push-down the
+ *  route loaded, snapshot-warmed and enriched the ENTIRE task history on
+ *  every poll just to slice the completed bucket afterwards — and that slice
+ *  ran in `queue_position` order, so "recent completions" silently meant
+ *  "oldest queue positions", not recency.
+ *
+ *  Bucketing here is by the STORED status; the route re-buckets on the
+ *  Forgejo-derived status after enrichment, which can only move a stored-live
+ *  row into the completed bucket (deriveStatus never produces an
+ *  active/queued status unless it was stored) — hence the caller fetches a
+ *  small margin above its display limit and keeps the post-enrichment slice.
+ *
+ *  Completed recency orders by `completed_at` (julianday-normalized across
+ *  the two stored timestamp formats), nulls last, ties broken by id — the
+ *  same shape as getReportTasks' completed sort. */
+export function getDashboardTasks(completedLimit: number): Task[] {
+  const placeholders = DASHBOARD_LIVE_STATUSES.map(() => '?').join(',');
+
+  const live = getDb()
+    .prepare(
+      `SELECT * FROM tasks WHERE status IN (${placeholders})
+        ORDER BY queue_position ASC, id ASC`
+    )
+    .all(...DASHBOARD_LIVE_STATUSES) as Task[];
+
+  // A non-finite limit (unparseable ?limit=) yields zero completed rows,
+  // matching the old behaviour of `completed.slice(0, NaN)`.
+  const limit = Number.isFinite(completedLimit)
+    ? Math.max(0, Math.trunc(completedLimit))
+    : 0;
+  const completed = getDb()
+    .prepare(
+      `SELECT * FROM tasks WHERE status NOT IN (${placeholders})
+        ORDER BY (completed_at IS NULL) ASC, ${juld('completed_at')} DESC, id DESC
+        LIMIT ?`
+    )
+    .all(...DASHBOARD_LIVE_STATUSES, limit) as Task[];
+
+  return [...live, ...completed];
+}
+
 /** Tasks whose deferred salvage push has come due (v31).
  *
  *  A salvage push that fails while the git host is down parks the task with
@@ -1361,6 +1416,20 @@ export function getActiveAttempt(taskId: number): Attempt | undefined {
       "SELECT * FROM attempts WHERE task_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1"
     )
     .get(taskId) as Attempt | undefined;
+}
+
+/** Every currently-running attempt, across all tasks — the batch counterpart
+ *  of {@link getActiveAttempt} for list serializers. Bounded by scheduler
+ *  concurrency (at most one running attempt per active task), so the result
+ *  is tiny regardless of history size, and it skips the completed rows whose
+ *  large `feedback` blobs made per-task `getAttempts` calls expensive.
+ *  Ordered by id ASC so a task_id-keyed map built by overwrite keeps the
+ *  highest id per task, matching getActiveAttempt's `id DESC LIMIT 1`
+ *  defence-in-depth. */
+export function getRunningAttempts(): Attempt[] {
+  return getDb()
+    .prepare("SELECT * FROM attempts WHERE status = 'running' ORDER BY id ASC")
+    .all() as Attempt[];
 }
 
 /**
