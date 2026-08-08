@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useState, useRef, useMemo } from 're
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import type {
+  TaskResponse,
   TaskDetailResponse,
   TaskDependencyResponse,
   AttemptResponse,
@@ -33,6 +34,24 @@ const MAX_ATTEMPTS_EDITABLE_STATUSES = new Set([
   'queued', 'preparing', 'in-progress', 'in-review', 'changes-needed',
 ]);
 
+/** Should a `task_updated` frame trigger the full `GET /api/tasks/:id`
+ *  refetch? The frame carries the complete `TaskView` but NOT the
+ *  detail-only payload (`attempts`, `events`, `forgejo_links`), and those
+ *  only change when the run itself moves: a status transition, a new
+ *  attempt, or a container coming/going. Everything else — queue reorders,
+ *  profile-edit echoes, dependency re-evaluations — is fully described by
+ *  the frame and costs zero refetches. Pure and exported for tests. */
+export function taskUpdateNeedsRefetch(
+  prev: Pick<TaskResponse, 'status' | 'attempt' | 'container_id'>,
+  next: Pick<TaskResponse, 'status' | 'attempt' | 'container_id'>
+): boolean {
+  return (
+    prev.status !== next.status ||
+    prev.attempt !== next.attempt ||
+    prev.container_id !== next.container_id
+  );
+}
+
 /** What TaskDetail does with one frame off the shared dashboard stream.
  *  Split out of the component (and exported) so the routing is testable
  *  without a DOM:
@@ -41,8 +60,13 @@ const MAX_ATTEMPTS_EDITABLE_STATUSES = new Set([
  *    into local state; deliberately NOT a refetch, because these fire
  *    continuously while a task runs and each one would otherwise cost a
  *    `GET /api/tasks/:id`.
- *  - `task_updated` — the task row changed. The event carries the task but
- *    not its attempts/events, so this one does refetch.
+ *  - `task_updated` — the task row changed. The frame is the full
+ *    `TaskView`, so it is MERGED into local state (preserving the
+ *    detail-only `attempts`/`events`/`forgejo_links`); the full refetch
+ *    fires only when `taskUpdateNeedsRefetch` says those detail fields may
+ *    have changed too. These frames fire for every row write — queue
+ *    reorders included — so refetching on each one scaled REST load with
+ *    unrelated dashboard activity.
  *  - everything else (`task_created`, `status_changed`, `snapshot`) is for
  *    the dashboard store, not for this view.
  */
@@ -52,14 +76,25 @@ export function handleDashboardEvent(
     taskId: number | undefined;
     refetch: (id: number) => void;
     appendEvent: (row: TaskEventResponse) => void;
+    /** Latest loaded task — the baseline the refetch decision compares
+     *  the incoming frame against. */
+    current: () => TaskDetailResponse | null;
+    /** Fold a `task_updated` frame into local state. */
+    merge: (frame: TaskResponse) => void;
   }
 ): void {
-  const { taskId, refetch, appendEvent } = handlers;
+  const { taskId, refetch, appendEvent, current, merge } = handlers;
   if (taskId === undefined) return;
   if (event.type === 'task_event' && event.taskId === taskId) {
     appendEvent(event.event);
   } else if (event.type === 'task_updated' && event.task.id === taskId) {
-    refetch(taskId);
+    const prev = current();
+    merge(event.task);
+    // No baseline (should not happen once taskId is set) falls back to the
+    // refetch — over-fetching is recoverable, silently stale detail is not.
+    if (!prev || taskUpdateNeedsRefetch(prev, event.task)) {
+      refetch(taskId);
+    }
   }
 }
 
@@ -145,6 +180,11 @@ export function TaskDetail() {
   // snapshots of every task purely so we could filter for one id). See
   // `handleDashboardEvent` for what each event type does.
   const taskId = task?.id;
+  // Latest-value ref: the handler compares incoming `task_updated` frames
+  // against the loaded task to decide merge-vs-refetch, and reading state
+  // through a ref keeps that baseline fresh without resubscribing.
+  const taskRef = useRef<TaskDetailResponse | null>(null);
+  taskRef.current = task;
   useDashboardEvents((event) =>
     handleDashboardEvent(event, {
       taskId,
@@ -152,6 +192,9 @@ export function TaskDetail() {
         api.getTask(target).then(setTask).catch(() => {});
       },
       appendEvent: (row) => setTask((prev) => applyTaskEvent(prev, row)),
+      current: () => taskRef.current,
+      merge: (frame) =>
+        setTask((prev) => (prev ? { ...prev, ...frame } : prev)),
     })
   );
 

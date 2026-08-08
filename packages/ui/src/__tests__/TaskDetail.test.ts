@@ -1,12 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   handleDashboardEvent,
+  taskUpdateNeedsRefetch,
   appendTaskEvent,
   applyTaskEvent,
   deriveLastFailure,
   isNearTimeout,
 } from '../views/TaskDetail.js';
-import type { TaskDetailResponse, TaskEventResponse } from '../api.js';
+import type {
+  TaskDetailResponse,
+  TaskEventResponse,
+  TaskResponse,
+} from '../api.js';
 import type { DashboardWsEvent } from '../ws.js';
 
 // How TaskDetail reacts to the dashboard stream (issue #149). The timeline
@@ -30,16 +35,48 @@ function taskEvent(event: TaskEventResponse): DashboardWsEvent {
   return { type: 'task_event', taskId: event.task_id, event };
 }
 
-function detail(events: TaskEventResponse[]): TaskDetailResponse {
-  return { id: 42, events } as unknown as TaskDetailResponse;
+function detail(
+  events: TaskEventResponse[],
+  fields: Partial<TaskDetailResponse> = {}
+): TaskDetailResponse {
+  return {
+    id: 42,
+    status: 'queued',
+    attempt: 1,
+    container_id: null,
+    queue_position: 3,
+    events,
+    ...fields,
+  } as unknown as TaskDetailResponse;
+}
+
+/** A `task_updated` frame for the loaded task, differing from the harness's
+ *  baseline (`detail()`) only in `fields`. */
+function updated(fields: Partial<TaskResponse> = {}): DashboardWsEvent {
+  return {
+    type: 'task_updated',
+    task: {
+      id: 42,
+      status: 'queued',
+      attempt: 1,
+      container_id: null,
+      queue_position: 3,
+      ...fields,
+    } as never,
+  };
 }
 
 /** Drives the component's handler against a state double that stands in for
- *  `setTask`. `appendEvent` runs the component's OWN updater (`applyTaskEvent`)
- *  rather than a reimplementation, so a regression in that closure fails here. */
-function harness(taskId: number | undefined, events: TaskEventResponse[] = []) {
+ *  `setTask`. `appendEvent` and `merge` run the component's OWN updaters
+ *  (`applyTaskEvent`, the spread merge) rather than reimplementations, so a
+ *  regression in those closures fails here. */
+function harness(
+  taskId: number | undefined,
+  events: TaskEventResponse[] = [],
+  fields: Partial<TaskDetailResponse> = {}
+) {
   const refetch = vi.fn();
-  let current: TaskDetailResponse | null = detail(events);
+  let current: TaskDetailResponse | null = detail(events, fields);
   return {
     refetch,
     task: () => current,
@@ -50,6 +87,10 @@ function harness(taskId: number | undefined, events: TaskEventResponse[] = []) {
         refetch,
         appendEvent: (r) => {
           current = applyTaskEvent(current, r);
+        },
+        current: () => current,
+        merge: (frame) => {
+          current = current ? { ...current, ...frame } : current;
         },
       });
     },
@@ -112,23 +153,77 @@ describe('TaskDetail dashboard-event handling', () => {
     expect(h.refetch).not.toHaveBeenCalled();
   });
 
-  it('still refetches on a task_updated for this task', () => {
+  // task_updated fires for EVERY row write — queue reorders and
+  // profile-edit echoes included — so it must merge the frame instead of
+  // refetching, and pay for the full GET /api/tasks/:id only when the
+  // detail-only payload (attempts/events/forgejo_links) may have moved:
+  // a status, attempt, or container change.
+
+  it('merges a queue-reorder task_updated without refetching', () => {
     const h = harness(42);
 
-    h.send({
-      type: 'task_updated',
-      task: { id: 42 } as never,
-    });
+    h.send(updated({ queue_position: 9 }));
 
-    // task_updated carries the task but not its attempts/events, so the
-    // full fetch stays the reconciliation path for those.
+    expect(h.task()!.queue_position).toBe(9);
+    expect(h.refetch).not.toHaveBeenCalled();
+  });
+
+  it('merges a profile-edit echo without refetching', () => {
+    const h = harness(42);
+
+    h.send(
+      updated({
+        agent_profile_id: 'fast-profile',
+        effective_agent_profile_id: 'fast-profile',
+        agent_profile_source: 'task',
+      })
+    );
+
+    expect(h.task()!.agent_profile_id).toBe('fast-profile');
+    expect(h.task()!.agent_profile_source).toBe('task');
+    expect(h.refetch).not.toHaveBeenCalled();
+  });
+
+  it('preserves the detail-only payload across a merge', () => {
+    const h = harness(42, [row({ id: 7 })]);
+
+    h.send(updated({ queue_position: 9 }));
+
+    // The frame is a TaskView — no attempts/events/forgejo_links — so a
+    // wholesale replace would strip them. The merge must not.
+    expect(h.events().map((e) => e.id)).toEqual([7]);
+  });
+
+  it('refetches when the status changed', () => {
+    const h = harness(42);
+
+    h.send(updated({ status: 'preparing' }));
+
+    // Merged for the instant paint AND refetched to reconcile the detail.
+    expect(h.task()!.status).toBe('preparing');
+    expect(h.refetch).toHaveBeenCalledWith(42);
+  });
+
+  it('refetches when the attempt counter moved', () => {
+    const h = harness(42);
+
+    h.send(updated({ attempt: 2 }));
+
+    expect(h.refetch).toHaveBeenCalledWith(42);
+  });
+
+  it('refetches when the container changed', () => {
+    const h = harness(42);
+
+    h.send(updated({ container_id: 'abc123' }));
+
     expect(h.refetch).toHaveBeenCalledWith(42);
   });
 
   it('ignores a task_updated for another task and non-task events', () => {
     const h = harness(42);
 
-    h.send({ type: 'task_updated', task: { id: 43 } as never });
+    h.send({ type: 'task_updated', task: { id: 43, status: 'merged' } as never });
     h.send({ type: 'task_created', task: { id: 44 } as never });
     h.send({
       type: 'status_changed',
@@ -143,7 +238,38 @@ describe('TaskDetail dashboard-event handling', () => {
     });
 
     expect(h.refetch).not.toHaveBeenCalled();
+    expect(h.task()!.status).toBe('queued');
     expect(h.events()).toEqual([]);
+  });
+});
+
+// The pure refetch predicate on its own: the three fields that gate the
+// full GET /api/tasks/:id, and nothing else.
+describe('taskUpdateNeedsRefetch', () => {
+  const base = {
+    status: 'in-progress',
+    attempt: 2,
+    container_id: 'abc',
+  } as unknown as TaskResponse;
+
+  it('is false when status, attempt and container are unchanged', () => {
+    expect(
+      taskUpdateNeedsRefetch(base, {
+        ...base,
+        queue_position: 99,
+        issue_title: 'renamed',
+      } as unknown as TaskResponse)
+    ).toBe(false);
+  });
+
+  it('is true when any of the three gate fields changed', () => {
+    expect(
+      taskUpdateNeedsRefetch(base, { ...base, status: 'in-review' })
+    ).toBe(true);
+    expect(taskUpdateNeedsRefetch(base, { ...base, attempt: 3 })).toBe(true);
+    expect(
+      taskUpdateNeedsRefetch(base, { ...base, container_id: null })
+    ).toBe(true);
   });
 });
 
