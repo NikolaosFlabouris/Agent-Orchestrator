@@ -9,6 +9,8 @@ import type {
   InstallStepKind,
 } from '../../api.js';
 import { INSTALL_STEP_LABELS } from '../../api.js';
+import { Button } from '../../components/Button.js';
+import { Input, Select } from '../../components/Input.js';
 
 const INSTALL_STEP_KINDS: InstallStepKind[] = [
   'npm-ci',
@@ -172,7 +174,7 @@ export function RepoSettings() {
               <div className="min-w-0 sm:col-span-2">
                 <label htmlFor={repoSelectId} className="block text-sm mb-1">Repository</label>
                 {availableRepos.length > 0 ? (
-                  <select
+                  <Select
                     id={repoSelectId}
                     value={editing.owner && editing.name ? `${editing.owner}/${editing.name}` : ''}
                     onChange={(e) => {
@@ -181,13 +183,13 @@ export function RepoSettings() {
                         setEditing({ ...editing, owner: selected.owner, name: selected.name, base_branch: selected.default_branch });
                       }
                     }}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                    className="w-full"
                   >
                     <option value="">Select a repository...</option>
                     {availableRepos.map((r) => (
                       <option key={r.full_name} value={r.full_name}>{r.full_name}</option>
                     ))}
-                  </select>
+                  </Select>
                 ) : (
                   <p className="text-gray-500 text-sm py-2">No unregistered repositories found in Forgejo</p>
                 )}
@@ -195,18 +197,18 @@ export function RepoSettings() {
             )}
             <div className="min-w-0">
               <label htmlFor={baseBranchId} className="block text-sm mb-1">Base branch</label>
-              <input
+              <Input
                 id={baseBranchId}
                 value={editing.base_branch ?? 'main'}
                 onChange={(e) => setEditing({ ...editing, base_branch: e.target.value })}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0">
               <label htmlFor={implProfileId} className="block text-sm mb-1">
                 Default implementation profile
               </label>
-              <select
+              <Select
                 id={implProfileId}
                 value={editing.agent_profile_id ?? ''}
                 onChange={(e) =>
@@ -215,7 +217,7 @@ export function RepoSettings() {
                     agent_profile_id: e.target.value || null,
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               >
                 <option value="">Inherit (use global default)</option>
                 {/* Synthetic option for a dangling profile id so the
@@ -232,7 +234,7 @@ export function RepoSettings() {
                     {p.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
               {editing.agent_profile_id &&
                 !profiles.some((p) => p.id === editing.agent_profile_id) && (
                   <p className="mt-1 text-xs text-yellow-400">
@@ -245,7 +247,7 @@ export function RepoSettings() {
               <label htmlFor={reviewProfileId} className="block text-sm mb-1">
                 Default review profile
               </label>
-              <select
+              <Select
                 id={reviewProfileId}
                 value={editing.review_agent_profile_id ?? ''}
                 onChange={(e) =>
@@ -254,7 +256,7 @@ export function RepoSettings() {
                     review_agent_profile_id: e.target.value || null,
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               >
                 <option value="">
                   Inherit (global review default, else implementation profile)
@@ -274,7 +276,7 @@ export function RepoSettings() {
                     {p.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
               {editing.review_agent_profile_id &&
                 !profiles.some(
                   (p) => p.id === editing.review_agent_profile_id
@@ -287,24 +289,24 @@ export function RepoSettings() {
             </div>
             <div className="min-w-0">
               <label htmlFor={memoryId} className="block text-sm mb-1">Memory (MB)</label>
-              <input
+              <Input
                 id={memoryId}
                 type="number"
                 value={editing.container_memory_mb ?? ''}
                 onChange={(e) => setEditing({ ...editing, container_memory_mb: e.target.value ? parseInt(e.target.value, 10) : null })}
                 placeholder="Use global default"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0">
               <label htmlFor={cpuId} className="block text-sm mb-1">CPU cores</label>
-              <input
+              <Input
                 id={cpuId}
                 type="number"
                 value={editing.container_cpu_cores ?? ''}
                 onChange={(e) => setEditing({ ...editing, container_cpu_cores: e.target.value ? parseInt(e.target.value, 10) : null })}
                 placeholder="Use global default"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0 sm:col-span-2">
@@ -312,7 +314,7 @@ export function RepoSettings() {
                 Merge strategy
                 <span className="text-gray-500 font-normal"> — preferred PR merge style; resolved against the repo's Forgejo-side allowed list at merge time</span>
               </label>
-              <select
+              <Select
                 id={mergeStrategyId}
                 value={editing.merge_strategy ?? 'squash'}
                 onChange={(e) =>
@@ -321,12 +323,12 @@ export function RepoSettings() {
                     merge_strategy: e.target.value as 'squash' | 'merge' | 'rebase',
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               >
                 <option value="squash">squash</option>
                 <option value="merge">merge</option>
                 <option value="rebase">rebase</option>
-              </select>
+              </Select>
             </div>
           </div>
           <InstallStepsEditor
@@ -347,13 +349,12 @@ export function RepoSettings() {
               `px-4 py-2` only reaches 36px. Reset at `sm` so the desktop
               buttons keep their original height. */}
           <div className="flex gap-3">
-            <button
-              type="button"
+            <Button
               onClick={handleSave}
-              className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+              className="min-h-11 sm:min-h-0 px-4 py-2 text-sm"
             >
               Save
-            </button>
+            </Button>
             <button
               type="button"
               onClick={() => { setEditing(null); setIsNew(false); setError(null); }}

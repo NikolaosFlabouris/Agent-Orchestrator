@@ -11,6 +11,8 @@ import type {
 import { connectOutputWs } from '../ws.js';
 import type { DashboardWsEvent, OutputWsEvent } from '../ws.js';
 import { AppHeader } from '../components/AppHeader.js';
+import { StatusBadge } from '../components/StatusBadge.js';
+import { Button } from '../components/Button.js';
 import { useDashboardEvents } from '../components/LiveData.js';
 import { Timeline } from '../components/Timeline.js';
 import { Elapsed, RetryIn, useTicker } from '../components/LiveTime.js';
@@ -579,7 +581,7 @@ export function TaskDetail() {
             row wraps rather than compressing the title column beside it. */}
         <div className="min-w-0 lg:text-right">
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-            <StatusBadge status={task.status} />
+            <StatusBadge status={task.status} size="md" />
             {task.blocked && (
               <span
                 className="px-2 py-1 rounded text-sm font-medium bg-amber-900 text-amber-300"
@@ -684,69 +686,76 @@ export function TaskDetail() {
             (which never wraps) is unchanged. */}
         <div className="mx-auto max-w-7xl flex flex-wrap gap-3">
           {ACTIVE_STATUSES.has(task.status) && (
-            <button
+            <Button
+              variant="danger"
               onClick={() => handleAction({ action: 'cancel' })}
               disabled={actionPending}
-              className="text-sm px-3 py-1.5 rounded border border-red-800 text-red-400 hover:bg-red-950 disabled:opacity-50"
+              className="text-sm px-3 py-1.5"
             >
               Cancel
-            </button>
+            </Button>
           )}
           {task.status !== 'merged' && (
-            <button
+            <Button
+              variant="danger"
               onClick={() => handleAction({ action: 'close' })}
               disabled={actionPending}
-              className="text-sm px-3 py-1.5 rounded border border-red-800 text-red-400 hover:bg-red-950 disabled:opacity-50"
+              className="text-sm px-3 py-1.5"
               title="Resolve this task: close the Forgejo issue and mark the task cancelled"
             >
               Close
-            </button>
+            </Button>
           )}
           {task.status === 'in-review' && (
-            <button
+            <Button
+              variant="success"
               onClick={() => handleAction({ action: 'force_approve' })}
               disabled={actionPending}
-              className="text-sm px-3 py-1.5 rounded border border-green-800 text-green-400 hover:bg-green-950 disabled:opacity-50"
+              className="text-sm px-3 py-1.5"
             >
               Force Approve
-            </button>
+            </Button>
           )}
           {ACTIVE_STATUSES.has(task.status) && (
-            <button
+            <Button
+              variant="warn"
               onClick={() => handleAction({ action: 'force_fail' })}
               disabled={actionPending}
-              className="text-sm px-3 py-1.5 rounded border border-yellow-800 text-yellow-400 hover:bg-yellow-950 disabled:opacity-50"
+              className="text-sm px-3 py-1.5"
             >
               Force Fail
-            </button>
+            </Button>
           )}
            {RESETTABLE_STATUSES.has(task.status) && (
-             <button
+             <Button
+               variant="secondary"
                onClick={() => handleAction({ action: 'reset' })}
                disabled={actionPending}
-               className="text-sm px-3 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+               className="text-sm px-3 py-1.5"
              >
                Reset
-             </button>
+             </Button>
            )}
            {EXTENDABLE_STATUSES.has(task.status) && (
-             <button
+             <Button
+               variant="caution"
                ref={extendTriggerRef}
                onClick={() => { setExtendAmount(1); setExtendError(null); setExtendModalOpen(true); }}
                disabled={actionPending}
-               className="text-sm px-3 py-1.5 rounded border border-orange-800 text-orange-400 hover:bg-orange-950 disabled:opacity-50"
+               className="text-sm px-3 py-1.5"
              >
                Extend
-             </button>
+             </Button>
            )}
            {REQUEUEABLE_STATUSES.has(task.status) && (
-             <button
+             <Button
+               variant="info"
                onClick={() => handleAction({ action: 'requeue' })}
                disabled={actionPending}
-               className="text-sm px-3 py-1.5 rounded border border-blue-800 text-blue-400 hover:bg-blue-950 disabled:opacity-50"
+               className="text-sm px-3 py-1.5"
              >
                Requeue
-             </button>
+             </Button>
            )}
          </div>
 
@@ -837,13 +846,14 @@ export function TaskDetail() {
               <p className="text-xs text-red-400 mb-3">{extendError}</p>
             )}
             <div className="flex gap-3 justify-end">
-              <button
+              <Button
+                variant="secondary"
                 onClick={closeExtendModal}
                 disabled={actionPending}
-                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-50"
+                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5"
               >
                 Cancel
-              </button>
+              </Button>
               <button
                 onClick={handleExtend}
                 disabled={actionPending}
@@ -1579,30 +1589,6 @@ function HealthBadge() {
       title="The task's container has disappeared. The orchestrator will attempt recovery on the next sweep."
     >
       orphaned
-    </span>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    'in-progress': 'bg-blue-900 text-blue-300',
-    'in-review': 'bg-purple-900 text-purple-300',
-    'changes-needed': 'bg-yellow-900 text-yellow-300',
-    preparing: 'bg-gray-700 text-gray-300',
-    queued: 'bg-gray-700 text-gray-300',
-    merged: 'bg-green-900 text-green-300',
-    failed: 'bg-red-900 text-red-300',
-    cancelled: 'bg-gray-700 text-gray-400',
-    'awaiting-human-merge': 'bg-orange-900 text-orange-300',
-    'awaiting-human-review': 'bg-orange-900 text-orange-300',
-    'needs-human-review': 'bg-orange-900 text-orange-300',
-  };
-
-  return (
-    <span
-      className={`px-2 py-1 rounded text-sm font-medium ${colors[status] ?? 'bg-gray-700 text-gray-300'}`}
-    >
-      {status}
     </span>
   );
 }

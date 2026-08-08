@@ -34,6 +34,7 @@ import { TASK_STATUSES } from '@orchestrator/shared';
 import { useStore } from '../store.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { KpiCard } from '../components/KpiCard.js';
+import { StatusBadge } from '../components/StatusBadge.js';
 import { ChartCard } from '../components/ChartCard.js';
 import { DurationDistributionChart } from '../components/DurationDistributionChart.js';
 import { FunnelChart } from '../components/FunnelChart.js';
@@ -601,6 +602,12 @@ function ThroughputChart({
 // Status + verdict breakdowns
 // ---------------------------------------------------------------------------
 
+/** Bar fills for the status breakdown chart. Deliberately NOT the badge
+ *  map in `components/StatusBadge.tsx`: bars sit side by side and need
+ *  hues that are distinguishable from one another, where a badge wants a
+ *  muted background/foreground pair that stays readable behind text. The
+ *  two maps are allowed to disagree — e.g. `queued` is amber here and
+ *  gray as a badge. Keep the *set* of statuses in sync, not the colours. */
 const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
   merged: '#4ade80',
   failed: '#f87171',
@@ -1192,33 +1199,6 @@ function ReliabilitySection({
 
 const TASKS_PAGE_SIZE = 25;
 
-const TASK_STATUS_BADGE: Record<string, string> = {
-  'in-progress': 'bg-blue-900 text-blue-300',
-  'in-review': 'bg-purple-900 text-purple-300',
-  'changes-needed': 'bg-yellow-900 text-yellow-300',
-  preparing: 'bg-gray-700 text-gray-300',
-  queued: 'bg-yellow-900 text-yellow-300',
-  merged: 'bg-green-900 text-green-300',
-  failed: 'bg-red-900 text-red-300',
-  cancelled: 'bg-gray-700 text-gray-400',
-  reset: 'bg-gray-700 text-gray-400',
-  'awaiting-human-merge': 'bg-orange-900 text-orange-300',
-  'awaiting-human-review': 'bg-orange-900 text-orange-300',
-  'needs-human-review': 'bg-orange-900 text-orange-300',
-};
-
-function TaskStatusBadge({ status }: { status: string }) {
-  return (
-    <span
-      className={`whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ${
-        TASK_STATUS_BADGE[status] ?? 'bg-gray-700 text-gray-300'
-      }`}
-    >
-      {status}
-    </span>
-  );
-}
-
 /** Compact `YYYY-MM-DD HH:MM` (UTC) for the created/completed columns. */
 function formatTimestamp(ts: string | null): string {
   if (!ts) return '—';
@@ -1473,7 +1453,7 @@ function TaskRow({
         {task.repo ? `${task.repo.owner}/${task.repo.name}` : '—'}
       </td>
       <td className="py-2 pr-4">
-        <TaskStatusBadge status={task.status} />
+        <StatusBadge status={task.status} className="whitespace-nowrap" />
       </td>
       <td className="py-2 pr-4 text-xs text-gray-400">
         {task.model_id ? (

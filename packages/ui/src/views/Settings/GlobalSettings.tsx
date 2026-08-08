@@ -5,6 +5,7 @@ import type {
   AgentProfileResponse,
   HostCapacityResponse,
 } from '../../api.js';
+import { Button } from '../../components/Button.js';
 
 /** Global Settings tab — host resource pool + default agent profiles
  *  (implementation + review stages). */
@@ -270,14 +271,13 @@ export function GlobalSettings() {
       {/* `min-h-11` (44px) is the minimum comfortable touch target; the
           button's own `py-2` only reaches 36px. Reset at `sm` so the
           desktop button keeps its original height. */}
-      <button
-        type="button"
+      <Button
         onClick={handleSave}
         disabled={saving}
-        className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-6 py-2 rounded text-sm"
+        className="min-h-11 sm:min-h-0 disabled:bg-gray-700 px-6 py-2 text-sm"
       >
         {saving ? 'Saving...' : saved ? 'Saved' : 'Save settings'}
-      </button>
+      </Button>
     </div>
   );
 }

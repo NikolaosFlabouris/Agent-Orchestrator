@@ -8,6 +8,8 @@ import type {
   ModelResponse,
 } from '../../api.js';
 import { buildProviderSavePayload, type AuthTokenMode } from './providerSavePayload.js';
+import { Button } from '../../components/Button.js';
+import { Input, Select, Textarea, inputClasses } from '../../components/Input.js';
 
 /** Hit-area padding for the inline text buttons in the provider and
  *  model rows. The negative margin cancels the padding's effect on
@@ -201,30 +203,30 @@ export function ProviderSettings() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="min-w-0">
               <label htmlFor={idFieldId} className="block text-sm mb-1">ID</label>
-              <input
+              <Input
                 id={idFieldId}
                 value={editing.id ?? ''}
                 onChange={(e) => setEditing({ ...editing, id: e.target.value })}
                 disabled={!isNew}
                 placeholder="e.g. ollama-gpu"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+                className="w-full disabled:text-gray-500"
               />
             </div>
             <div className="min-w-0">
               <label htmlFor={displayNameId} className="block text-sm mb-1">Display name</label>
-              <input
+              <Input
                 id={displayNameId}
                 value={editing.display_name ?? ''}
                 onChange={(e) =>
                   setEditing({ ...editing, display_name: e.target.value })
                 }
                 placeholder="e.g. Ollama (GPU box)"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0 sm:col-span-2">
               <label htmlFor={kindId} className="block text-sm mb-1">Kind</label>
-              <select
+              <Select
                 id={kindId}
                 value={editing.kind ?? 'anthropic'}
                 onChange={(e) => {
@@ -252,14 +254,14 @@ export function ProviderSettings() {
                     setAuthTokenDraft('');
                   }
                 }}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               >
                 {kinds.map((k) => (
                   <option key={k.kind} value={k.kind}>
                     {k.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
               {editingKindSpec && (
                 <p className="text-xs text-gray-500 mt-1">{editingKindSpec.description}</p>
               )}
@@ -269,7 +271,7 @@ export function ProviderSettings() {
                 Concurrency limit
                 <span className="text-gray-500 font-normal"> — 0 pauses all profiles using this provider</span>
               </label>
-              <input
+              <Input
                 id={concurrencyId}
                 type="number"
                 min={0}
@@ -280,7 +282,7 @@ export function ProviderSettings() {
                     concurrency_limit: parseInt(e.target.value, 10) || 0,
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             {editingKindSpec.requires_base_url && (
@@ -288,14 +290,14 @@ export function ProviderSettings() {
                 <label htmlFor={baseUrlId} className="block text-sm mb-1">
                   Base URL <span className="text-red-400">*</span>
                 </label>
-                <input
+                <Input
                   id={baseUrlId}
                   value={editing.base_url ?? ''}
                   onChange={(e) =>
                     setEditing({ ...editing, base_url: e.target.value })
                   }
                   placeholder="http://192.168.1.10:11434"
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                  className="w-full"
                 />
               </div>
             )}
@@ -309,7 +311,7 @@ export function ProviderSettings() {
                     container as <span className="font-mono">{editingKindSpec.container_env_name}</span>.
                   </span>
                 </label>
-                <input
+                <Input
                   id={apiKeyEnvVarId}
                   value={editing.api_key_env_var ?? ''}
                   onChange={(e) =>
@@ -319,7 +321,7 @@ export function ProviderSettings() {
                     })
                   }
                   placeholder={editingKindSpec.container_env_name}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+                  className="w-full font-mono"
                 />
               </div>
             )}
@@ -345,7 +347,7 @@ export function ProviderSettings() {
                 // Edit-existing path: don't even render an input field.
                 // The stored value isn't available to the client, so any
                 // input here would be pre-filled with the wrong thing.
-                <div className="flex flex-wrap items-center gap-3 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm">
+                <div className={inputClasses('gray-800', 'flex flex-wrap items-center gap-3')}>
                   <span className="text-gray-300 font-mono">**** (stored)</span>
                   <button
                     type="button"
@@ -389,7 +391,7 @@ export function ProviderSettings() {
                 // providers, or edits to providers that have only an
                 // env-var pointer). Render a fresh input.
                 <div className="flex flex-wrap items-center gap-3">
-                  <input
+                  <Input
                     id={authTokenId}
                     type="password"
                     value={authTokenDraft}
@@ -404,7 +406,7 @@ export function ProviderSettings() {
                       editingKindSpec.auth_optional ? '(optional)' : 'paste token'
                     }
                     autoComplete="new-password"
-                    className="min-w-0 flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono"
+                    className="min-w-0 flex-1 font-mono"
                   />
                   {/* Cancel-set button only relevant when editing a row
                       that already has a stored token — gives the
@@ -428,26 +430,25 @@ export function ProviderSettings() {
           </div>
           <div>
             <label htmlFor={notesId} className="block text-sm mb-1">Notes (optional)</label>
-            <textarea
+            <Textarea
               id={notesId}
               value={editing.notes ?? ''}
               onChange={(e) =>
                 setEditing({ ...editing, notes: e.target.value || null })
               }
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm min-h-[60px]"
+              className="w-full min-h-[60px]"
             />
           </div>
           {/* `min-h-11` (44px) is the minimum comfortable touch target;
               `px-4 py-2` only reaches 36px. Reset at `sm` so the desktop
               buttons keep their original height. */}
           <div className="flex gap-3">
-            <button
-              type="button"
+            <Button
               onClick={handleSave}
-              className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm"
+              className="min-h-11 sm:min-h-0 px-4 py-2 text-sm"
             >
               Save
-            </button>
+            </Button>
             <button
               type="button"
               onClick={() => {
@@ -675,14 +676,13 @@ function ProviderModels({ providerId }: { providerId: string }) {
             placeholder="display name"
             className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
           />
-          <button
-            type="button"
+          <Button
             onClick={handleAdd}
             disabled={!draftId.trim() || !draftName.trim()}
-            className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white px-3 py-1 rounded text-xs"
+            className="min-h-11 sm:min-h-0 disabled:bg-gray-700 px-3 py-1 text-xs"
           >
             Add
-          </button>
+          </Button>
           <button
             type="button"
             onClick={() => {
