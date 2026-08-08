@@ -165,7 +165,7 @@ Field notes:
 - `review_agent_profile_id` is the per-task review-stage override; `null` means inherit from `repos.review_agent_profile_id` → `settings.default_review_agent_profile_id` → the effective implementation profile. Responses also carry the resolved `effective_agent_profile_id` / `agent_profile_source` and `effective_review_agent_profile_id` / `review_agent_profile_source` (`task` / `repo` / `global` / `implementation` / `none`) so the UI can render the inherit chains without re-deriving them
 - `has_human_review_label` is a live read of the Forgejo `human-review` driver label from the same snapshot the status derivation uses: `true` = the automated review agent is skipped (so the review profile is unused; the UI greys out its selector), `false` = it will run, `null` = unknown (no Forgejo snapshot available). GET responses only — POST/PATCH responses omit it
 - `blocked_by` is computed from dependency parsing (array of issue IDs that are still open)
-- Active and queued tasks are always returned in full; completed tasks are limited by `limit`
+- Active and queued tasks are always returned in full; completed tasks are limited to the `limit` most recently completed (by `completed_at`, newest first). The bound is applied in SQL (`getDashboardTasks`), so the handler's snapshot-warming and enrichment cost scales with what is returned, not with the total task history
 
 Frontend grouping: active = `status IN ('preparing', 'in-progress', 'in-review', 'changes-needed')`, queued = `status == 'queued'`, completed = everything else.
 

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   getTask,
   getTasks,
+  getDashboardTasks,
   getRepo,
   getAttempts,
   getTaskEvents,
@@ -81,9 +82,25 @@ export function createTaskRoutes(
       const query = request.query as { status?: string; limit?: string };
       const limit = parseInt(query.limit ?? '20', 10);
 
-      const allTasks = getTasks(
-        query.status ? { status: query.status as any } : undefined
-      );
+      // No-status form: push the completed-history bound into SQL so the
+      // snapshot warm + enrichment below scale with (active + queued +
+      // limit), not with the total task history. The margin above `limit`
+      // exists because bucketing happens AGAIN post-enrichment on the
+      // Forgejo-DERIVED status, which can flip a stored-live row into the
+      // completed bucket (issue closed externally, PR merged by hand) —
+      // derived flips only ever ADD to the completed bucket (deriveStatus
+      // never yields an active/queued status unless it was stored), so a
+      // small margin plus the final slice preserves the exact response
+      // contract. That contract is what the client's `syncTasks`
+      // (packages/ui/src/store.ts) relies on: a completed bucket that comes
+      // back SHORTER than `limit` promises the response is complete and may
+      // be pruned against; at-or-above `limit` means possibly truncated and
+      // the store declines to prune. Since stored-completed rows never leave
+      // the completed bucket, a short bucket still implies the history was
+      // exhausted — the contract holds unchanged.
+      const allTasks = query.status
+        ? getTasks({ status: query.status as any })
+        : getDashboardTasks(limit + 5);
 
       // One Docker call for the whole list — per-task lookup would scale
       // linearly with task count and N round-trips to the Docker socket on
@@ -118,6 +135,10 @@ export function createTaskRoutes(
         )
       );
 
+      // Safety pass: re-bucket on the DERIVED status and apply the final
+      // slice. getDashboardTasks bounded the completed rows by stored
+      // status; this is what folds derived-status flips into the right
+      // bucket and trims the margin back down to `limit`.
       if (!query.status) {
         const active: typeof enriched = [];
         const queued: typeof enriched = [];

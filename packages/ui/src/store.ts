@@ -219,6 +219,14 @@ export const useStore = create<DashboardState>((set) => ({
    *     nothing may be pruned from it. Omitting `completedLimit` disables
    *     pruning entirely, which makes `syncTasks` a plain bulk upsert.
    *
+   *     (The server now pushes that bound into SQL — `getDashboardTasks`
+   *     fetches the live rows in full plus a small margin over `limit` of
+   *     recently-completed rows, and the route still slices the enriched
+   *     completed bucket to exactly `limit`. Stored-completed rows can never
+   *     leave the completed bucket under derivation, so the comparison here
+   *     is unchanged: a completed bucket shorter than `limit` still means
+   *     the history was exhausted and the response is complete.)
+   *
    *     Bucketing by the LOCAL status instead is not a valid substitute: the
    *     server buckets on the Forgejo-derived status, which is exactly what
    *     this poll exists to discover. A task stored `in-progress` whose issue
