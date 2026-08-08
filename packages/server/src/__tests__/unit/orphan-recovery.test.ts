@@ -113,6 +113,8 @@ function mkAttempt(overrides: Partial<Attempt> = {}): Attempt {
     changed_files: null,
     additions: null,
     deletions: null,
+    error_message: null,
+    exit_code: null,
     ...overrides,
   };
 }

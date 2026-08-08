@@ -45,13 +45,13 @@ describe('v31 git-outage state migration', () => {
     }
   });
 
-  it('a fresh install has all four columns and schema_version 31', () => {
+  it('a fresh install has all four columns and the current schema_version', () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), 'orch-mig-v31-fresh-'));
     const db = initDatabase(path.join(tmpDir, 'v31-fresh.db'));
 
     const cols = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('31');
+    expect(schemaVersion(db)).toBe('32');
 
     db.close();
   });
@@ -135,7 +135,7 @@ describe('v31 git-outage state migration', () => {
     db = initDatabase(dbFile);
     const after = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('31');
+    expect(schemaVersion(db)).toBe('32');
 
     // The pre-existing task keeps its prep_failure_count and backfills to
     // "no outage in progress" — it must not look like it is mid-backoff.
@@ -170,7 +170,7 @@ describe('v31 git-outage state migration', () => {
     db = initDatabase(dbFile);
     const cols = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('31');
+    expect(schemaVersion(db)).toBe('32');
     db.close();
   });
 });

@@ -40,13 +40,13 @@ describe('v30 PR churn stats migration', () => {
     }
   });
 
-  it('a fresh install has all three churn columns and schema_version 30', () => {
+  it('a fresh install has all three churn columns and the current schema_version', () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), 'orch-mig-v30-fresh-'));
     const db = initDatabase(path.join(tmpDir, 'v30-fresh.db'));
 
     const cols = attemptColumns(db);
     for (const c of CHURN_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('31');
+    expect(schemaVersion(db)).toBe('32');
 
     db.close();
   });
@@ -103,7 +103,7 @@ describe('v30 PR churn stats migration', () => {
     db = initDatabase(dbFile);
     const after = attemptColumns(db);
     for (const c of CHURN_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('31');
+    expect(schemaVersion(db)).toBe('32');
 
     // The pre-existing attempt row keeps NULL (unknown) for every stat.
     const row = db

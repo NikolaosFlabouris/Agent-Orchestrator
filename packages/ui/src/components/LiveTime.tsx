@@ -89,6 +89,24 @@ export function elapsed(startedAt: string): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
+/** Countdown to a scheduled retry (`tasks.prep_next_attempt_at` /
+ *  `salvage_next_attempt_at`, both written as ISO UTC by the scheduler).
+ *  Reads "in 3m 12s"; once the timestamp has passed — or when nothing is
+ *  scheduled — it reads "now", because the retry then happens on the very
+ *  next scheduler tick. Pure: `now` is injected so tests need no clock. */
+export function retryIn(at: string | null, now: number = Date.now()): string {
+  if (!at) return 'now';
+  const target = new Date(at).getTime();
+  if (Number.isNaN(target)) return 'now';
+  const seconds = Math.ceil((target - now) / 1000);
+  if (seconds <= 0) return 'now';
+  if (seconds < 60) return `in ${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `in ${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `in ${hours}h ${minutes % 60}m`;
+}
+
 export function timeAgo(dateStr: string): string {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (seconds < 60) return 'just now';
@@ -105,6 +123,13 @@ export function timeAgo(dateStr: string): string {
 export function Elapsed({ startedAt }: { startedAt: string }) {
   useTicker(SECOND_MS);
   return <>{elapsed(startedAt)}</>;
+}
+
+/** Live-updating "retry in …" countdown. Per-second cadence — a countdown
+ *  that only moved every 30s would look stuck for most of a short backoff. */
+export function RetryIn({ at }: { at: string | null }) {
+  useTicker(SECOND_MS);
+  return <>{retryIn(at)}</>;
 }
 
 /** Live-updating "how long ago" label, on the coarser 30s cadence. */

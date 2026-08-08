@@ -4,6 +4,7 @@ import {
   appendTaskEvent,
   applyTaskEvent,
   deriveLastFailure,
+  isNearTimeout,
 } from '../views/TaskDetail.js';
 import type { TaskDetailResponse, TaskEventResponse } from '../api.js';
 import type { DashboardWsEvent } from '../ws.js';
@@ -303,5 +304,39 @@ describe('deriveLastFailure', () => {
     expect(
       deriveLastFailure(events('no_changes', 'status_failed'), 'queued')
     ).toBeNull();
+  });
+});
+
+// The running-attempt timeout warning (issue #174). A running attempt used
+// to render the literal string "running" even though the wire already
+// carried `started_at` and the launch-time `timeout_minutes_snapshot`; the
+// elapsed/budget label tints yellow once the run is close enough to the
+// timeout that the operator may want to intervene before the kill.
+describe('isNearTimeout', () => {
+  const started = '2026-01-01T12:00:00Z';
+  const at = (iso: string) => Date.parse(iso);
+
+  it('is false below 80% of the snapshotted budget', () => {
+    // 30m budget → the threshold is 24m.
+    expect(isNearTimeout(started, 30, at('2026-01-01T12:23:59Z'))).toBe(false);
+    expect(isNearTimeout(started, 30, at('2026-01-01T12:24:00Z'))).toBe(false);
+  });
+
+  it('is true past 80% of the budget', () => {
+    expect(isNearTimeout(started, 30, at('2026-01-01T12:24:01Z'))).toBe(true);
+    expect(isNearTimeout(started, 30, at('2026-01-01T12:45:00Z'))).toBe(true);
+  });
+
+  it('is false when the attempt carries no timeout snapshot', () => {
+    // Pre-v22 rows have no budget, so there is nothing to be near — the
+    // elapsed time is shown on its own, untinted, however long it runs.
+    expect(isNearTimeout(started, null, at('2026-01-02T00:00:00Z'))).toBe(false);
+    expect(isNearTimeout(started, 0, at('2026-01-02T00:00:00Z'))).toBe(false);
+  });
+
+  it('is false for an unparseable start time', () => {
+    expect(isNearTimeout('not-a-date', 30, at('2026-01-01T12:45:00Z'))).toBe(
+      false
+    );
   });
 });

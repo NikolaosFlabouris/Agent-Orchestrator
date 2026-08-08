@@ -41,7 +41,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 31;
+const CURRENT_SCHEMA_VERSION = 32;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -247,7 +247,13 @@ function createTables(db: Database.Database): void {
       -- conflated with a real 0. Reported as-is — no churn is derived here.
       changed_files INTEGER,
       additions INTEGER,
-      deletions INTEGER
+      deletions INTEGER,
+      -- Failure reason (v32), copied from the harness's result.json when a
+      -- run ends non-successfully. Both nullable: NULL on successful
+      -- attempts, on pre-v32 rows, and when the harness reported nothing.
+      -- exit_code NULL means "unknown", never a real 0.
+      error_message TEXT,
+      exit_code INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON attempts(task_id);
@@ -735,6 +741,35 @@ function runMigrations(db: Database.Database): void {
         for (const [col, decl] of newColumns) {
           if (!hasColumn('tasks', col)) {
             db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${decl}`);
+          }
+        }
+      }
+      if (version < 32) {
+        // v32: why an attempt ended. The scheduler already reads
+        // `error_message` / `exit_code` from the harness's result.json but
+        // had nowhere to put them, so a failed attempt rendered as a bare
+        // "failed" badge. Both nullable — existing rows (and every
+        // successful attempt) stay NULL, which the UI reads as "no reason
+        // recorded" rather than showing an empty line. exit_code NULL means
+        // unknown, never a real 0. createTables holds the canonical shape;
+        // the ALTERs below forward-migrate existing installs. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so guard via pragma_table_info to stay
+        // idempotent after a partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        const newColumns: Array<[string, string]> = [
+          ['error_message', 'TEXT'],
+          ['exit_code', 'INTEGER'],
+        ];
+        for (const [col, decl] of newColumns) {
+          if (!hasColumn('attempts', col)) {
+            db.exec(`ALTER TABLE attempts ADD COLUMN ${col} ${decl}`);
           }
         }
       }
@@ -1260,6 +1295,8 @@ export function updateAttempt(
       | 'changed_files'
       | 'additions'
       | 'deletions'
+      | 'error_message'
+      | 'exit_code'
     >
   >
 ): void {

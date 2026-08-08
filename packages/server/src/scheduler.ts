@@ -1936,6 +1936,19 @@ export class Scheduler {
               : {}),
           };
 
+    // Why the run ended (v32). The harness already reports these in
+    // result.json; without persisting them the UI can only say "failed".
+    // Recorded for non-successful runs only — a success has no failure
+    // reason, and its exit_code (0) carries no information. Absent fields
+    // stay NULL (unknown), never fabricated.
+    const failureUpdates =
+      result.status === 'success'
+        ? {}
+        : {
+            error_message: result.error_message ?? null,
+            exit_code: result.exit_code ?? null,
+          };
+
     updateAttempt(attemptId, {
       status: attemptStatus as any,
       completed_at: new Date().toISOString(),
@@ -1943,6 +1956,7 @@ export class Scheduler {
       log_path: path.join(getOutputDir(task), 'progress.log'),
       feedback,
       ...usageUpdates,
+      ...failureUpdates,
     });
   }
 

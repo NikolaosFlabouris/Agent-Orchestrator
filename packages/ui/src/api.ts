@@ -351,6 +351,10 @@ export interface AttemptResponse {
   model_id: string | null;
   /** Snapshot of the harness used at attempt-launch. */
   harness_id: string | null;
+  /** Snapshot of the profile's timeout_minutes at attempt-launch. Drives
+   *  the "elapsed / Nm" budget shown against a running attempt. NULL on
+   *  pre-v22 rows — the elapsed time is then shown on its own. */
+  timeout_minutes_snapshot: number | null;
   /** Per-run effort metrics read from the harness at completion. NULL =
    *  unknown (harness emitted no usage); never conflate with a real 0. */
   num_turns: number | null;
@@ -363,6 +367,13 @@ export interface AttemptResponse {
   changed_files: number | null;
   additions: number | null;
   deletions: number | null;
+  /** Why a non-successful run ended, as reported by the harness (v32).
+   *  NULL on successful attempts, on pre-v32 rows, and when the harness
+   *  reported no message. */
+  error_message: string | null;
+  /** Exit code of a non-successful run. NULL = unknown; never conflate
+   *  with a real 0. */
+  exit_code: number | null;
   feedback: string | null;
 }
 
