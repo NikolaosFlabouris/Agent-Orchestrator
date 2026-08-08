@@ -7,7 +7,7 @@ import {
   resolveStageProfileId,
 } from './db.js';
 import { getActiveResources } from './queue.js';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { TERMINAL_STATUSES, type OrchestratorAlert } from '@orchestrator/shared';
 import { broadcastDashboardEvent } from './ws/dashboard.js';
 import {
   DEFAULT_MAX_ATTEMPTS,
@@ -16,17 +16,20 @@ import {
 import { getSettingInt } from './db.js';
 import type { FastifyBaseLogger } from 'fastify';
 
-interface Alert {
-  level: 'info' | 'warning' | 'error';
-  message: string;
-}
-
 /**
  * Check all alert conditions and broadcast any active alerts.
  * Called periodically (e.g., every 60 seconds from the poller interval).
+ *
+ * Every alert carries a stable `id` (see `OrchestratorAlert`): this function
+ * recomputes the whole active set from scratch on each call, so an id that
+ * changed run-to-run would make a client-side dismissal impossible to honour
+ * for more than one poll. Task-specific classes key on `task.id`; the two
+ * classes that aggregate over many tasks use a fixed id and a null `task_id`.
  */
-export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
-  const alerts: Alert[] = [];
+export async function checkAlerts(
+  log: FastifyBaseLogger
+): Promise<OrchestratorAlert[]> {
+  const alerts: OrchestratorAlert[] = [];
 
   // 1. Task failed after max attempts
   const failedTasks = getTasks({ status: 'failed' });
@@ -37,8 +40,10 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
       const completedAt = new Date(task.completed_at).getTime();
       if (Date.now() - completedAt < 60 * 60 * 1000) {
         alerts.push({
+          id: `failed-max:${task.id}`,
           level: 'error',
           message: `Task #${task.issue_id} failed after ${maxAttempts} attempts`,
+          task_id: task.id,
         });
       }
     }
@@ -126,11 +131,13 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
           ? `snapshot of attempt #${source.attemptId}`
           : `live profile '${source.profileId}'`;
       alerts.push({
+        id: `stuck:${task.id}`,
         level: 'warning',
         message:
           `Task #${task.issue_id} appears stuck ` +
           `(running ${Math.floor(elapsed / 60000)}m, ` +
           `timeout is ${thresholdMinutes}m from ${sourceLabel})`,
+        task_id: task.id,
       });
     }
   }
@@ -152,8 +159,12 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
       ? `memory (${used.memoryMb}/${memTotal} MB)`
       : `CPU (${used.cpuCores}/${cpuTotal} cores)`;
     alerts.push({
+      // Aggregate over the whole host, not any one task — the queue is
+      // waiting collectively, so there is nothing to link to.
+      id: 'pool-saturated',
       level: 'info',
       message: `Host resource pool saturated on ${which}; ${queueDepth} task${queueDepth === 1 ? '' : 's'} waiting`,
+      task_id: null,
     });
   }
 
@@ -167,8 +178,10 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
       if (waitingMs > 24 * 60 * 60 * 1000) {
         const hours = Math.floor(waitingMs / (60 * 60 * 1000));
         alerts.push({
+          id: `awaiting-human:${task.id}`,
           level: 'warning',
           message: `Task #${task.issue_id} awaiting human action for ${hours}h (${task.status})`,
+          task_id: task.id,
         });
       }
     }
@@ -185,9 +198,14 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   if (backingOff.length > 0) {
     const worstLevel = Math.max(...backingOff.map((t) => t.prep_backoff_level));
     alerts.push({
+      // One alert for the whole outage, however many tasks are waiting on
+      // it — a per-task id would turn a git-host blip into a wall of
+      // identical banners, and there is one thing to fix, not N.
+      id: 'git-prep-backoff',
       // A single retry is ordinary noise; a task on its third-plus retry
       // means the host has been unreachable for several minutes at least.
       level: worstLevel >= 3 ? 'error' : 'warning',
+      task_id: null,
       message:
         `Git host unreachable — ${backingOff.length} task${backingOff.length === 1 ? '' : 's'} ` +
         `waiting on workspace-prep backoff (longest: retry ${worstLevel}). ` +
@@ -200,7 +218,11 @@ export async function checkAlerts(log: FastifyBaseLogger): Promise<Alert[]> {
   );
   if (deferredSalvage.length > 0) {
     alerts.push({
+      // Aggregate for the same reason as `git-prep-backoff` above: this is
+      // the other half of one git-host outage.
+      id: 'salvage-deferred',
       level: 'warning',
+      task_id: null,
       message:
         `${deferredSalvage.length} task${deferredSalvage.length === 1 ? '' : 's'} ` +
         `holding completed work that could not be pushed (git host unreachable). ` +

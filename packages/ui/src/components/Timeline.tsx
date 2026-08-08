@@ -1,35 +1,11 @@
 import type { TaskEventResponse } from '../api.js';
 
-const EVENT_ICONS: Record<string, string> = {
-  task_created: 'plus',
-  workspace_cloned: 'download',
-  branch_created: 'git-branch',
-  container_started: 'play',
-  container_exited: 'stop',
-  work_salvaged: 'save',
-  pr_created: 'pull-request',
-  pr_adopted: 'pull-request',
-  pr_recreated: 'pull-request',
-  pr_merged: 'merge',
-  review_verdict: 'check',
-  task_cancelled: 'x',
-  task_closed: 'x',
-  task_reset: 'refresh',
-  task_requeued: 'play',
-  recovery: 'alert',
-  // Known terminal-failure reasons recorded alongside status_failed so the
-  // timeline explains WHY a task failed instead of only "Task failed".
-  no_changes: 'empty',
-  salvage_failed: 'alert',
-  pr_creation_failed: 'alert',
-  // Git-host outage handling: the failure itself, the scheduled wait, and
-  // the eventual recovery. `prep_failed` carries the underlying git error.
-  prep_failed: 'alert',
-  prep_backoff: 'wait',
-  prep_recovered: 'check',
-  salvage_deferred: 'wait',
-  salvage_push_failed: 'alert',
-};
+// NOTE: an `EVENT_ICONS` map used to live here purely to derive each dot's
+// glyph from the first letter of an icon NAME ('download' → "D"), which read
+// as a meaningless initial and silently fell back to "•" for every event type
+// the map had never heard of. Every row now renders the same "•" and states
+// its `event_type` verbatim in the chip beside the timestamp — the raw type
+// is both more precise than an initial and impossible to fall out of date.
 
 const EVENT_COLORS: Record<string, string> = {
   status_merged: 'bg-green-500',
@@ -65,6 +41,22 @@ const EVENT_COLORS: Record<string, string> = {
   prep_recovered: 'bg-green-500',
   salvage_deferred: 'bg-amber-500',
   salvage_push_failed: 'bg-amber-500',
+  // The scheduler killed a run that blew past its timeout. Red: the attempt
+  // produced nothing and the task is worse off than before it started.
+  container_timeout_kill: 'bg-red-600',
+  // Orphan handling — the container vanished under a task that still looks
+  // active. Detection and the recovery attempt are amber (the orchestrator
+  // is handling it); exhaustion is red (it gave up, the task is dead).
+  orphan_detected: 'bg-amber-500',
+  orphan_recovery_triggered: 'bg-amber-500',
+  orphan_recovery_exhausted: 'bg-red-600',
+  // Status rows are written as `status_${status}` by state-sync, so the
+  // awaiting-human transitions need their own entries or they render in the
+  // default grey — the same orange the status badges use for "a person has
+  // to do something now".
+  'status_awaiting-human-merge': 'bg-orange-500',
+  'status_awaiting-human-review': 'bg-orange-500',
+  'status_needs-human-review': 'bg-orange-500',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {
@@ -87,15 +79,24 @@ export function Timeline({ events }: { events: TaskEventResponse[] }) {
               }`}
             >
               <span className="text-[10px] text-white font-bold">
-                {(EVENT_ICONS[event.event_type] ?? '').charAt(0).toUpperCase() || '\u2022'}
+                {'\u2022'}
               </span>
             </div>
 
             {/* Content */}
             <div className="flex-1 min-w-0 pb-1">
               <p className="text-sm text-gray-200">{event.message}</p>
-              <p className="text-xs text-gray-500 mt-0.5">
-                {formatTimestamp(event.created_at)}
+              {/* The raw event_type beside the timestamp. Messages are prose
+                  written per call site, so two rows can read alike while
+                  being entirely different events (`prep_failed` vs
+                  `salvage_push_failed`); the type is the thing to grep the
+                  server for. Wraps rather than pushing the row wide at
+                  375px \u2014 some types are long. */}
+              <p className="text-xs text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-2">
+                <span>{formatTimestamp(event.created_at)}</span>
+                <span className="text-[10px] font-mono text-gray-600 break-all">
+                  {event.event_type}
+                </span>
               </p>
             </div>
           </div>

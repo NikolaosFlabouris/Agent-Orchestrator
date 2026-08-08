@@ -73,6 +73,7 @@ export function Dashboard() {
   const paused = useStore((s) => s.paused);
   const forgejoBaseUrl = useStore((s) => s.forgejoBaseUrl);
   const alerts = useStore((s) => s.alerts);
+  const dismissAlert = useStore((s) => s.dismissAlert);
 
   const setStatus = useStore((s) => s.setStatus);
   const setHostPool = useStore((s) => s.setHostPool);
@@ -89,6 +90,11 @@ export function Dashboard() {
   // How many completed tasks the Recent list shows. Deliberately not
   // persisted — a fresh load starts at the default.
   const [recentLimit, setRecentLimit] = useState(DEFAULT_RECENT_LIMIT);
+  // True once a status poll has failed and no later one has succeeded. The
+  // header keeps rendering the last-known pool figures — blanking them would
+  // be worse than showing slightly old ones — so this flag is what stops
+  // those figures from silently passing as current.
+  const [statusStale, setStatusStale] = useState(false);
   const recentLimitSelectId = useId();
   // The task poll is an interval created once on mount, so its callback
   // reads the selection through a ref instead of closing over it. Putting
@@ -105,7 +111,7 @@ export function Dashboard() {
     // The dashboard WebSocket is NOT opened here — it's owned app-wide by
     // <LiveData> in main.tsx so it survives navigation. This effect only
     // owns the REST polls, which are per-view.
-    const { setForgejoBaseUrl, setHostPool: setHostPoolFn } =
+    const { setForgejoBaseUrl, setHostPool: setHostPoolFn, setAlerts } =
       useStore.getState();
 
     // Both timers below are RECONCILIATION BACKSTOPS, not the data path.
@@ -138,7 +144,17 @@ export function Dashboard() {
           cpu_total_cores: s.host_pool.cpu_total_cores,
         });
         setPools(s.providers ?? []);
-      }).catch(() => {});
+        setStatusStale(false);
+      }).catch(() => setStatusStale(true));
+      // Alerts ride the same tick rather than getting their own timer: they
+      // are the same kind of slow-moving operational state, and one cadence
+      // is one thing to reason about. They stay a SEPARATE request because
+      // `checkAlerts` walks every task plus its active attempt and resolved
+      // profile — folding that into /api/status would put a full table walk
+      // on the path the header's pool figures depend on. A failure is
+      // swallowed: the previous set stays on screen until the next tick,
+      // which is strictly better than blanking the banner on one bad poll.
+      api.getAlerts().then((res) => setAlerts(res.alerts)).catch(() => {});
     };
     refresh();
     const timer = window.setInterval(refresh, STATUS_POLL_MS);
@@ -202,7 +218,7 @@ export function Dashboard() {
         <span className={paused ? 'text-yellow-400' : 'text-green-400'}>
           {paused ? 'Paused' : 'Running'}
         </span>
-        <HostPoolDisplay pool={hostPool} />
+        <HostPoolDisplay pool={hostPool} stale={statusStale} />
         <span>Queue: {queueDepth}</span>
         <button
           onClick={async () => {
@@ -303,7 +319,7 @@ export function Dashboard() {
          </div>
        )}
 
-       <AlertBanner alerts={alerts} />
+       <AlertBanner alerts={alerts} onDismiss={dismissAlert} />
 
       <KpiStrip />
 
@@ -617,13 +633,20 @@ function CompletedItem({ task }: { task: TaskResponse }) {
 
 /** Compact, non-interactive KPI strip over a fixed last-30-days window.
  *  Reuses the Reports page KpiCard (compact variant) and links through to
- *  the full Reports view. Fails silently — a reporting hiccup must never
- *  break the operational Dashboard, so it simply renders nothing on error. */
+ *  the full Reports view. A reporting hiccup must never break the
+ *  operational Dashboard, so a failed fetch degrades to a one-line "Stats
+ *  unavailable" note rather than taking the page down — but it is a note,
+ *  not nothing: rendering an empty strip made a broken reports endpoint
+ *  indistinguishable from a still-loading one, forever. */
 const STRIP_WINDOW_DAYS = 30;
 
 function KpiStrip() {
   const [overview, setOverview] = useState<ReportsOverview | null>(null);
   const [prev, setPrev] = useState<ReportsOverview | null>(null);
+  // Only the primary-window fetch sets this. The comparison window is
+  // decoration (it renders the deltas); losing it alone is not worth a
+  // banner, so its failure leaves the strip fully populated minus arrows.
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -632,7 +655,7 @@ function KpiStrip() {
     api
       .getReportOverview({ from, to })
       .then((res) => !cancelled && setOverview(res))
-      .catch(() => {});
+      .catch(() => !cancelled && setFailed(true));
     if (previous) {
       api
         .getReportOverview({ from: previous.from, to: previous.to })
@@ -644,7 +667,16 @@ function KpiStrip() {
     };
   }, []);
 
-  if (!overview) return null;
+  if (!overview) {
+    if (!failed) return null; // still in flight — no placeholder flash
+    return (
+      <div className="border-b border-gray-800 bg-gray-900/40 px-6 py-3">
+        <p className="mx-auto max-w-7xl text-xs text-gray-500">
+          Stats unavailable
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="border-b border-gray-800 bg-gray-900/40 px-6 py-3">
@@ -693,7 +725,7 @@ function KpiStrip() {
   );
 }
 
-function HostPoolDisplay({ pool }: { pool: HostPool }) {
+function HostPoolDisplay({ pool, stale }: { pool: HostPool; stale?: boolean }) {
   const memPct = pool.memory_total_mb > 0
     ? Math.round((pool.memory_used_mb / pool.memory_total_mb) * 100)
     : 0;
@@ -706,6 +738,18 @@ function HostPoolDisplay({ pool }: { pool: HostPool }) {
   const usedGb = (pool.memory_used_mb / 1024).toFixed(1);
   return (
     <span title={`Host resource pool: memory ${pool.memory_used_mb}/${pool.memory_total_mb} MB · CPU ${pool.cpu_used_cores}/${pool.cpu_total_cores} cores`}>
+      {stale && (
+        /* The numbers beside this dot are the last ones that arrived, and
+           the poll that should have refreshed them failed. Marking them
+           beats both blanking the figures and letting stale ones pass as
+           current — the WebSocket keeps pushing pool changes, so they are
+           usually still right, just no longer confirmed. */
+        <span
+          className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5 align-middle"
+          title="Status poll failed — these figures are the last ones received and may be out of date."
+          aria-label="Status poll failed; figures may be out of date"
+        />
+      )}
       <span className={memColor}>Mem: {usedGb}/{memGb} GB</span>
       <span className="text-gray-600 mx-2">·</span>
       <span className={cpuColor}>CPU: {pool.cpu_used_cores}/{pool.cpu_total_cores}</span>
