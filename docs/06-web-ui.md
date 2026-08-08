@@ -43,7 +43,7 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Actions bar:** Cancel, Force Approve, Force Fail, Reset buttons (context-dependent). Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
 
-**Timeline:** chronological list of orchestrator events (preparing, container started, agent running, review started, merged, etc.) with timestamps.
+**Timeline:** chronological list of orchestrator events (preparing, container started, agent running, review started, merged, etc.) with timestamps. Each row also states its raw `event_type` in a muted monospace chip beside the timestamp — messages are prose written per call site, so two rows can read alike while being entirely different events, and the type is what you grep the server for. Rows are coloured by `event_type` (`EVENT_COLORS` in `Timeline.tsx`); the dot glyph itself is a uniform `•`.
 
 **Agent output panel:** live-streaming terminal-like display of agent output during execution. For completed tasks, shows the stored log.
 
@@ -537,6 +537,25 @@ All error responses include a JSON body: `{ "error": "Human-readable description
 
 The UI dashboard header uses `state`, `host_pool` (rendered as `Mem: used/total GB · CPU: used/total`), and `queue_depth`. The remaining fields (`forgejo_connected`, `last_poll_at`, `uptime_seconds`) are visibility-only — the orchestrator no longer alerts on a disk threshold (use OS-level disk monitoring instead). The host resource pool replaces the older count-based `active_slots` / `max_concurrency` pair: per-repo `container_memory_mb` / `container_cpu_cores` make a count of running tasks a leaky proxy for actual host capacity.
 
+When the status poll itself fails, the header keeps the last figures it received and marks them with a small amber dot (with an explanatory `title`) beside the host-pool display — blanking them would be worse than showing figures that are usually still correct via the WebSocket, but they must not silently pass as confirmed.
+
+#### GET /api/status/alerts Response
+
+```json
+{
+  "alerts": [
+    { "id": "stuck:12", "level": "warning", "message": "Task #47 appears stuck (running 190m, timeout is 60m from snapshot of attempt #31)", "task_id": 12 },
+    { "id": "git-prep-backoff", "level": "error", "message": "Git host unreachable — 3 tasks waiting on workspace-prep backoff…", "task_id": null }
+  ]
+}
+```
+
+`OrchestratorAlert` (`packages/shared/src/alerts.ts`) is shared by the server, the store, and `AlertBanner` — one definition, because it is a wire contract.
+
+`id` identifies the *condition*, not the computation. The endpoint recomputes the entire active set on every call, so a still-live condition must return under the same id or a client-side dismissal could not survive a single poll. Task-specific classes key on the orchestrator task id (`failed-max:12`, `stuck:12`, `awaiting-human:12`); the classes that aggregate over many tasks are fixed strings (`pool-saturated`, `git-prep-backoff`, `salvage-deferred`) and carry `task_id: null`. `task_id` is the orchestrator task id so the banner can link to `/tasks/:id` — alert *messages* quote the Forgejo issue number, which is what an operator recognises, and the two numbering spaces are not interchangeable.
+
+This is deliberately **not** folded into `GET /api/status`: `checkAlerts` walks every task plus its active attempt and resolved profile, which must not sit on the path the header's pool figures depend on. The Dashboard issues it as a second request on the same 60s status tick.
+
 ### WebSocket Endpoints
 
 ```
@@ -625,6 +644,16 @@ Snapshot handling is unchanged: `setSnapshot` still replaces task state wholesal
 ## Alerts
 
 Alerts are shown as a banner at the top of the dashboard for states requiring human attention. See [07 - Deployment & Operations](./07-deployment-operations.md) for the full alert conditions table with severity levels and actions.
+
+The Dashboard fetches `GET /api/status/alerts` on the same 60s tick as `GET /api/status` and puts the result in the store via `setAlerts`, which **replaces** the previous set: the endpoint recomputes the active set every call, so an alert that stops being returned has cleared. Alerts coloured by `level` (info/warning/error); one carrying a `task_id` wraps its message in a link to `/tasks/:id`.
+
+Each row has a dismiss `✕`. Dismissal is session-local (never persisted) and **not permanent**: the id is remembered only while the server keeps reporting it, and is forgotten as soon as the condition clears — so the same condition firing again later shows up again rather than being swallowed by a dismissal the operator made about an earlier incident. The rule lives in the pure `mergeAlerts(prev, incoming, dismissed)` in `store.ts` and is unit-tested there; it also returns the previous array unchanged when the visible list has not moved, so an identical poll result doesn't re-render every subscriber.
+
+### Failure banner (Task Detail)
+
+A failed task renders a red `role="alert"` panel above the timeline showing the full message of the event that explains the failure — the same panel the two structural prep failures (`agent_image_missing`, `harness_entrypoint_exec_failed`) have always used, now covering every failure class: `no_changes`, `salvage_failed`, `salvage_push_failed`, `pr_creation_failed`, `prep_failed`, `container_timeout_kill`, `orphan_recovery_exhausted`, and the generic `status_failed`. Structural failures keep the heading *"Task blocked — operator action needed"* (their message is a fix instruction) and still show while the task sits `queued`, which is where it waits between prep retries and after a reset; every other class reads *"Task failed — &lt;event_type&gt;"* and only shows on `failed`. `status_failed` is the fallback of last resort — state-sync writes one on every transition into `failed` and its text is generic, so the selection prefers the latest non-`status_failed` failure event from the same episode. The rule is the pure, unit-tested `deriveLastFailure(events, status)` in `TaskDetail.tsx`.
+
+Action failures are separate from load failures. A rejected `PATCH /api/tasks/:id` renders a dismissable inline error inside the Actions bar; only a failed *load* replaces the page with an error line. (Routing both into one state meant a refused Cancel blanked a fully loaded page.)
 
 ## Data Sources
 

@@ -1,11 +1,7 @@
 import { create } from 'zustand';
 import type { AuthUser, TaskResponse, AgentProfileResponse } from './api.js';
 import type { ConnectionState, HostPool } from './ws.js';
-
-interface Alert {
-  level: 'info' | 'warning' | 'error';
-  message: string;
-}
+import type { OrchestratorAlert } from '@orchestrator/shared';
 
 /** Statuses the orchestrator treats as "an agent is working on it". Shared
  *  between the Dashboard's bucketing and `completedCount` below so the two
@@ -28,6 +24,67 @@ function completedCount(tasks: TaskResponse[]): number {
     if (!ACTIVE_STATUSES.has(t.status) && t.status !== 'queued') count += 1;
   }
   return count;
+}
+
+/** Fold a fresh `GET /api/status/alerts` response into the store's alert
+ *  state. Exported as a pure function because the dismiss/re-fire rule below
+ *  is the only genuinely non-obvious thing about this slice, and it is worth
+ *  testing without a store or a DOM.
+ *
+ *  REPLACE, not merge: the endpoint recomputes the entire active set on every
+ *  call, so an alert missing from `incoming` means its condition has cleared,
+ *  not that the response was partial. There is no equivalent of `syncTasks`'
+ *  truncation problem here — the response is never capped.
+ *
+ *  Dismissal is client-only and deliberately not sticky forever. An id is
+ *  kept in the dismissed set only while the server still reports it; once the
+ *  condition clears, the id is forgotten, so the same condition re-firing
+ *  later (the same task gets stuck again, the git host drops out a second
+ *  time) shows up again instead of being silently swallowed by a dismissal
+ *  the operator made hours ago about a different incident.
+ *
+ *  Returns the inputs THEMSELVES when nothing they hold has changed — this
+ *  runs on a 60s poll whose result is usually identical, and handing back
+ *  fresh objects every tick would re-render `AlertBanner` (and every other
+ *  subscriber of these slices) for nothing. Same reasoning as the write
+ *  guard in `setConnection` below.
+ *
+ *  Never mutates its arguments. */
+export function mergeAlerts(
+  prev: OrchestratorAlert[],
+  incoming: OrchestratorAlert[],
+  dismissed: Set<string>
+): { alerts: OrchestratorAlert[]; dismissedAlertIds: Set<string> } {
+  const incomingIds = new Set(incoming.map((a) => a.id));
+  const nextDismissed = new Set<string>();
+  for (const id of dismissed) {
+    if (incomingIds.has(id)) nextDismissed.add(id);
+  }
+  const visible = incoming.filter((a) => !nextDismissed.has(a.id));
+
+  // Compare on the fields that are actually rendered: an alert's message
+  // carries live numbers (elapsed minutes, retry level), so identity has to
+  // be by value, not by id alone.
+  const unchanged =
+    visible.length === prev.length &&
+    visible.every((a, i) => {
+      const b = prev[i];
+      return (
+        b !== undefined &&
+        a.id === b.id &&
+        a.level === b.level &&
+        a.message === b.message &&
+        a.task_id === b.task_id
+      );
+    });
+
+  return {
+    alerts: unchanged ? prev : visible,
+    // `nextDismissed` is built by filtering `dismissed`, so equal sizes
+    // means equal contents.
+    dismissedAlertIds:
+      nextDismissed.size === dismissed.size ? dismissed : nextDismissed,
+  };
 }
 
 /** Monotonic per-resource counter the server bumps via the WS
@@ -59,7 +116,14 @@ interface DashboardState {
   queueDepth: number;
   paused: boolean;
   forgejoBaseUrl: string;
-  alerts: Alert[];
+  /** Active alerts from `GET /api/status/alerts`, minus the ones the
+   *  operator dismissed in this tab. Polled by the Dashboard. */
+  alerts: OrchestratorAlert[];
+  /** Alert ids hidden by an operator dismissal, pruned as soon as the
+   *  server stops reporting them — see `mergeAlerts`. Session-local and
+   *  deliberately not persisted: a dismissal means "I've seen this now",
+   *  not "never show me this condition again". */
+  dismissedAlertIds: Set<string>;
   resourceVersions: ResourceVersions;
   /** Signed-in Forgejo user, captured once at startup by the AuthGate
    *  via GET /api/me. Null when auth is disabled or the userinfo
@@ -90,8 +154,8 @@ interface DashboardState {
   }) => void;
   setHostPool: (hostPool: HostPool) => void;
   setForgejoBaseUrl: (url: string) => void;
-  addAlert: (alert: Alert) => void;
-  clearAlerts: () => void;
+  setAlerts: (alerts: OrchestratorAlert[]) => void;
+  dismissAlert: (id: string) => void;
   setAgentProfiles: (profiles: AgentProfileResponse[]) => void;
   setUser: (user: AuthUser | null) => void;
   /** Bump the version counter for one resource. Called by the WS
@@ -114,6 +178,7 @@ export const useStore = create<DashboardState>((set) => ({
   paused: false,
   forgejoBaseUrl: '',
   alerts: [],
+  dismissedAlertIds: new Set<string>(),
   resourceVersions: { providers: 0, models: 0, profiles: 0 },
   user: null,
   connection: 'reconnecting',
@@ -236,10 +301,16 @@ export const useStore = create<DashboardState>((set) => ({
   setHostPool: (hostPool) => set({ hostPool }),
   setForgejoBaseUrl: (url) => set({ forgejoBaseUrl: url }),
 
-  addAlert: (alert) =>
-    set((state) => ({ alerts: [...state.alerts, alert] })),
+  setAlerts: (alerts) =>
+    set((state) =>
+      mergeAlerts(state.alerts, alerts, state.dismissedAlertIds)
+    ),
 
-  clearAlerts: () => set({ alerts: [] }),
+  dismissAlert: (id) =>
+    set((state) => ({
+      alerts: state.alerts.filter((a) => a.id !== id),
+      dismissedAlertIds: new Set(state.dismissedAlertIds).add(id),
+    })),
 
   setAgentProfiles: (profiles) => set({ agentProfiles: profiles }),
 

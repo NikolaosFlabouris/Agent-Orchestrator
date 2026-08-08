@@ -15,6 +15,7 @@ import type {
   ReportTasksSort,
   TaskStatus,
   TaskView,
+  OrchestratorAlert,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -118,6 +119,13 @@ export const api = {
     request<StatusResponse>('GET', '/api/status'),
   getHostCapacity: () =>
     request<HostCapacityResponse>('GET', '/api/status/host-capacity'),
+  /** Active alert conditions, recomputed server-side on every call.
+   *  Deliberately a SEPARATE endpoint from `GET /api/status`: `checkAlerts`
+   *  walks every task (plus its active attempt and resolved profile), which
+   *  is far too much work to hang off the status poll the header depends on.
+   *  The Dashboard piggybacks this onto the same 60s tick instead. */
+  getAlerts: () =>
+    request<{ alerts: OrchestratorAlert[] }>('GET', '/api/status/alerts'),
   pause: () => request('POST', '/api/status/pause'),
   resume: () => request('POST', '/api/status/resume'),
 

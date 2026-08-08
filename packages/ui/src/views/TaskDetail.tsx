@@ -99,8 +99,14 @@ export function TaskDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [task, setTask] = useState<TaskDetailResponse | null>(null);
+  // `error` is LOAD failures only. It replaces the entire page with an
+  // error line, which is right when there is no task to show — and was
+  // very wrong for a rejected action PATCH, which used to blank a fully
+  // loaded page because the operator clicked Cancel on an already-cancelled
+  // task. Action failures go to `actionError` and render inline instead.
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [agentProfileError, setAgentProfileError] = useState<string | null>(null);
   const [reviewProfileError, setReviewProfileError] = useState<string | null>(null);
   const [extendModalOpen, setExtendModalOpen] = useState(false);
@@ -193,13 +199,16 @@ export function TaskDetail() {
     }
 
     setActionPending(true);
+    // Clear on start, not only on success: leaving the previous failure up
+    // while a new action runs makes it look like the new one failed too.
+    setActionError(null);
     try {
       await api.patchTask(task.id, action);
       // Reload task
       const updated = await api.getTask(task.id);
       setTask(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Action failed');
+      setActionError(err instanceof Error ? err.message : 'Action failed');
     } finally {
       setActionPending(false);
     }
@@ -720,6 +729,26 @@ export function TaskDetail() {
            )}
          </div>
 
+        {actionError && (
+          /* Inline and dismissable, right under the buttons that produced
+             it. A rejected PATCH (racing another operator, an action the
+             server refuses in this state) is a local, recoverable event —
+             it must not take the page down, which is what routing it into
+             the page-level `error` state used to do. */
+          <div
+            role="alert"
+            className="mx-auto max-w-7xl mt-3 flex items-start gap-2 rounded border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+          >
+            <span className="min-w-0 flex-1 break-words">{actionError}</span>
+            <button
+              onClick={() => setActionError(null)}
+              aria-label="Dismiss error"
+              className="min-h-11 sm:min-h-0 -my-1 shrink-0 px-2 opacity-70 hover:opacity-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Extend modal */}
@@ -807,17 +836,17 @@ export function TaskDetail() {
       )}
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-8">
-        {/* Structural failure banner — surfaces categorized prep
-            failures (e.g. agent image missing) with an actionable
-            fix message ABOVE the timeline so the operator doesn't
-            have to read raw docker logs to figure out what to fix.
-            Only renders while the task is still affected by the
-            structural problem: failed permanently, or queued with
-            non-zero prep_failure_count. A successful retry clears
-            the banner (the status moves out of those states and the
-            check returns null) — the old event row remains in the
-            timeline history as a record of what happened. */}
-        <StructuralFailureBanner task={task} />
+        {/* Failure banner — promotes the event that explains why the task
+            is in a bad state ABOVE the timeline, so the operator doesn't
+            have to scan twenty progress rows (or read raw docker logs) to
+            find it. Covers the categorized prep failures with their
+            actionable fix message AND every ordinary terminal failure
+            (no changes produced, salvage/PR/prep errors, timeout kills,
+            orphan exhaustion) — see `deriveLastFailure` for which status
+            admits which. A successful retry clears the banner; the old
+            event row remains in the timeline as a record of what
+            happened. */}
+        <FailureBanner task={task} />
 
         {/* Dependencies */}
         <DependencySection task={task} onChanged={setTask} />
@@ -892,6 +921,98 @@ const STRUCTURAL_FAILURE_EVENT_TYPES = new Set([
   'agent_image_missing',
   'harness_entrypoint_exec_failed',
 ]);
+
+/** Every event_type that explains why a task ended badly. The structural
+ *  pair above is the operator-actionable subset; the rest are the ordinary
+ *  ways a run dies, each written by a specific server call site with the
+ *  underlying error in its message:
+ *
+ *  - `no_changes`           — the agent produced no diff (agents/develop.ts)
+ *  - `salvage_failed` /
+ *    `salvage_push_failed`  — finished work could not be pushed
+ *  - `pr_creation_failed`   — the branch landed but the PR call failed
+ *  - `prep_failed`          — workspace prep hit a git error
+ *  - `container_timeout_kill` — the run blew past its timeout (scheduler)
+ *  - `orphan_recovery_exhausted` — the container vanished and recovery
+ *                             gave up (orphan-recovery.ts)
+ *  - `status_failed`        — the generic status row `state-sync` writes on
+ *                             every transition into `failed`
+ *
+ *  Before this set existed, only the two structural types got a banner and
+ *  every other failure was a timeline row indistinguishable from the twenty
+ *  progress rows above it. */
+const FAILURE_EVENT_TYPES = new Set([
+  ...STRUCTURAL_FAILURE_EVENT_TYPES,
+  'no_changes',
+  'salvage_failed',
+  'pr_creation_failed',
+  'prep_failed',
+  'salvage_push_failed',
+  'container_timeout_kill',
+  'orphan_recovery_exhausted',
+  'status_failed',
+]);
+
+/** What `FailureBanner` should show, or null for "nothing to report".
+ *
+ *  `kind` selects the heading only: 'structural' keeps the original
+ *  "operator action needed" wording (the message is a fix instruction),
+ *  'failure' names the event type (the message is a post-mortem). */
+export interface DerivedFailure {
+  event: TaskEventResponse;
+  kind: 'structural' | 'failure';
+}
+
+/** Pick the event that explains the task's current bad state.
+ *
+ *  Two statuses qualify, for different reasons:
+ *
+ *  - `failed` — terminal. Any failure-class event is fair game.
+ *  - `queued` — the structural-failure retry window. A task bounces back to
+ *    queued between transient prep failures, and stays there after a reset
+ *    the operator may not have fixed the cause of, so the structural banner
+ *    has to survive the trip. Non-structural failures are deliberately NOT
+ *    surfaced here: a queued task carrying an old `no_changes` from a
+ *    previous attempt is not currently failing at anything.
+ *
+ *  Any other status means the problem is no longer live — a successful retry
+ *  clears the banner, and the historical event stays in the timeline as the
+ *  record of what happened.
+ *
+ *  `status_failed` is the fallback of last resort. state-sync writes one on
+ *  every transition into `failed`, so it is present for essentially every
+ *  failed task, and its message is the generic status text — the specific
+ *  event from the same failure episode (`no_changes`, `prep_failed`, …) is
+ *  written moments earlier and says something useful. Hence: latest
+ *  non-`status_failed` failure event if there is one, else the latest
+ *  `status_failed`.
+ *
+ *  Pure — takes the rows and the status, touches no DOM or network. */
+export function deriveLastFailure(
+  events: TaskEventResponse[] | undefined,
+  status: string
+): DerivedFailure | null {
+  if (status !== 'failed' && status !== 'queued') return null;
+
+  const candidates = (events ?? []).filter((e) =>
+    status === 'queued'
+      ? STRUCTURAL_FAILURE_EVENT_TYPES.has(e.event_type)
+      : FAILURE_EVENT_TYPES.has(e.event_type)
+  );
+  if (candidates.length === 0) return null;
+
+  // Rows arrive in the server's `created_at ASC, id ASC` order, so "latest"
+  // is the last match.
+  const specific = candidates.filter((e) => e.event_type !== 'status_failed');
+  const event = (specific.length > 0 ? specific : candidates).at(-1)!;
+
+  return {
+    event,
+    kind: STRUCTURAL_FAILURE_EVENT_TYPES.has(event.event_type)
+      ? 'structural'
+      : 'failure',
+  };
+}
 
 /** What the user can do about each non-satisfied dependency state. The
  *  repair always happens on Forgejo (edit the issue body / close the dep
@@ -1019,26 +1140,12 @@ function DependencyRow({
   );
 }
 
-function StructuralFailureBanner({ task }: { task: TaskDetailResponse }) {
-  // Only show the banner when the underlying problem is still likely
-  // live. `failed` is the permanent-prep-failure case (3 retries
-  // exhausted). `queued` covers the in-flight retry window (the task
-  // bounces back to queued between transient prep failures) AND the
-  // post-reset state where the operator may not have fixed the
-  // underlying issue yet. Once the task moves past these (in-progress,
-  // in-review, merged, etc.) the structural problem is no longer
-  // blocking — the historical event row stays in the timeline as a
-  // record of what happened, but we stop nagging via the banner.
-  if (task.status !== 'failed' && task.status !== 'queued') return null;
-
-  // Pick the most recent structural-failure event the server recorded
-  // for this task. The server's message text is the canonical operator
-  // instruction; the UI just promotes it to a visible banner.
-  const matching = (task.events ?? []).filter((e) =>
-    STRUCTURAL_FAILURE_EVENT_TYPES.has(e.event_type)
-  );
-  if (matching.length === 0) return null;
-  const latest = matching[matching.length - 1];
+function FailureBanner({ task }: { task: TaskDetailResponse }) {
+  // All the selection logic lives in `deriveLastFailure` (pure, unit-tested);
+  // this component only picks a heading and renders the server's message
+  // verbatim — the server owns the wording in both cases.
+  const failure = deriveLastFailure(task.events, task.status);
+  if (!failure) return null;
 
   return (
     <section
@@ -1046,10 +1153,24 @@ function StructuralFailureBanner({ task }: { task: TaskDetailResponse }) {
       role="alert"
     >
       <h2 className="text-red-300 font-medium mb-1">
-        Task blocked — operator action needed
+        {failure.kind === 'structural' ? (
+          'Task blocked — operator action needed'
+        ) : (
+          <>
+            Task failed —{' '}
+            {/* The raw event_type, not a prettified label: it is what the
+                operator greps the server logs and source for, and a lookup
+                table of human names would silently render a new failure
+                type as "undefined". `break-all` keeps a long type from
+                widening the panel at 375px. */}
+            <span className="font-mono text-sm break-all">
+              {failure.event.event_type}
+            </span>
+          </>
+        )}
       </h2>
       <p className="text-sm text-gray-200 whitespace-pre-wrap">
-        {latest.message}
+        {failure.event.message}
       </p>
     </section>
   );

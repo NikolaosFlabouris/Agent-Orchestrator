@@ -3,6 +3,7 @@ import {
   handleDashboardEvent,
   appendTaskEvent,
   applyTaskEvent,
+  deriveLastFailure,
 } from '../views/TaskDetail.js';
 import type { TaskDetailResponse, TaskEventResponse } from '../api.js';
 import type { DashboardWsEvent } from '../ws.js';
@@ -193,5 +194,114 @@ describe('applyTaskEvent', () => {
 
   it('is a no-op before the task has loaded', () => {
     expect(applyTaskEvent(null, row({ id: 7 }))).toBeNull();
+  });
+});
+
+// Which event the failure banner promotes above the timeline (#173). Before
+// this, only the two structural prep failures got a banner and every other
+// way a task can die — no diff produced, salvage/PR/prep errors, timeout
+// kills, orphan exhaustion — was one timeline row among twenty, visually
+// identical to "Workspace cloned".
+describe('deriveLastFailure', () => {
+  /** Rows in the server's order: `created_at ASC, id ASC`. */
+  function events(...types: string[]) {
+    return types.map((event_type, i) =>
+      row({ id: i + 1, event_type, message: `${event_type} message` })
+    );
+  }
+
+  it('returns nothing for a task that is not failed or queued', () => {
+    for (const status of ['in-progress', 'in-review', 'merged', 'cancelled']) {
+      expect(deriveLastFailure(events('status_failed'), status)).toBeNull();
+    }
+  });
+
+  it('returns nothing when a failed task recorded no failure-class event', () => {
+    expect(
+      deriveLastFailure(events('workspace_cloned', 'container_started'), 'failed')
+    ).toBeNull();
+  });
+
+  it('tolerates a missing events list', () => {
+    expect(deriveLastFailure(undefined, 'failed')).toBeNull();
+  });
+
+  it('surfaces each non-structural failure class with the failure heading', () => {
+    for (const type of [
+      'no_changes',
+      'salvage_failed',
+      'pr_creation_failed',
+      'prep_failed',
+      'salvage_push_failed',
+      'container_timeout_kill',
+      'orphan_recovery_exhausted',
+    ]) {
+      const failure = deriveLastFailure(events(type), 'failed');
+      expect(failure).not.toBeNull();
+      expect(failure!.event.event_type).toBe(type);
+      expect(failure!.kind).toBe('failure');
+      // The banner renders the server's message verbatim.
+      expect(failure!.event.message).toBe(`${type} message`);
+    }
+  });
+
+  it('marks the structural types so they keep their operator-action heading', () => {
+    for (const type of ['agent_image_missing', 'harness_entrypoint_exec_failed']) {
+      expect(deriveLastFailure(events(type), 'failed')!.kind).toBe('structural');
+    }
+  });
+
+  it('prefers the specific failure over the generic status_failed beside it', () => {
+    // The real shape of a failure episode: the specific reason is written
+    // first, then state-sync appends the generic status row. Picking "the
+    // latest" naively would always land on the useless one.
+    const failure = deriveLastFailure(
+      events('container_started', 'no_changes', 'status_failed'),
+      'failed'
+    );
+    expect(failure!.event.event_type).toBe('no_changes');
+  });
+
+  it('falls back to status_failed when nothing more specific was recorded', () => {
+    const failure = deriveLastFailure(
+      events('container_started', 'status_failed'),
+      'failed'
+    );
+    expect(failure!.event.event_type).toBe('status_failed');
+    expect(failure!.kind).toBe('failure');
+  });
+
+  it('picks the most recent specific failure across several attempts', () => {
+    const failure = deriveLastFailure(
+      events('no_changes', 'status_failed', 'container_started', 'prep_failed'),
+      'failed'
+    );
+    expect(failure!.event.event_type).toBe('prep_failed');
+  });
+
+  it('picks the latest status_failed when that is all there is', () => {
+    const rows = [
+      row({ id: 1, event_type: 'status_failed', message: 'first' }),
+      row({ id: 2, event_type: 'status_failed', message: 'second' }),
+    ];
+    expect(deriveLastFailure(rows, 'failed')!.event.message).toBe('second');
+  });
+
+  it('keeps showing a structural failure while the task sits queued', () => {
+    // A task bounces back to `queued` between transient prep retries, and a
+    // reset leaves it there with the cause possibly unfixed — the operator
+    // instruction has to survive the trip.
+    const failure = deriveLastFailure(events('agent_image_missing'), 'queued');
+    expect(failure!.event.event_type).toBe('agent_image_missing');
+    expect(failure!.kind).toBe('structural');
+  });
+
+  it('does NOT surface a non-structural failure on a queued task', () => {
+    // A queued task carrying a `no_changes` from a previous attempt is
+    // waiting to run, not currently failing at anything.
+    expect(deriveLastFailure(events('no_changes'), 'queued')).toBeNull();
+    expect(
+      deriveLastFailure(events('no_changes', 'status_failed'), 'queued')
+    ).toBeNull();
   });
 });

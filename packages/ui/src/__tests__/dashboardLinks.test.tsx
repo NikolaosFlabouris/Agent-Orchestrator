@@ -25,6 +25,7 @@ const fakeState: Record<string, unknown> = {
   paused: false,
   forgejoBaseUrl,
   alerts: [],
+  dismissedAlertIds: new Set<string>(),
   agentProfiles: [],
   resourceVersions: { providers: 0, models: 0, profiles: 0 },
   user: null,
@@ -33,6 +34,8 @@ const fakeState: Record<string, unknown> = {
   setHostPool: () => {},
   setAgentProfiles: () => {},
   setForgejoBaseUrl: () => {},
+  setAlerts: () => {},
+  dismissAlert: () => {},
   syncTasks: () => {},
 };
 
@@ -54,6 +57,7 @@ vi.mock('../api.js', () => ({
   api: {
     getTasks: vi.fn().mockResolvedValue({ tasks: [] }),
     getStatus: vi.fn().mockResolvedValue({}),
+    getAlerts: vi.fn().mockResolvedValue({ alerts: [] }),
     getRepos: vi.fn().mockResolvedValue({ repos: [] }),
     getAgentProfiles: vi.fn().mockResolvedValue({ profiles: [] }),
     getReportOverview: vi.fn().mockResolvedValue(null),
