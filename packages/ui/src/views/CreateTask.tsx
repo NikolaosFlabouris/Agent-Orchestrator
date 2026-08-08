@@ -6,6 +6,8 @@ import { useStore } from '../store.js';
 import { AppHeader } from '../components/AppHeader.js';
 import { ProfileGaugeCard } from '../components/ProfileGaugeCard.js';
 import ReactMarkdown from 'react-markdown';
+import { Button } from '../components/Button.js';
+import { Input, Select, Textarea } from '../components/Input.js';
 
 type Mode = 'create' | 'queue';
 
@@ -209,11 +211,12 @@ export function CreateTask() {
             <label htmlFor={repoSelectId} className="block text-sm font-medium mb-1">
               Repository
             </label>
-            <select
+            <Select
               id={repoSelectId}
+              surface="gray-900"
               value={repoId ?? ''}
               onChange={(e) => setRepoId(e.target.value ? parseInt(e.target.value, 10) : null)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+              className="w-full"
             >
               <option value="">Select repository...</option>
               {repos.map((r) => (
@@ -221,7 +224,7 @@ export function CreateTask() {
                   {r.owner}/{r.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
 
           {mode === 'create' ? (
@@ -230,12 +233,13 @@ export function CreateTask() {
                 <label htmlFor={titleInputId} className="block text-sm font-medium mb-1">
                   Title
                 </label>
-                <input
+                <Input
                   id={titleInputId}
                   type="text"
+                  surface="gray-900"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                  className="w-full"
                   placeholder="Task title"
                 />
               </div>
@@ -271,11 +275,12 @@ export function CreateTask() {
                     <ReactMarkdown>{description}</ReactMarkdown>
                   </div>
                 ) : (
-                  <textarea
+                  <Textarea
                     id={descriptionInputId}
+                    surface="gray-900"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    className="w-full max-w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm font-mono min-h-[150px]"
+                    className="w-full max-w-full font-mono min-h-[150px]"
                     placeholder={`Describe the task...\n\n## Dependencies\n- [ ] #38\n- [ ] #39`}
                   />
                 )}
@@ -339,11 +344,12 @@ export function CreateTask() {
               <label htmlFor={profileSelectId} className="block text-sm font-medium mb-1">
                 Implementation profile
               </label>
-              <select
+              <Select
                 id={profileSelectId}
+                surface="gray-900"
                 value={agentProfile}
                 onChange={(e) => setAgentProfile(e.target.value)}
-                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full min-w-0"
               >
                 <option value="">Inherit (repo / global default)</option>
                 {profiles.map((p) => (
@@ -351,14 +357,15 @@ export function CreateTask() {
                     {p.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="min-w-0">
               <label htmlFor={reviewProfileSelectId} className="block text-sm font-medium mb-1">
                 Review profile
               </label>
-              <select
+              <Select
                 id={reviewProfileSelectId}
+                surface="gray-900"
                 value={reviewAgentProfile}
                 onChange={(e) => setReviewAgentProfile(e.target.value)}
                 disabled={humanReview}
@@ -367,7 +374,7 @@ export function CreateTask() {
                     ? 'Human review is enabled — the automated review agent does not run.'
                     : undefined
                 }
-                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm disabled:opacity-50"
+                className="w-full min-w-0 disabled:opacity-50"
               >
                 <option value="">
                   Inherit (review default, else implementation profile)
@@ -377,20 +384,21 @@ export function CreateTask() {
                     {p.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="min-w-0">
               <label htmlFor={maxAttemptsInputId} className="block text-sm font-medium mb-1">
                 Max attempts
               </label>
-              <input
+              <Input
                 id={maxAttemptsInputId}
                 type="number"
+                surface="gray-900"
                 value={maxAttempts}
                 onChange={(e) => setMaxAttempts(e.target.value)}
                 min="1"
                 placeholder="Default 7"
-                className="w-full min-w-0 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full min-w-0"
               />
             </div>
           </div>
@@ -482,17 +490,17 @@ export function CreateTask() {
             </label>
           </div>
 
-          <button
+          <Button
             type="submit"
             disabled={submitting}
-            className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white px-6 py-2 rounded text-sm font-medium"
+            className="min-h-11 sm:min-h-0 disabled:bg-gray-700 disabled:text-gray-500 px-6 py-2 text-sm font-medium"
           >
             {submitting
               ? 'Creating...'
               : mode === 'create'
                 ? 'Create and queue'
                 : 'Queue issue'}
-          </button>
+          </Button>
         </form>
       </main>
     </div>

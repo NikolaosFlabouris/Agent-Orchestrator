@@ -1,1 +1,23 @@
 @import "tailwindcss";
+
+/* The Create Task markdown preview renders with `prose prose-invert`,
+   which is this plugin's — without it those classes matched nothing and
+   the preview came out as unstyled runs of text. */
+@plugin "@tailwindcss/typography";
+
+@layer base {
+  :root {
+    /* The app is dark-only, but nothing told the browser that, so
+       UA-drawn chrome — <select> dropdown lists, the date pickers on
+       the Reports range inputs, scrollbars — kept rendering light. */
+    color-scheme: dark;
+  }
+
+  /* Keyboard focus was effectively invisible on most controls. This is
+     `:focus-visible`, not `:focus`, so it appears only for keyboard (and
+     other non-pointer) focus — clicking a button still shows nothing. */
+  :focus-visible {
+    outline: 2px solid var(--color-blue-500);
+    outline-offset: 2px;
+  }
+}

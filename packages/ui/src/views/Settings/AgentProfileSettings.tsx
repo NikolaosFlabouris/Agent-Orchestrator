@@ -8,6 +8,8 @@ import type {
   HarnessSpec,
   HarnessId,
 } from '../../api.js';
+import { Button } from '../../components/Button.js';
+import { Input, Select } from '../../components/Input.js';
 
 /** Hit-area padding for the inline text buttons in a profile row. The
  *  negative margin cancels the padding's effect on layout, so only the
@@ -267,30 +269,30 @@ export function AgentProfileSettings() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="min-w-0">
               <label htmlFor={idFieldId} className="block text-sm mb-1">ID</label>
-              <input
+              <Input
                 id={idFieldId}
                 value={editing.id ?? ''}
                 onChange={(e) => setEditing({ ...editing, id: e.target.value })}
                 disabled={!isNew}
                 placeholder="e.g. claude-sdk-sonnet"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm disabled:text-gray-500"
+                className="w-full disabled:text-gray-500"
               />
             </div>
             <div className="min-w-0">
               <label htmlFor={displayNameId} className="block text-sm mb-1">Display name</label>
-              <input
+              <Input
                 id={displayNameId}
                 value={editing.display_name ?? ''}
                 onChange={(e) =>
                   setEditing({ ...editing, display_name: e.target.value })
                 }
                 placeholder="e.g. Claude SDK + Sonnet"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0">
               <label htmlFor={harnessSelectId} className="block text-sm mb-1">Harness</label>
-              <select
+              <Select
                 id={harnessSelectId}
                 value={editing.harness_id ?? 'claude-sdk'}
                 onChange={(e) =>
@@ -300,14 +302,14 @@ export function AgentProfileSettings() {
                     config_json: {}, // reset knobs when harness changes
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               >
                 {harnesses.map((h) => (
                   <option key={h.id} value={h.id}>
                     {h.display_name}
                   </option>
                 ))}
-              </select>
+              </Select>
               <p className="text-xs text-gray-500 mt-1">
                 Supports kinds: {editingHarness.supported_provider_kinds.join(', ')}
               </p>
@@ -316,7 +318,7 @@ export function AgentProfileSettings() {
               <label htmlFor={timeoutId} className="block text-sm mb-1">
                 Timeout (minutes) <span className="text-red-400">*</span>
               </label>
-              <input
+              <Input
                 id={timeoutId}
                 type="number"
                 min={1}
@@ -327,7 +329,7 @@ export function AgentProfileSettings() {
                     timeout_minutes: parseInt(e.target.value, 10) || 1,
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                className="w-full"
               />
             </div>
             <div className="min-w-0 sm:col-span-2">
@@ -351,7 +353,7 @@ export function AgentProfileSettings() {
                 </p>
               ) : (
                 <>
-                  <select
+                  <Select
                     id={modelSelectId}
                     value={editing.model_pk ?? 0}
                     onChange={(e) =>
@@ -360,7 +362,7 @@ export function AgentProfileSettings() {
                         model_pk: parseInt(e.target.value, 10),
                       })
                     }
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+                    className="w-full"
                   >
                     <option value={0}>Select model…</option>
                     {/* If the profile points at a model that's no longer in
@@ -384,7 +386,7 @@ export function AgentProfileSettings() {
                         <span>{model.model_id}</span>)
                       </option>
                     ))}
-                  </select>
+                  </Select>
                   {editing.model_pk !== undefined &&
                     editing.model_pk !== 0 &&
                     !modelOptions.some(
@@ -427,15 +429,14 @@ export function AgentProfileSettings() {
                  target; `px-4 py-2` only reaches 36px. Reset at `sm` so
                  the desktop buttons keep their original height. */
               <div className="flex gap-3">
-                <button
-                  type="button"
+                <Button
                   onClick={handleSave}
                   disabled={saveDisabled}
                   title={saveTitle}
-                  className="min-h-11 sm:min-h-0 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white px-4 py-2 rounded text-sm"
+                  className="min-h-11 sm:min-h-0 disabled:bg-gray-700 disabled:cursor-not-allowed px-4 py-2 text-sm"
                 >
                   Save
-                </button>
+                </Button>
                 <button
                   type="button"
                   onClick={() => {
@@ -486,7 +487,7 @@ function HarnessConfigForm({
             {' '}— passed to <span className="font-mono">claude --max-turns N</span>
           </span>
         </label>
-        <input
+        <Input
           id={maxTurnsId}
           type="number"
           min={1}
@@ -495,7 +496,7 @@ function HarnessConfigForm({
             const n = parseInt(e.target.value, 10);
             onChange({ ...config, max_turns: Number.isFinite(n) && n > 0 ? n : 100 });
           }}
-          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
+          className="w-full"
         />
       </div>
     );

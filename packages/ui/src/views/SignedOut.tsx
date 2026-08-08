@@ -1,3 +1,5 @@
+import { buttonClasses } from '../components/Button.js';
+
 /** Public landing page shown after `/auth/logout` clears the
  *  orchestrator session cookie. Renders without an authenticated
  *  session and MUST NOT call any `/api/*` endpoint — the global
@@ -24,7 +26,10 @@ export function SignedOut() {
             released, so the button keeps its original size. */}
         <a
           href="/auth/login"
-          className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-4 py-2 rounded bg-blue-700 text-white text-sm font-medium hover:bg-blue-600"
+          className={buttonClasses(
+            'primary',
+            'inline-flex items-center justify-center min-h-11 sm:min-h-0 px-4 py-2 text-sm font-medium'
+          )}
         >
           Sign in
         </a>

@@ -8,6 +8,7 @@ import { CreateTask } from './views/CreateTask.js';
 import { Settings } from './views/Settings.js';
 import { Help } from './views/Help.js';
 import { SignedOut } from './views/SignedOut.js';
+import { NotFound } from './views/NotFound.js';
 import { AuthGate } from './components/AuthGate.js';
 import { LiveData } from './components/LiveData.js';
 
@@ -47,6 +48,9 @@ function App() {
           <Route path="/tasks/new" element={<CreateTask />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/help" element={<Help />} />
+          {/* Catch-all, inside the gated layout so an unknown path still
+              renders the app chrome instead of a blank page. */}
+          <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>
     </BrowserRouter>

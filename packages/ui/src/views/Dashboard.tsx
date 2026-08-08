@@ -9,6 +9,8 @@ import { AppHeader } from '../components/AppHeader.js';
 import { Elapsed, TimeAgo } from '../components/LiveTime.js';
 import { QueueList } from '../components/QueueList.js';
 import { KpiCard } from '../components/KpiCard.js';
+import { StatusBadge } from '../components/StatusBadge.js';
+import { Button } from '../components/Button.js';
 import { formatNumber, formatPercent } from '../components/reportFormat.js';
 import { defaultRange, previousRange } from '../components/reportFilter.js';
 import type { ReportsOverview } from '@orchestrator/shared';
@@ -220,7 +222,8 @@ export function Dashboard() {
         </span>
         <HostPoolDisplay pool={hostPool} stale={statusStale} />
         <span>Queue: {queueDepth}</span>
-        <button
+        <Button
+          variant={paused ? 'tonal-success' : 'tonal-warn'}
           onClick={async () => {
             if (paused) {
               await api.resume();
@@ -230,14 +233,10 @@ export function Dashboard() {
               setStatus({ paused: true, hostPool, queueDepth });
             }
           }}
-          className={`px-3 py-1 rounded text-xs font-medium ${
-            paused
-              ? 'bg-green-900 text-green-300 hover:bg-green-800'
-              : 'bg-yellow-900 text-yellow-300 hover:bg-yellow-800'
-          }`}
+          className="px-3 py-1 text-xs font-medium"
         >
           {paused ? 'Resume' : 'Pause'}
-        </button>
+        </Button>
         <Link to="/reports" className="text-blue-400 hover:text-blue-300">
           Reports
         </Link>
@@ -756,27 +755,3 @@ function HostPoolDisplay({ pool, stale }: { pool: HostPool; stale?: boolean }) {
     </span>
   );
 }
-
-function StatusBadge({ status, label }: { status: string; label?: string }) {
-  const colors: Record<string, string> = {
-    'in-progress': 'bg-blue-900 text-blue-300',
-    'in-review': 'bg-purple-900 text-purple-300',
-    'changes-needed': 'bg-yellow-900 text-yellow-300',
-    preparing: 'bg-gray-700 text-gray-300',
-    merged: 'bg-green-900 text-green-300',
-    failed: 'bg-red-900 text-red-300',
-    cancelled: 'bg-gray-700 text-gray-400',
-    'awaiting-human-merge': 'bg-orange-900 text-orange-300',
-    'awaiting-human-review': 'bg-orange-900 text-orange-300',
-    'needs-human-review': 'bg-orange-900 text-orange-300',
-  };
-
-  return (
-    <span
-      className={`px-2 py-0.5 rounded text-xs font-medium ${colors[status] ?? 'bg-gray-700 text-gray-300'}`}
-    >
-      {label ?? status}
-    </span>
-  );
-}
-
