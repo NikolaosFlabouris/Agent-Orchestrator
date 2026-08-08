@@ -250,3 +250,46 @@ export function filterLogLine(
   if (verbose) return { show: true, content: line };
   return classifyLogLine(line);
 }
+
+/** True when a displayed line carries error signal.
+ *
+ *  Reuses the two heuristics rule 1 of `doClassify` uses to force a raw line
+ *  through the terse filter (`ERROR`, `"type":"error"`) so a line that is
+ *  always-shown *because* it is an error also reads as one, plus the `[error]`
+ *  marker `classifyPiLine` appends to a failed `tool_execution_end` — that
+ *  compacted form no longer contains the raw JSON the first two would match.
+ *  Cheap enough to call per rendered line in both terse and verbose mode. */
+export function isErrorLine(content: string): boolean {
+  return (
+    content.includes('ERROR') ||
+    /"type"\s*:\s*"error"/.test(content) ||
+    content.includes('[error]')
+  );
+}
+
+/** A line as rendered by the output panel: its post-filter content plus the
+ *  index of the raw line it came from (stable React key across re-filters). */
+export interface VisibleLine {
+  index: number;
+  content: string;
+}
+
+/** Compose the panel's display list: terse/verbose processing first, then a
+ *  case-insensitive substring match over the *displayed* content — so a query
+ *  matches what the user can actually read, not the raw JSON behind a
+ *  compacted line. An empty/whitespace-only query filters nothing. */
+export function visibleLines(
+  lines: string[],
+  verbose: boolean,
+  query: string,
+): VisibleLine[] {
+  const needle = query.trim().toLowerCase();
+  const out: VisibleLine[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const result = filterLogLine(lines[i], verbose);
+    if (!result.show) continue;
+    if (needle && !result.content.toLowerCase().includes(needle)) continue;
+    out.push({ index: i, content: result.content });
+  }
+  return out;
+}

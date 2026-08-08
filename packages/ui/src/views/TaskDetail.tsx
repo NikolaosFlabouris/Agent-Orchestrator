@@ -14,7 +14,7 @@ import { AppHeader } from '../components/AppHeader.js';
 import { useDashboardEvents } from '../components/LiveData.js';
 import { Timeline } from '../components/Timeline.js';
 import { Elapsed, RetryIn, useTicker } from '../components/LiveTime.js';
-import { filterLogLine } from '../logFilter.js';
+import { isErrorLine, visibleLines } from '../logFilter.js';
 import { useStore } from '../store.js';
 
 const ACTIVE_STATUSES = new Set([
@@ -1207,6 +1207,9 @@ function AgentOutput({
   const [lines, setLines] = useState<string[]>([]);
   const [complete, setComplete] = useState(!isRunning);
   const [verbose, setVerbose] = useState(false);
+  const [query, setQuery] = useState('');
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   // True until the user scrolls up; keeps the panel following new output.
   const atBottomRef = useRef(true);
@@ -1233,13 +1236,33 @@ function AgentOutput({
     return disconnect;
   }, [taskId]);
 
+  // Everything the terse/verbose pass would show, ignoring the filter box —
+  // the denominator of "N of M lines" and the basis of the hidden count.
+  const shownLines = useMemo(
+    () => visibleLines(lines, verbose, ''),
+    [lines, verbose],
+  );
+  // The same pass with the query applied — skipped entirely when the box is
+  // empty, which is the common case and where the log is longest.
+  const displayLines = useMemo(
+    () => (query.trim() ? visibleLines(lines, verbose, query) : shownLines),
+    [lines, verbose, query, shownLines],
+  );
+
   // Sticky-bottom: scroll the panel (never the window) after new lines render,
-  // but only when the user is already near the bottom.
+  // but only when the user is already near the bottom. Filtering and expanding
+  // change the rendered height too, so they re-anchor on the same terms.
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container || !atBottomRef.current) return;
     container.scrollTop = container.scrollHeight;
-  }, [lines, verbose]);
+  }, [displayLines, expanded]);
+
+  // Clear the pending "Copied" reset if the panel unmounts first.
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+  }, []);
 
   function handleScroll() {
     const container = containerRef.current;
@@ -1248,12 +1271,21 @@ function AgentOutput({
     atBottomRef.current = scrollHeight - (scrollTop + clientHeight) < 32;
   }
 
-  const displayLines = useMemo(
-    () => lines.map((line) => filterLogLine(line, verbose)),
-    [lines, verbose],
-  );
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(
+        displayLines.map((l) => l.content).join('\n'),
+      );
+      setCopied(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard denied (insecure origin, permission) — no feedback to give.
+    }
+  }
 
-  const hiddenCount = verbose ? 0 : displayLines.filter((l) => !l.show).length;
+  const hiddenCount = verbose ? 0 : lines.length - shownLines.length;
+  const filtering = query.trim().length > 0;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -1261,24 +1293,64 @@ function AgentOutput({
           Live chip overflows 375px; the gaps only take effect once a line
           wraps, so the desktop bar is the same single row as before. */}
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2 border-b border-gray-800 text-sm">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="text-gray-400">progress.log</span>
-          {hiddenCount > 0 && (
+          {filtering ? (
             <span className="text-gray-500 text-xs italic">
-              {hiddenCount} verbose lines hidden
+              {displayLines.length} of {shownLines.length} lines
             </span>
+          ) : (
+            hiddenCount > 0 && (
+              <span className="text-gray-500 text-xs italic">
+                {hiddenCount} verbose lines hidden
+              </span>
+            )
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter…"
+            aria-label="Filter log lines"
+            className="min-h-11 sm:min-h-0 w-32 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 placeholder-gray-500"
+          />
+          <button
+            onClick={handleCopy}
+            className="min-h-11 sm:min-h-0 text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400 transition-colors"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+          {/* Plain link — the endpoint streams progress.log straight off disk,
+              so the full log stays reachable even when the panel is filtered
+              or its replay frame was tail-truncated. */}
+          <a
+            href={`/api/tasks/${taskId}/log`}
+            download={`task-${taskId}-progress.log`}
+            className="min-h-11 sm:min-h-0 flex items-center text-xs px-2 py-1 rounded border border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400 transition-colors"
+          >
+            Download
+          </a>
           <button
             onClick={() => setVerbose((v) => !v)}
-            className={`text-xs px-2 py-1 rounded border transition-colors ${
+            className={`min-h-11 sm:min-h-0 text-xs px-2 py-1 rounded border transition-colors ${
               verbose
                 ? 'border-blue-700 text-blue-400 bg-blue-950/50'
                 : 'border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
             }`}
           >
             {verbose ? 'Verbose' : 'Terse'}
+          </button>
+          <button
+            onClick={() => setExpanded((e) => !e)}
+            className={`min-h-11 sm:min-h-0 text-xs px-2 py-1 rounded border transition-colors ${
+              expanded
+                ? 'border-blue-700 text-blue-400 bg-blue-950/50'
+                : 'border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+            }`}
+          >
+            {expanded ? 'Collapse' : 'Expand'}
           </button>
           {!complete && (
             <span className="text-green-400 animate-pulse">Live</span>
@@ -1288,16 +1360,22 @@ function AgentOutput({
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="max-h-96 overflow-y-auto p-4 font-mono text-xs text-gray-300 whitespace-pre-wrap"
+        className={`${
+          expanded ? 'max-h-[75vh]' : 'max-h-96'
+        } overflow-y-auto p-4 font-mono text-xs text-gray-300 whitespace-pre-wrap`}
       >
         {lines.length === 0 ? (
           <span className="text-gray-500">
             {isRunning ? 'Waiting for output...' : 'No output available'}
           </span>
+        ) : displayLines.length === 0 && filtering ? (
+          <span className="text-gray-500">No lines match “{query.trim()}”</span>
         ) : (
-          displayLines.map((l, origIdx) =>
-            l.show ? <div key={origIdx}>{l.content}</div> : null
-          )
+          displayLines.map((l) => (
+            <div key={l.index} className={isErrorLine(l.content) ? 'text-red-400' : undefined}>
+              {l.content}
+            </div>
+          ))
         )}
       </div>
     </div>

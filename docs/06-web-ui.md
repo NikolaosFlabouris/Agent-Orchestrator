@@ -45,7 +45,16 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Timeline:** chronological list of orchestrator events (preparing, container started, agent running, review started, merged, etc.) with timestamps. Each row also states its raw `event_type` in a muted monospace chip beside the timestamp — messages are prose written per call site, so two rows can read alike while being entirely different events, and the type is what you grep the server for. Rows are coloured by `event_type` (`EVENT_COLORS` in `Timeline.tsx`); the dot glyph itself is a uniform `•`.
 
-**Agent output panel:** live-streaming terminal-like display of agent output during execution. For completed tasks, shows the stored log.
+**Agent output panel:** live-streaming terminal-like display of agent output during execution. For completed tasks, shows the stored log. Header controls (they wrap onto a second row at 375px):
+
+- **Filter box** — case-insensitive substring match applied *after* the terse/verbose pass, over the line as displayed: a query matches the compacted text you can read in terse mode and the raw JSON in verbose mode, and a line the terse filter hid can never match. While active the header reads "N of M lines" in place of the hidden-lines count.
+- **Copy** — writes the currently visible (filtered, terse-processed) lines to the clipboard, showing "Copied" for 1.5s. Nothing happens on an insecure origin, where `navigator.clipboard` rejects.
+- **Download** — a plain `<a download>` on `GET /api/tasks/:id/log`, which streams `progress.log` off disk. This is the escape hatch for both the filter and the replay tail cap below, so it is deliberately *not* wired to the panel's state.
+- **Terse/Verbose** and **Expand/Collapse** — the latter switches the panel between `max-h-96` and `max-h-[75vh]`.
+
+Lines carrying error signal render in `text-red-400` in both modes. The rule is `isErrorLine` in `logFilter.ts`: it reuses the same `ERROR` / `"type":"error"` heuristics that force a line past the terse filter, plus the `[error]` marker the terse pass appends to a failed `tool_execution_end` — the compacted form no longer contains the raw JSON the first two match. The compose step (`visibleLines(lines, verbose, query)`) is pure and unit-tested in `logFilter.test.ts`.
+
+There are deliberately no per-line timestamps: the replay frame is a raw file blob with no timestamps in it, and stamping lines with their chunk arrival time would be plainly wrong for replayed history.
 
 **Attempt history:** for tasks with multiple attempts, shows each attempt's duration, role (develop/review), result, the snapshotted `harness_id` and `model_id`, and review feedback received. A *running* attempt shows a live-ticking elapsed time against the timeout snapshotted at its launch (`3m / 30m`), turning yellow past 80% of that budget — the point past which the orchestrator will kill the run. A `failed` or `timeout` attempt shows the harness-reported reason in red (`attempts.error_message`, plus `(exit code N)` when known); attempts predating schema v32 have no reason stored and show none.
 
@@ -639,7 +648,9 @@ The task poll interval is deliberately *not* a multiple of the server's Forgejo 
 
 Snapshot handling is unchanged: `setSnapshot` still replaces task state wholesale.
 
-**Agent output stream (`/ws/tasks/:id/output`):** on connect, the server sends all buffered output from the current container's progress log, then streams new lines as they arrive. On reconnect, the same replay-then-stream behaviour ensures no output is missed. When the container exits, the server sends a final `{"event": "stream_complete"}` message and closes the connection.
+**Agent output stream (`/ws/tasks/:id/output`):** on connect, the server sends the buffered output from the current container's progress log, then streams new lines as they arrive. On reconnect, the same replay-then-stream behaviour ensures no output is missed. When the container exits, the server sends a final `{"event": "stream_complete"}` message and closes the connection.
+
+The replay frame is **capped at `MAX_REPLAY_BYTES` (256 KB)** (`buildReplayPayload` in `ws/output.ts`). A long run can leave a log of hundreds of megabytes, and the old `readFileSync`-the-whole-file replay pinned all of it in the server heap, the socket buffer, and the browser tab at once. Past the cap the server reads only the tail, cuts it forward to the first newline so the frame never opens mid-line (a half JSON event line would render as garbage), and prefixes `--- log truncated; use Download for the full file ---`. The UI needs no special handling — the marker is just another line — and the panel's Download link fetches the complete file. Live `output` chunks are unaffected: they are already bounded by what arrived since the last read.
 
 ## Alerts
 

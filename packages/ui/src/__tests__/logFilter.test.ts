@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyLogLine, filterLogLine } from '../logFilter.js';
+import { classifyLogLine, filterLogLine, isErrorLine, visibleLines } from '../logFilter.js';
 
 // ---------------------------------------------------------------------------
 // OpenCode noise suppression
@@ -352,5 +352,105 @@ describe('filterLogLine verbose mode', () => {
   it('terse mode still filters when verbose=false', () => {
     const line = 'INFO service=bus type=message.part.delta publishing';
     expect(filterLogLine(line, false).show).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isErrorLine — highlighting heuristics
+// ---------------------------------------------------------------------------
+describe('isErrorLine', () => {
+  it('flags a plain-text ERROR line', () => {
+    expect(isErrorLine('ERROR failed to start container')).toBe(true);
+  });
+
+  it('flags raw "type":"error" JSON (verbose mode)', () => {
+    expect(isErrorLine('{"type":"error","message":"agent crashed"}')).toBe(true);
+  });
+
+  it('flags "type": "error" with whitespace around the colon', () => {
+    expect(isErrorLine('{"type" : "error", "message":"x"}')).toBe(true);
+  });
+
+  it('flags the compacted tool_end error marker (terse mode)', () => {
+    const line = JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'id1', toolName: 'Bash',
+      result: 'command not found', isError: true,
+    });
+    const terse = filterLogLine(line, false);
+    expect(isErrorLine(terse.content)).toBe(true);
+  });
+
+  it('flags a raw error line in verbose mode, where content is unprocessed', () => {
+    const line = '{"type":"error","message":"agent crashed"}';
+    expect(isErrorLine(filterLogLine(line, true).content)).toBe(true);
+    expect(isErrorLine(filterLogLine(line, false).content)).toBe(true);
+  });
+
+  it('does not flag ordinary lines', () => {
+    expect(isErrorLine('[assistant] text: all good')).toBe(false);
+    expect(isErrorLine('INFO service=session.prompt user sent a message')).toBe(false);
+  });
+
+  it('is case-sensitive on ERROR — lowercase prose is not flagged', () => {
+    expect(isErrorLine('[assistant] text: handling the error path')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// visibleLines — terse/verbose processing then substring filtering
+// ---------------------------------------------------------------------------
+describe('visibleLines', () => {
+  const lines = [
+    'INFO service=bus type=message.part.delta publishing',      // 0: noise
+    JSON.stringify({ type: 'system', model: 'claude-sonnet-4', cwd: '/repo' }), // 1
+    'INFO service=session.prompt user sent a message',          // 2
+    'ERROR something went wrong',                               // 3
+  ];
+
+  it('drops noise and returns compacted content in terse mode', () => {
+    const result = visibleLines(lines, false, '');
+    expect(result.map((l) => l.index)).toEqual([1, 2, 3]);
+    expect(result[0].content).toBe('[system] init model=claude-sonnet-4 cwd=/repo');
+  });
+
+  it('keeps every line, raw, in verbose mode', () => {
+    const result = visibleLines(lines, true, '');
+    expect(result).toHaveLength(4);
+    expect(result.map((l) => l.content)).toEqual(lines);
+  });
+
+  it('matches case-insensitively on a substring', () => {
+    const result = visibleLines(lines, false, 'SOMETHING');
+    expect(result.map((l) => l.content)).toEqual(['ERROR something went wrong']);
+  });
+
+  it('matches the displayed content, not the raw JSON behind it', () => {
+    // "claude-sonnet-4" survives compaction; the raw-only key "cwd" quoting does not.
+    expect(visibleLines(lines, false, 'claude-sonnet-4')).toHaveLength(1);
+    expect(visibleLines(lines, false, '"model"')).toHaveLength(0);
+    // In verbose mode the raw JSON is what is displayed, so it matches.
+    expect(visibleLines(lines, true, '"model"')).toHaveLength(1);
+  });
+
+  it('applies the query after the terse filter — a hidden line never matches', () => {
+    expect(visibleLines(lines, false, 'message.part.delta')).toHaveLength(0);
+    expect(visibleLines(lines, true, 'message.part.delta')).toHaveLength(1);
+  });
+
+  it('treats an empty or whitespace-only query as no filter', () => {
+    expect(visibleLines(lines, false, '')).toHaveLength(3);
+    expect(visibleLines(lines, false, '   ')).toHaveLength(3);
+  });
+
+  it('trims surrounding whitespace from the query', () => {
+    expect(visibleLines(lines, false, '  went wrong  ')).toHaveLength(1);
+  });
+
+  it('returns indexes into the original array, so keys survive re-filtering', () => {
+    expect(visibleLines(lines, false, 'went wrong')[0].index).toBe(3);
+  });
+
+  it('returns an empty array for no lines', () => {
+    expect(visibleLines([], false, 'x')).toEqual([]);
   });
 });
