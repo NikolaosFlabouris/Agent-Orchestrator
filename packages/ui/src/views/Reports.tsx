@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -61,6 +61,92 @@ import {
  *  page opens on the same range the API would pick when given no bounds. */
 const DEFAULT_WINDOW_DAYS = 90;
 
+/** A background refresh triggered by refocusing the tab only fires when the
+ *  data on screen is at least this old — flipping between two windows for a
+ *  few seconds shouldn't re-run eleven aggregate queries. */
+const STALE_AFTER_MS = 60_000;
+
+/** Unconditional refresh cadence for a dashboard left open on a monitor. */
+const REFRESH_INTERVAL_MS = 5 * 60_000;
+
+// ---------------------------------------------------------------------------
+// URL-backed filter state
+// ---------------------------------------------------------------------------
+
+/** The filter state carried in the query string:
+ *  `?from=YYYY-MM-DD&to=YYYY-MM-DD&repos=1,3`. An empty `repos` means "all
+ *  repos" (the API's own default), which is why it serialises to no param
+ *  rather than to `repos=`. */
+export interface ReportParams {
+  from: string;
+  to: string;
+  repos: number[];
+}
+
+/** `<input type="date">` and the reports API both speak `YYYY-MM-DD`; the
+ *  shape check rejects strings `Date.parse` would accept but the backend
+ *  would read differently (`2026`, `Jan 5 2026`, a full ISO timestamp). */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isDateInput(value: string | null): value is string {
+  return value != null && DATE_RE.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+/** Parse the query string into filter state. Anything absent or malformed
+ *  falls back to `fallback`, so a hand-edited or truncated URL degrades to
+ *  the default view instead of erroring or querying nonsense.
+ *
+ *  `fallback` is a parameter rather than an internal `defaultRange()` call so
+ *  this stays pure: the default window depends on today's date, and the
+ *  caller already memoises it for the lifetime of the page (a range that
+ *  silently moved under an open tab would refetch at midnight). */
+export function parseReportParams(
+  params: URLSearchParams,
+  fallback: { from: string; to: string }
+): ReportParams {
+  const from = params.get('from');
+  const to = params.get('to');
+  return {
+    from: isDateInput(from) ? from : fallback.from,
+    to: isDateInput(to) ? to : fallback.to,
+    repos: parseRepoIds(params.get('repos')),
+  };
+}
+
+/** `1,3` → `[1, 3]`. Junk entries are dropped rather than failing the whole
+ *  param: ids are independent, and dropping one bad id still shows a sane
+ *  subset. All entries bad (or the param absent) means "all repos". */
+function parseRepoIds(raw: string | null): number[] {
+  if (!raw) return [];
+  const ids: number[] = [];
+  for (const part of raw.split(',')) {
+    const n = Number(part);
+    // Repo ids are positive integers; `Number('')` is 0 and `Number('1e3')`
+    // is 1000, so require the digits-only form explicitly.
+    if (!/^\d+$/.test(part.trim()) || !Number.isSafeInteger(n) || n <= 0) continue;
+    if (!ids.includes(n)) ids.push(n);
+  }
+  return ids;
+}
+
+/** Inverse of `parseReportParams`: state → query string. Values equal to the
+ *  API/page default (all repos) and any invalid date are omitted, so we never
+ *  write a param whose own parser would reject it. */
+export function serializeReportParams(state: ReportParams): URLSearchParams {
+  const params = new URLSearchParams();
+  if (isDateInput(state.from)) params.set('from', state.from);
+  if (isDateInput(state.to)) params.set('to', state.to);
+  if (state.repos.length > 0) params.set('repos', state.repos.join(','));
+  return params;
+}
+
+/** Whether a refocus should trigger a background refetch. `lastFetchedAt` is
+ *  0 before the first successful load, which reads as "stale" — correct: a
+ *  page whose first fetch failed should retry when the operator comes back. */
+export function isReportDataStale(lastFetchedAt: number, now: number): boolean {
+  return now - lastFetchedAt >= STALE_AFTER_MS;
+}
+
 const COLORS = {
   created: '#60a5fa',
   merged: '#4ade80',
@@ -95,10 +181,31 @@ interface ReportBundle {
 
 export function Reports() {
   const [repos, setRepos] = useState<RepoResponse[]>([]);
-  const [selectedRepoIds, setSelectedRepoIds] = useState<number[]>([]);
+
+  // Date range and repo selection live in the query string, so a filtered
+  // view is bookmarkable and survives a reload. The URL is the single source
+  // of truth — there is no mirrored `useState` to keep in sync with it.
+  const [searchParams, setSearchParams] = useSearchParams();
   const initialRange = useMemo(() => defaultRange(DEFAULT_WINDOW_DAYS), []);
-  const [from, setFrom] = useState(initialRange.from);
-  const [to, setTo] = useState(initialRange.to);
+  const { from, to, repos: selectedRepoIds } = useMemo(
+    () => parseReportParams(searchParams, initialRange),
+    [searchParams, initialRange]
+  );
+
+  /** Write a partial filter change back to the URL. `replace` because the
+   *  filter bar is a control surface, not navigation: without it, dragging a
+   *  date picker or toggling three repo chips buries the page the operator
+   *  arrived from under a pile of history entries. */
+  const updateParams = useCallback(
+    (patch: Partial<ReportParams>) => {
+      setSearchParams(
+        serializeReportParams({ from, to, repos: selectedRepoIds, ...patch }),
+        { replace: true }
+      );
+    },
+    [from, to, selectedRepoIds, setSearchParams]
+  );
+
   const [bucket, setBucket] = useState<'day' | 'week'>('day');
   const [boardGroup, setBoardGroup] = useState<'model' | 'harness'>('model');
   const [distGroup, setDistGroup] = useState<'model' | 'harness'>('model');
@@ -110,6 +217,40 @@ export function Reports() {
   const [data, setData] = useState<ReportBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Bumping this re-runs the aggregate fetch (and the All Tasks fetch) with
+  // the filters unchanged — the page is meant to be left open on a monitor,
+  // and until now it only ever refetched on a filter change or a remount.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const lastFetchedAt = useRef(0);
+  const lastRequestedAt = useRef(0);
+
+  useEffect(() => {
+    // Coming back to a backgrounded tab is the moment stale numbers are most
+    // visible, so refresh then — but only past STALE_AFTER_MS, so alt-tabbing
+    // to copy a number doesn't re-run every query.
+    const refreshIfStale = () => {
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (!isReportDataStale(lastFetchedAt.current, now)) return;
+      // A tab switch fires BOTH `visibilitychange` and `focus`, and the fetch
+      // the first one starts has not landed when the second arrives — so the
+      // success timestamp above is still stale and would wave it through.
+      // Gate the second one on when we last *asked*, not last succeeded.
+      if (!isReportDataStale(lastRequestedAt.current, now)) return;
+      lastRequestedAt.current = now;
+      setRefreshTick((t) => t + 1);
+    };
+    window.addEventListener('focus', refreshIfStale);
+    document.addEventListener('visibilitychange', refreshIfStale);
+    // The unconditional tick keeps an always-visible wall display current.
+    const id = setInterval(() => setRefreshTick((t) => t + 1), REFRESH_INTERVAL_MS);
+    return () => {
+      window.removeEventListener('focus', refreshIfStale);
+      document.removeEventListener('visibilitychange', refreshIfStale);
+      clearInterval(id);
+    };
+  }, []);
 
   // Deep-link support: when arriving with a hash (e.g. /reports#all-tasks
   // from the Dashboard's "View all" link), scroll that section into view.
@@ -193,6 +334,7 @@ export function Reports() {
           heatmap,
         ]) => {
           if (cancelled) return;
+          lastFetchedAt.current = Date.now();
           setData({
             overview,
             prevOverview,
@@ -219,12 +361,14 @@ export function Reports() {
       cancelled = true;
     };
     // repoKey stands in for the selectedRepoIds array identity.
-  }, [from, to, repoKey, bucket, distGroup, heatmapMetric]);
+  }, [from, to, repoKey, bucket, distGroup, heatmapMetric, refreshTick]);
 
   const toggleRepo = (id: number) => {
-    setSelectedRepoIds((ids) =>
-      ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]
-    );
+    updateParams({
+      repos: selectedRepoIds.includes(id)
+        ? selectedRepoIds.filter((x) => x !== id)
+        : [...selectedRepoIds, id],
+    });
   };
 
   const handleExport = (kind: 'csv' | 'json') => {
@@ -286,11 +430,11 @@ export function Reports() {
         repos={repos}
         selectedRepoIds={selectedRepoIds}
         onToggleRepo={toggleRepo}
-        onClearRepos={() => setSelectedRepoIds([])}
+        onClearRepos={() => updateParams({ repos: [] })}
         from={from}
         to={to}
-        onFromChange={setFrom}
-        onToChange={setTo}
+        onFromChange={(v) => updateParams({ from: v })}
+        onToChange={(v) => updateParams({ to: v })}
       />
 
       <main className="mx-auto max-w-7xl px-6 py-6 space-y-6">
@@ -361,6 +505,7 @@ export function Reports() {
           from={from}
           to={to}
           forgejoBaseUrl={forgejoBaseUrl}
+          refreshTick={refreshTick}
         />
       </main>
     </div>
@@ -1219,11 +1364,13 @@ function AllTasksSection({
   from,
   to,
   forgejoBaseUrl,
+  refreshTick,
 }: {
   selectedRepoIds: number[];
   from: string;
   to: string;
   forgejoBaseUrl: string;
+  refreshTick: number;
 }) {
   const [status, setStatus] = useState<TaskStatus | ''>('');
   const [searchInput, setSearchInput] = useState('');
@@ -1244,6 +1391,8 @@ function AllTasksSection({
   }, [searchInput]);
 
   // Any filter change that alters the result set resets to the first page.
+  // Deliberately NOT keyed on `refreshTick`: a background refresh should
+  // reload the page the operator is reading, not yank them back to page 1.
   useEffect(() => {
     setOffset(0);
   }, [repoKey, from, to, status, search, sort]);
@@ -1277,7 +1426,7 @@ function AllTasksSection({
       cancelled = true;
     };
     // repoKey stands in for the selectedRepoIds array identity.
-  }, [repoKey, from, to, status, search, sort, offset]);
+  }, [repoKey, from, to, status, search, sort, offset, refreshTick]);
 
   const total = page?.total ?? 0;
   const limit = page?.limit ?? TASKS_PAGE_SIZE;
