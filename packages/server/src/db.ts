@@ -41,7 +41,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 32;
+const CURRENT_SCHEMA_VERSION = 33;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -265,20 +265,21 @@ function createTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
-      -- Provider kind (anthropic, openai, ollama, etc.). Determines
-      -- credential shape, env-var name, default base_url, and which
-      -- harnesses can target this provider. See PROVIDER_KINDS.
+      -- Provider kind (anthropic, openai, openai-compatible, etc.).
+      -- Determines credential shape, env-var name, default base_url, and
+      -- which harnesses can target this provider. See PROVIDER_KINDS.
       kind TEXT NOT NULL,
       -- Per-provider concurrency cap (an upstream LLM constraint, e.g. an
-      -- API rate-limit bucket or a single Ollama server). 0 means "paused"
+      -- API rate-limit bucket or a single self-hosted GPU box). 0 means "paused"
       -- (no task assigned to this provider launches). NULL is not allowed.
       -- Independent from the host resource pool (settings.max_agent_memory_mb /
       -- max_agent_cpu_cores), which gates hardware capacity for every task.
       concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
       -- Connection URL. NULL for cloud kinds (uses kind's default). REQUIRED
-      -- for self-hosted kinds (ollama).
+      -- for self-hosted kinds (openai-compatible).
       base_url TEXT,
-      -- Inline secret (Ollama bearer/basic auth token, or a cloud API key
+      -- Inline secret (bearer/basic auth token for a self-hosted
+      -- endpoint, or a cloud API key
       -- when the operator is multi-instancing a kind without env-var
       -- indirection). NULL when api_key_env_var is used or no auth needed.
       auth_token TEXT,
@@ -773,6 +774,21 @@ function runMigrations(db: Database.Database): void {
           }
         }
       }
+      if (version < 33) {
+        // v33: the local-inference provider kind was renamed
+        // 'ollama' → 'openai-compatible'. Nothing about it was ever
+        // Ollama-specific — both harnesses that support it drive a
+        // generic OpenAI-completions endpoint at <base_url>/v1 — and in
+        // practice it fronts llama-swap/llama.cpp/vLLM just as often.
+        // Rewrite the kind on existing provider rows so they keep
+        // resolving against SPECS (providers/kinds.ts) after the rename;
+        // provider row ids are operator data and are left untouched.
+        // Idempotent (the WHERE matches nothing on a second run) and
+        // scoped to the one kind, so no other provider row is touched.
+        db.prepare(
+          "UPDATE providers SET kind = 'openai-compatible' WHERE kind = 'ollama'"
+        ).run();
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -887,8 +903,8 @@ function rebuildTasksWithRepoScopedUnique(db: Database.Database): void {
  *    set, the bootstrap profile launches successfully out of the box; if
  *    not, the profile is visible but flagged "missing credential" by the
  *    Settings UI.
- *  - Local Ollama is NOT seeded — operators add their own with the URL of
- *    their server. */
+ *  - No self-hosted (openai-compatible) provider is seeded — operators add
+ *    their own with the URL of their server. */
 function seedBootstrapProfile(db: Database.Database): void {
   const insertProvider = db.prepare(
     `INSERT OR IGNORE INTO providers

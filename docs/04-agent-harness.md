@@ -2,7 +2,7 @@
 
 ## Overview
 
-An **agent profile** is the operator-composed pairing that a task references. It names a code-defined **harness** (one of `claude-sdk`, `claude-code`, `opencode`, `pi`), a **model** scoped to a **provider** (anthropic / openai / ollama / …), a `config_json` blob the harness understands, and a wall-clock `timeout_minutes`. The orchestrator resolves `task → profile → model → provider` at launch time, asks the harness module to build a launch invocation from that tuple, and writes a meta.json into the agent container.
+An **agent profile** is the operator-composed pairing that a task references. It names a code-defined **harness** (one of `claude-sdk`, `claude-code`, `opencode`, `pi`), a **model** scoped to a **provider** (anthropic / openai / openai-compatible / …), a `config_json` blob the harness understands, and a wall-clock `timeout_minutes`. The orchestrator resolves `task → profile → model → provider` at launch time, asks the harness module to build a launch invocation from that tuple, and writes a meta.json into the agent container.
 
 The **harness** itself is the container entrypoint. It manages dependency install, agent invocation, and result capture; the orchestrator manages everything else (git operations, Forgejo interaction, state transitions). The harness is deliberately simple — it runs the agent and reports what happened.
 
@@ -187,7 +187,7 @@ since the harness/provider mismatch is the categorical error.
 |---|---|---|---|
 | `claude-sdk` | sdk | `anthropic` | `query()` from `@anthropic-ai/claude-agent-sdk`. Reads `meta.model` and runs the SDK call directly. The simplest, most-tested harness; the v21 bootstrap profile uses this. |
 | `claude-code` | cli | `anthropic`, `claude-subscription` | Wraps the `claude` CLI with `--bare --dangerously-skip-permissions --print --verbose --output-format stream-json`. The `--bare` flag is important: it skips OAuth, keychain reads, CLAUDE.md loading, and MCP server discovery. |
-| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, ollama) | Wraps `opencode run "$(cat /task/prompt.md)"`. For Ollama, the harness emits an `opencode.json` config file dropped into `/repo/` (orchestrator side) and adds it to `.git/info/exclude` so it never lands in a commit. For cloud providers, OpenCode reads provider/model from env vars the harness exports via `extra_env`. |
+| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | Wraps `opencode run "$(cat /task/prompt.md)"`. For `openai-compatible`, the harness emits an `opencode.json` config file dropped into `/repo/` (orchestrator side) and adds it to `.git/info/exclude` so it never lands in a commit. For cloud providers, OpenCode reads provider/model from env vars the harness exports via `extra_env`. |
 | `pi` | cli | every kind pi supports | `@mariozechner/pi-coding-agent`. Uses `pi -p --mode json --no-session --model <provider-prefixed-id> @/task/prompt.md`. For Ollama, pi requires a `~/.pi/agent/models.json` file outside `/repo/`; since the orchestrator can't write into the container's home from outside, the pi harness inlines a `mkdir -p ~/.pi/agent && printf ... > ~/.pi/agent/models.json && pi ...` sequence into `agent_command`. See `harnesses/pi.ts` for the worked example. |
 
 ### Adding a new harness
@@ -213,8 +213,9 @@ an agent.
 
 A **provider** captures the connection identity of an LLM endpoint:
 `kind` (anthropic / openai / gemini / mistral / deepseek / openrouter /
-claude-subscription / ollama), `concurrency_limit`, optional `base_url`
-(required for ollama, defaulted for cloud kinds), and exactly one of
+claude-subscription / openai-compatible), `concurrency_limit`, optional
+`base_url` (required for openai-compatible, defaulted for cloud kinds),
+and exactly one of
 `api_key_env_var` (orchestrator reads from its own env at launch) or
 `auth_token` (inline plaintext, useful for multi-instance Ollama or for
 multi-account setups on the same cloud kind).

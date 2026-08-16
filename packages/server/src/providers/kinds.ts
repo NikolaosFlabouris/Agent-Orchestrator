@@ -9,10 +9,12 @@ import type { ProviderKind, Provider } from '@orchestrator/shared';
  *      (the standard name read by the inference SDK / CLI for this kind)
  *    - Render kind-appropriate form fields in the UI
  *
- *  Each entry here is paired with a hand-rolled React form component on
- *  the client (`packages/ui/src/components/provider-forms/<kind>.tsx`).
- *  Adding a new kind requires editing this table, the shared
- *  `PROVIDER_KINDS` enum, and shipping the matching UI form. */
+ *  There is no per-kind form component on the client: the Providers tab
+ *  (`packages/ui/src/views/Settings/ProviderSettings.tsx`) renders one
+ *  generic form driven by the fields of this spec, which the server
+ *  serves from GET /api/provider-kinds. Adding a new kind therefore
+ *  means editing this table and the shared `PROVIDER_KINDS` enum; the
+ *  form picks the new kind up without further UI work. */
 export interface ProviderKindSpec {
   kind: ProviderKind;
   display_name: string;
@@ -27,9 +29,10 @@ export interface ProviderKindSpec {
    *  whether the operator stored the credential as an env-var pointer
    *  (`api_key_env_var`) or inline (`auth_token`). */
   container_env_name: string | null;
-  /** True when no auth is required at all (e.g., a vanilla Ollama with
-   *  no front-door token). The Providers form should still allow an
-   *  optional auth_token for setups that put basic-auth in front. */
+  /** True when no auth is required at all (e.g., a vanilla Ollama /
+   *  llama.cpp server with no front-door token). The Providers form
+   *  should still allow an optional auth_token for setups that put
+   *  basic-auth in front. */
   auth_optional: boolean;
 }
 
@@ -92,14 +95,16 @@ const SPECS: Record<ProviderKind, ProviderKindSpec> = {
     container_env_name: 'OPENROUTER_API_KEY',
     auth_optional: false,
   },
-  ollama: {
-    kind: 'ollama',
-    display_name: 'Ollama (self-hosted)',
+  'openai-compatible': {
+    kind: 'openai-compatible',
+    display_name: 'OpenAI-compatible (self-hosted)',
     description:
-      'Local or remote Ollama server. Multi-instance: register one provider row per server.',
+      'Any server exposing an OpenAI-compatible /v1 endpoint (Ollama, ' +
+      'llama.cpp/llama-swap, vLLM, …). Multi-instance: register one ' +
+      'provider row per server.',
     requires_base_url: true,
-    // OLLAMA_AUTH_TOKEN is an orchestrator convention — Ollama's wire
-    // protocol takes a Bearer header that's only meaningful when the
+    // OPENAI_COMPAT_AUTH_TOKEN is an orchestrator convention — these
+    // endpoints take a Bearer header that's only meaningful when the
     // operator has put basic-auth / a reverse proxy in front. We
     // export the resolved credential under this name so the harnesses
     // can reference it from runtime jq substitutions instead of
@@ -107,16 +112,17 @@ const SPECS: Record<ProviderKind, ProviderKindSpec> = {
     // (which would otherwise persist into meta.json / scheduler logs
     // / repo-side artifacts — H2).
     //
-    // CAVEAT: the in-container default `${OLLAMA_AUTH_TOKEN:-ollama}`
-    // (see harnesses/opencode.ts and harnesses/pi.ts) means an
-    // operator who sets `auth_token = "ollama"` produces the same
-    // runtime value as an operator who sets no token at all. Vanilla
-    // Ollama servers expect the literal string "ollama" as their
-    // no-auth placeholder, so the collision is benign — but operators
-    // running a real bearer auth scheme should pick any token value
-    // other than "ollama" to keep "is this auth'd or not?" legible
-    // from a glance at the provider row.
-    container_env_name: 'OLLAMA_AUTH_TOKEN',
+    // CAVEAT: the in-container default
+    // `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` (see harnesses/opencode.ts
+    // and harnesses/pi.ts) means an operator who sets
+    // `auth_token = "ollama"` produces the same runtime value as an
+    // operator who sets no token at all. Vanilla Ollama servers expect
+    // the literal string "ollama" as their no-auth placeholder, so the
+    // collision is benign — but operators running a real bearer auth
+    // scheme should pick any token value other than "ollama" to keep
+    // "is this auth'd or not?" legible from a glance at the provider
+    // row.
+    container_env_name: 'OPENAI_COMPAT_AUTH_TOKEN',
     auth_optional: true,
   },
 };
@@ -131,7 +137,8 @@ export function listProviderKinds(): ProviderKindSpec[] {
 
 /** Resolve the credential value the orchestrator should export into the
  *  agent container when launching against this provider. Returns null
- *  when no credential is needed (Ollama with no auth) OR when the
+ *  when no credential is needed (a self-hosted endpoint with no auth)
+ *  OR when the
  *  configured credential isn't available (env var not set / set but
  *  empty). The latter is a soft failure — caller decides what to do
  *  (typically fail the task with a clear error).

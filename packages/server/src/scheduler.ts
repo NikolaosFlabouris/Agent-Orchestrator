@@ -1025,7 +1025,8 @@ export class Scheduler {
     //      (container_memory_mb / container_cpu_cores) or the
     //      DEFAULT_CONTAINER_* constants.
     //   2. Per-provider concurrency_limit — addresses upstream LLM
-    //      provider constraints (Ollama can really only do 1 at a time;
+    //      provider constraints (a single self-hosted GPU box can really
+    //      only do 1 at a time;
     //      Anthropic API has rate limits). Independent of host capacity.
     let availableResources: TaskResources = getAvailableResources();
     // Early exit if the host pool is fully saturated on either dimension.

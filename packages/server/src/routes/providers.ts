@@ -131,8 +131,8 @@ function validateProviderShape(
   // Without this check, malformed values (`javascript:...`, `file:///...`,
   // raw hostnames missing a scheme) would save and fail later at task
   // launch with a confusing inference-side error. Restricting to
-  // http/https matches every supported self-hosted endpoint (Ollama
-  // exposes /v1 over http(s)) and rules out scheme-based misuse.
+  // http/https matches every supported self-hosted endpoint (they all
+  // expose /v1 over http(s)) and rules out scheme-based misuse.
   if (baseUrl) {
     let parsed: URL;
     try {

@@ -13,9 +13,11 @@ import { assertOnlyKnownKeys } from './config.js';
  *      (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) which the scheduler
  *      exports via buildProviderEnv. No config file is needed; the
  *      built-in provider defs handle routing.
- *    - For ollama: OpenCode needs an explicit provider stanza because
- *      the URL is operator-specific and there's no built-in Ollama
- *      adapter. The config is built INSIDE the agent container at
+ *    - For openai-compatible: OpenCode needs an explicit provider
+ *      stanza because the URL is operator-specific and there's no
+ *      built-in adapter for a self-hosted endpoint. The stanza points
+ *      at OpenCode's generic `@ai-sdk/openai-compatible` npm provider.
+ *      The config is built INSIDE the agent container at
  *      runtime by a `jq -n` step in agent_command, written to
  *      `/tmp/opencode.json`, and passed to OpenCode via `--config`.
  *      The orchestrator never writes any opencode.json — that's the
@@ -44,7 +46,7 @@ export const opencodeHarness: HarnessSpec = {
     'mistral',
     'deepseek',
     'openrouter',
-    'ollama',
+    'openai-compatible',
   ] as const,
   buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
     if (!opencodeHarness.supported_provider_kinds.includes(provider.kind)) {
@@ -57,30 +59,32 @@ export const opencodeHarness: HarnessSpec = {
     // OpenCode expects `<provider>/<model>` form for the --model arg.
     const resolved_model = `${provider.kind}/${model.model_id}`;
 
-    if (provider.kind === 'ollama') {
+    if (provider.kind === 'openai-compatible') {
       if (!provider.base_url) {
         throw new Error(
-          `Ollama provider '${provider.id}' has no base_url. ` +
-          `Configure the Ollama server URL under Settings → Providers.`
+          `OpenAI-compatible provider '${provider.id}' has no base_url. ` +
+          `Configure the server URL under Settings → Providers.`
         );
       }
       // Build /tmp/opencode.json at runtime via `jq -n`. All operator-
       // controlled strings go through `--arg` so jq handles escaping;
       // nothing is interpolated into the JSON template directly. The
-      // `${OLLAMA_AUTH_TOKEN:-ollama}` parameter expansion is bash, run
-      // by the in-container shell BEFORE jq sees its argv, so the env
-      // var resolves to either the operator's bearer token (when set)
-      // or the literal "ollama" fallback that Ollama accepts when no
-      // auth is configured.
+      // `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` parameter expansion is
+      // bash, run by the in-container shell BEFORE jq sees its argv, so
+      // the env var resolves to either the operator's bearer token
+      // (when set) or the literal "ollama" fallback — the exact
+      // placeholder vanilla Ollama expects when no auth is configured,
+      // and an arbitrary ignored string for every other server.
       const baseUrl = provider.base_url.replace(/\/+$/, '') + '/v1';
       const writeConfig =
         `jq -n ` +
-        `--arg token "\${OLLAMA_AUTH_TOKEN:-ollama}" ` +
+        `--arg token "\${OPENAI_COMPAT_AUTH_TOKEN:-ollama}" ` +
+        `--arg provider ${sq(provider.kind)} ` +
         `--arg url ${sq(baseUrl)} ` +
         `--arg name ${sq(provider.display_name)} ` +
         `--arg model_id ${sq(model.model_id)} ` +
         `--arg model_name ${sq(model.display_name)} ` +
-        `'{provider:{ollama:{npm:"@ai-sdk/openai-compatible",name:$name,` +
+        `'{provider:{($provider):{npm:"@ai-sdk/openai-compatible",name:$name,` +
         `options:{baseURL:$url,apiKey:$token},` +
         `models:{($model_id):{name:$model_name}}}},` +
         `permission:{"*":"allow"}}' ` +

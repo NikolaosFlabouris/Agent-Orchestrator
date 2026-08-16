@@ -50,7 +50,7 @@ describe('v29 per-attempt usage metrics migration', () => {
 
     const cols = attemptColumns(db);
     for (const c of USAGE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     db.close();
   });
@@ -103,7 +103,7 @@ describe('v29 per-attempt usage metrics migration', () => {
     db = initDatabase(dbFile);
     const after = attemptColumns(db);
     for (const c of USAGE_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     // The pre-existing attempt row keeps NULL (unknown) for every metric.
     const row = db

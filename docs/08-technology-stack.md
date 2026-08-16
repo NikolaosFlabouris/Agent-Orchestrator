@@ -371,24 +371,24 @@ CREATE TABLE repos (
 
 -- Provider: concrete connection identity for an LLM endpoint. Cloud kinds
 -- (anthropic, openai, gemini, …) are typically singletons; self-hosted
--- kinds (ollama) can have multiple instances (one row per server).
+-- kinds (openai-compatible) can have multiple instances (one row per server).
 CREATE TABLE providers (
   id TEXT PRIMARY KEY,                -- operator-authored stable id
   display_name TEXT NOT NULL,
   -- One of: anthropic | claude-subscription | openai | gemini | mistral |
-  -- deepseek | openrouter | ollama. Determines credential shape, the
+  -- deepseek | openrouter | openai-compatible. Determines credential shape, the
   -- container env var name (see providers/kinds.ts), default endpoint,
   -- and which harnesses can target this provider.
   kind TEXT NOT NULL,
   -- Per-provider concurrency cap (an upstream LLM constraint, e.g. an API
-  -- rate-limit bucket or a single Ollama server). 0 means "paused" (no
+  -- rate-limit bucket or a single self-hosted GPU box). 0 means "paused" (no
   -- task using this provider launches). Independent from the host
   -- resource pool which gates hardware capacity.
   concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
   -- Connection URL. NULL for cloud kinds (uses kind's default endpoint).
-  -- REQUIRED for self-hosted kinds (ollama).
+  -- REQUIRED for self-hosted kinds (openai-compatible).
   base_url TEXT,
-  -- Inline secret (Ollama bearer/basic auth token, or a cloud API key when
+  -- Inline secret (bearer/basic auth token for a self-hosted endpoint, or a cloud API key when
   -- the operator is multi-instancing a kind without env-var indirection).
   -- NULL when api_key_env_var is used or no auth needed. Stored as plaintext.
   auth_token TEXT,

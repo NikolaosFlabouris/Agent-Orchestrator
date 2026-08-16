@@ -50,7 +50,7 @@ describe('v32 attempt failure-reason migration', () => {
 
     const cols = attemptColumns(db);
     for (const c of FAILURE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     db.close();
   });
@@ -111,7 +111,7 @@ describe('v32 attempt failure-reason migration', () => {
     db = initDatabase(dbFile);
     const after = attemptColumns(db);
     for (const c of FAILURE_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     // A pre-existing failed attempt has no recorded reason — NULL, not ''
     // or 0, so the UI renders nothing rather than a blank red line.
@@ -138,7 +138,7 @@ describe('v32 attempt failure-reason migration', () => {
     db = initDatabase(dbFile);
     const cols = attemptColumns(db);
     for (const c of FAILURE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
     db.close();
   });
 });

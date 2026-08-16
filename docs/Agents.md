@@ -10,10 +10,11 @@ code-defined.
 - **Provider** — the connection identity for an LLM endpoint. A row in
   the `providers` table carries a `kind` (`anthropic`, `openai`,
   `gemini`, `mistral`, `deepseek`, `openrouter`, `claude-subscription`,
-  `ollama`), an optional `base_url` (required for `ollama`), a
+  `openai-compatible`), an optional `base_url` (required for
+  `openai-compatible`), a
   `concurrency_limit`, and exactly one of `api_key_env_var` (env-var
   pointer the orchestrator dereferences from its own `.env`) or
-  `auth_token` (inline plaintext, useful for self-hosted Ollama and for
+  `auth_token` (inline plaintext, useful for self-hosted servers and for
   multi-instancing a cloud kind). Cloud kinds are typically singletons;
   Ollama is multi-instance (one row per server).
 - **Model** — a `(provider_id, model_id, display_name)` triple under a
@@ -77,8 +78,8 @@ the provider.
 |---|---|---|
 | `claude-sdk` | sdk | `anthropic` |
 | `claude-code` | cli | `anthropic`, `claude-subscription` |
-| `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
-| `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
+| `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` |
+| `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` |
 
 Harness↔provider compatibility is checked at **both** profile-save
 time and task-launch time. The save-time check (in the

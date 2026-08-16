@@ -156,7 +156,8 @@ export function ProviderSettings() {
         (for self-hosted), and credential. Each provider has its own
         concurrency limit. Cloud kinds (Anthropic, OpenAI…) are typically
         singletons with the API key in the orchestrator's <span className="font-mono">.env</span>.
-        Self-hosted (Ollama) can have multiple instances with different URLs.
+        Self-hosted (OpenAI-compatible) can have multiple instances with
+        different URLs.
       </div>
 
       {error && (
@@ -237,7 +238,7 @@ export function ProviderSettings() {
                     kind: newKind,
                     // Reset auth fields to the new kind's defaults when
                     // switching, so an operator doesn't accidentally save an
-                    // anthropic provider with an ollama URL.
+                    // anthropic provider with a self-hosted URL.
                     base_url: spec?.requires_base_url ? editing.base_url ?? '' : null,
                     api_key_env_var: spec?.container_env_name ?? null,
                   });

@@ -30,20 +30,20 @@ describe('listProviderKinds / getProviderKindSpec', () => {
       'deepseek',
       'gemini',
       'mistral',
-      'ollama',
       'openai',
+      'openai-compatible',
       'openrouter',
     ]);
   });
 
-  it("identifies ollama as the only requires_base_url kind", () => {
+  it("identifies openai-compatible as the only requires_base_url kind", () => {
     const requireUrl = listProviderKinds().filter((s) => s.requires_base_url);
-    expect(requireUrl.map((s) => s.kind)).toEqual(['ollama']);
+    expect(requireUrl.map((s) => s.kind)).toEqual(['openai-compatible']);
   });
 
-  it("identifies ollama as the only auth_optional kind", () => {
+  it("identifies openai-compatible as the only auth_optional kind", () => {
     const optional = listProviderKinds().filter((s) => s.auth_optional);
-    expect(optional.map((s) => s.kind)).toEqual(['ollama']);
+    expect(optional.map((s) => s.kind)).toEqual(['openai-compatible']);
   });
 
   it('maps anthropic and claude-subscription to different env names', () => {
@@ -55,12 +55,12 @@ describe('listProviderKinds / getProviderKindSpec', () => {
     );
   });
 
-  it('routes ollama auth through OLLAMA_AUTH_TOKEN at runtime', () => {
+  it('routes openai-compatible auth through OPENAI_COMPAT_AUTH_TOKEN at runtime', () => {
     // Previously null (config-file-driven) — moved into env so the
     // harness scripts can reference it without baking the literal
     // token into agent_command / opencode.json. See H2 fix.
-    expect(getProviderKindSpec('ollama').container_env_name).toBe(
-      'OLLAMA_AUTH_TOKEN'
+    expect(getProviderKindSpec('openai-compatible').container_env_name).toBe(
+      'OPENAI_COMPAT_AUTH_TOKEN'
     );
   });
 });
@@ -126,25 +126,30 @@ describe('buildProviderEnv', () => {
     expect(env).toEqual({ ANTHROPIC_API_KEY: 'sk-team' });
   });
 
-  it('returns an empty object for ollama when no credential is configured', () => {
+  it('returns an empty object for openai-compatible when no credential is configured', () => {
     // No auth_token, no api_key_env_var → no env var exported. The
     // harnesses fall back to the literal "ollama" placeholder.
-    expect(buildProviderEnv(mkProvider({ kind: 'ollama' }))).toEqual({});
+    expect(buildProviderEnv(mkProvider({ kind: 'openai-compatible' }))).toEqual({});
   });
 
-  it('exports OLLAMA_AUTH_TOKEN when ollama has an inline auth_token', () => {
-    expect(
-      buildProviderEnv(mkProvider({ kind: 'ollama', auth_token: 'bearer-xyz' }))
-    ).toEqual({ OLLAMA_AUTH_TOKEN: 'bearer-xyz' });
-  });
-
-  it('exports OLLAMA_AUTH_TOKEN from the operator-named env var when set', () => {
-    process.env.MY_OLLAMA_KEY = 'bearer-from-env';
+  it('exports OPENAI_COMPAT_AUTH_TOKEN when openai-compatible has an inline auth_token', () => {
     expect(
       buildProviderEnv(
-        mkProvider({ kind: 'ollama', api_key_env_var: 'MY_OLLAMA_KEY' })
+        mkProvider({ kind: 'openai-compatible', auth_token: 'bearer-xyz' })
       )
-    ).toEqual({ OLLAMA_AUTH_TOKEN: 'bearer-from-env' });
+    ).toEqual({ OPENAI_COMPAT_AUTH_TOKEN: 'bearer-xyz' });
+  });
+
+  it('exports OPENAI_COMPAT_AUTH_TOKEN from the operator-named env var when set', () => {
+    process.env.MY_SELF_HOSTED_KEY = 'bearer-from-env';
+    expect(
+      buildProviderEnv(
+        mkProvider({
+          kind: 'openai-compatible',
+          api_key_env_var: 'MY_SELF_HOSTED_KEY',
+        })
+      )
+    ).toEqual({ OPENAI_COMPAT_AUTH_TOKEN: 'bearer-from-env' });
   });
 
   it('returns an empty object when no credential resolves', () => {

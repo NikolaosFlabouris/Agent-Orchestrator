@@ -22,26 +22,31 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      that declares the provider + model so pi recognises the
  *      `--model <pi-provider>/<model_id>` argument; no credential
  *      lives in the file.
- *    - For ollama: pi has no built-in Ollama definition, so the JSON
- *      declares the OpenAI-completions-compatible endpoint with URL
- *      and apiKey. The apiKey value is sourced at runtime from
- *      `$OLLAMA_AUTH_TOKEN` (orchestrator-exported) so the literal
- *      token never lives in agent_command / meta.json (H2).
+ *    - For openai-compatible: pi has no built-in definition for a
+ *      self-hosted endpoint, so the JSON declares a custom provider
+ *      with the OpenAI-completions API, the URL and an apiKey. The
+ *      apiKey value is sourced at runtime from
+ *      `$OPENAI_COMPAT_AUTH_TOKEN` (orchestrator-exported) so the
+ *      literal token never lives in agent_command / meta.json (H2).
  *
  *  Pi internal names vs orchestrator ProviderKind names — pi names its
  *  built-in Gemini provider "google" while reading GEMINI_API_KEY. All
  *  other cloud kinds use the same name on both sides. PI_PROVIDER_NAMES
  *  below is the canonical mapping; bumping it requires re-verifying
- *  against pi-mono/packages/ai/src/env-api-keys.ts.
+ *  against the provider table in the pi package's own docs
+ *  (`docs/providers.md` in @earendil-works/pi-coding-agent — the
+ *  "auth.json key" column is the provider name), which superseded the
+ *  old pi-mono/packages/ai/src/env-api-keys.ts source reference when
+ *  the project moved to github.com/earendil-works/pi.
  *
  *  Operator-tunable knobs (config_json): none for v1. */
 
 /** Map orchestrator ProviderKind → pi's internal provider name. Pi
  *  expects the `--model` argument in `<pi-name>/<model_id>` form and
  *  models.json uses the same name as a key, so both must agree. Only
- *  populated for the kinds the harness actually supports; ollama is
- *  handled by a custom (non-built-in) provider stanza so it's not in
- *  this map. */
+ *  populated for the kinds the harness actually supports;
+ *  openai-compatible is handled by a custom (non-built-in) provider
+ *  stanza so it's not in this map. */
 const PI_PROVIDER_NAMES: Partial<Record<ProviderKind, string>> = {
   anthropic: 'anthropic',
   openai: 'openai',
@@ -59,9 +64,9 @@ export const piHarness: HarnessSpec = {
   id: 'pi',
   display_name: 'Pi CLI',
   runtime: 'cli',
-  // Mirrors PI_PROVIDER_NAMES (cloud kinds) plus ollama (custom
-  // provider via models.json). claude-subscription is excluded — pi's
-  // subscription path uses an interactive /login OAuth flow that
+  // Mirrors PI_PROVIDER_NAMES (cloud kinds) plus openai-compatible
+  // (custom provider via models.json). claude-subscription is excluded
+  // — pi's subscription path uses an interactive /login OAuth flow that
   // doesn't work in the sealed agent container.
   supported_provider_kinds: [
     'anthropic',
@@ -70,7 +75,7 @@ export const piHarness: HarnessSpec = {
     'mistral',
     'deepseek',
     'openrouter',
-    'ollama',
+    'openai-compatible',
   ] as const,
   buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
     if (!piHarness.supported_provider_kinds.includes(provider.kind)) {
@@ -100,13 +105,14 @@ export const piHarness: HarnessSpec = {
 };
 
 /** Resolve the pi-side provider name for a given orchestrator
- *  ProviderKind. For ollama we hardcode 'ollama' (custom provider, not
- *  in PI_PROVIDER_NAMES); for everything else we read the map and
- *  throw if the kind isn't covered, which would indicate
+ *  ProviderKind. For openai-compatible we hardcode the kind id itself
+ *  (custom provider declared in models.json, not in
+ *  PI_PROVIDER_NAMES); for everything else we read the map and throw if
+ *  the kind isn't covered, which would indicate
  *  supported_provider_kinds drifted from the map without updating
  *  both. */
 function piProviderNameFor(kind: ProviderKind): string {
-  if (kind === 'ollama') return 'ollama';
+  if (kind === 'openai-compatible') return 'openai-compatible';
   const name = PI_PROVIDER_NAMES[kind];
   if (!name) {
     throw new Error(
@@ -126,23 +132,27 @@ function buildPiConfigWriteCommand(
   model: Model,
   piProviderName: string
 ): string {
-  if (provider.kind === 'ollama') {
+  if (provider.kind === 'openai-compatible') {
     if (!provider.base_url) {
       throw new Error(
-        `Ollama provider '${provider.id}' has no base_url. ` +
-        `Configure the Ollama server URL under Settings → Providers.`
+        `OpenAI-compatible provider '${provider.id}' has no base_url. ` +
+        `Configure the server URL under Settings → Providers.`
       );
     }
     const baseUrl = provider.base_url.replace(/\/+$/, '') + '/v1';
-    // `${OLLAMA_AUTH_TOKEN:-ollama}` falls back to the literal "ollama"
-    // (Ollama's no-auth placeholder) when the env var is unset, so
-    // vanilla local Ollama works without any credential configured.
+    // `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` falls back to the literal
+    // "ollama" when the env var is unset: that exact string is the
+    // no-auth placeholder vanilla Ollama expects, and every other
+    // OpenAI-compatible server that ignores auth accepts it too, so an
+    // unauthenticated local endpoint works with no credential
+    // configured.
     return (
       `jq -n ` +
-      `--arg token "\${OLLAMA_AUTH_TOKEN:-ollama}" ` +
+      `--arg token "\${OPENAI_COMPAT_AUTH_TOKEN:-ollama}" ` +
+      `--arg provider ${sq(piProviderName)} ` +
       `--arg url ${sq(baseUrl)} ` +
       `--arg model_id ${sq(model.model_id)} ` +
-      `'{providers:{ollama:{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
+      `'{providers:{($provider):{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
       `compat:{supportsDeveloperRole:false,supportsReasoningEffort:false},` +
       `models:[{id:$model_id}]}}}' ` +
       `> ~/.pi/agent/models.json`

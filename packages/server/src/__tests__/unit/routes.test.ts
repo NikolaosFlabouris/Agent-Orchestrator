@@ -93,7 +93,7 @@ describe('Provider routes', () => {
       payload: {
         id: 'evil',
         display_name: 'evil',
-        kind: 'ollama',
+        kind: 'openai-compatible',
         concurrency_limit: 1,
         base_url: 'javascript:alert(1)',
       },
@@ -119,14 +119,14 @@ describe('Provider routes', () => {
     expect(res.json().error).toMatch(/not both/);
   });
 
-  it('POST /api/providers requires base_url for ollama (kind-spec validation)', async () => {
+  it('POST /api/providers requires base_url for openai-compatible (kind-spec validation)', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/providers',
       payload: {
-        id: 'ollama-nourl',
-        display_name: 'Ollama',
-        kind: 'ollama',
+        id: 'selfhosted-nourl',
+        display_name: 'Self-hosted',
+        kind: 'openai-compatible',
         concurrency_limit: 1,
       },
     });

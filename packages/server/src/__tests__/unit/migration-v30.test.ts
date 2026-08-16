@@ -46,7 +46,7 @@ describe('v30 PR churn stats migration', () => {
 
     const cols = attemptColumns(db);
     for (const c of CHURN_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     db.close();
   });
@@ -103,7 +103,7 @@ describe('v30 PR churn stats migration', () => {
     db = initDatabase(dbFile);
     const after = attemptColumns(db);
     for (const c of CHURN_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     // The pre-existing attempt row keeps NULL (unknown) for every stat.
     const row = db

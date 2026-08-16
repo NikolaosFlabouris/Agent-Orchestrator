@@ -206,8 +206,9 @@ function OneTimeSetup() {
           <Code>auth_token</Code>) when ready.
         </li>
         <li>
-          To use a self-hosted Ollama server, add a new provider with{' '}
-          <Code>kind: ollama</Code>, point it at the server's{' '}
+          To use a self-hosted inference server (Ollama, llama.cpp /
+          llama-swap, vLLM, …), add a new provider with{' '}
+          <Code>kind: openai-compatible</Code>, point it at the server's{' '}
           <Code>base_url</Code>, then add the loaded models under it.
         </li>
         <li>
@@ -342,22 +343,24 @@ function ProvidersSection() {
         this provider. One of <Code>anthropic</Code>,{' '}
         <Code>claude-subscription</Code>, <Code>openai</Code>,{' '}
         <Code>gemini</Code>, <Code>mistral</Code>, <Code>deepseek</Code>,{' '}
-        <Code>openrouter</Code>, <Code>ollama</Code>. Adding a new kind is
+        <Code>openrouter</Code>, <Code>openai-compatible</Code>. Adding a
+        new kind is
         a code change.
       </p>
 
       <SubHeading>base_url</SubHeading>
       <p className="text-sm text-gray-300">
-        Required for <Code>kind: ollama</Code>; hidden for cloud kinds
-        (the SDK uses a fixed cloud endpoint). For Ollama on the Docker
-        host, use <Code>host.docker.internal</Code> instead of{' '}
+        Required for <Code>kind: openai-compatible</Code>; hidden for
+        cloud kinds (the SDK uses a fixed cloud endpoint). The
+        orchestrator appends <Code>/v1</Code> itself. For a server on the
+        Docker host, use <Code>host.docker.internal</Code> instead of{' '}
         <Code>localhost</Code> — the container's loopback isn't the host.
       </p>
 
       <SubHeading>api_key_env_var vs auth_token</SubHeading>
       <p className="text-sm text-gray-300">
         Each provider declares exactly one of these (or neither, for an
-        unauthenticated Ollama):
+        unauthenticated self-hosted server):
       </p>
       <ul className="list-disc list-inside text-sm text-gray-300 space-y-1 mt-2">
         <li>
@@ -368,7 +371,8 @@ function ProvidersSection() {
         </li>
         <li>
           <Code>auth_token</Code> — inline plaintext stored on the provider
-          row. Useful when multi-instancing a kind (two Ollama servers, or
+          row. Useful when multi-instancing a kind (two self-hosted
+          servers, or
           two Anthropic accounts), or for a self-hosted server that uses
           basic-auth.
         </li>
@@ -387,8 +391,8 @@ function ProvidersSection() {
         simultaneously. <Code>0</Code> pauses the provider — no task
         targeting it launches. Independent of the host resource pool,
         which gates hardware capacity. Set this to match the provider's
-        upstream rate limits (or, for Ollama, to <Code>1</Code> to
-        serialise on a single GPU).
+        upstream rate limits (or, for a self-hosted server, to{' '}
+        <Code>1</Code> to serialise on a single GPU).
       </p>
 
       <SubHeading>Models</SubHeading>
@@ -435,7 +439,8 @@ function AgentProfilesSection() {
         </li>
         <li>
           <Code>opencode</Code> — OpenCode CLI subprocess. Targets every
-          provider kind OpenCode supports (cloud + Ollama).
+          provider kind OpenCode supports (cloud +{' '}
+          <Code>openai-compatible</Code>).
         </li>
         <li>
           <Code>pi</Code> —{' '}

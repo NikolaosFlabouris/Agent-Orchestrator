@@ -51,7 +51,7 @@ describe('v31 git-outage state migration', () => {
 
     const cols = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     db.close();
   });
@@ -135,7 +135,7 @@ describe('v31 git-outage state migration', () => {
     db = initDatabase(dbFile);
     const after = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(after.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
 
     // The pre-existing task keeps its prep_failure_count and backfills to
     // "no outage in progress" — it must not look like it is mid-backoff.
@@ -170,7 +170,7 @@ describe('v31 git-outage state migration', () => {
     db = initDatabase(dbFile);
     const cols = taskColumns(db);
     for (const c of OUTAGE_COLUMNS) expect(cols.has(c)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('33');
     db.close();
   });
 });

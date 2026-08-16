@@ -1272,12 +1272,12 @@ export function resolveProviderCredential(provider: Provider): string | null {
     const v = process.env[provider.api_key_env_var];
     return v && v.length > 0 ? v : null;
   }
-  return null;  // ollama with no auth, or misconfigured row
+  return null;  // self-hosted with no auth, or misconfigured row
 }
 
 export function buildProviderEnv(provider: Provider): Record<string, string> {
   const spec = getProviderKindSpec(provider.kind);
-  if (!spec.container_env_name) return {};   // ollama uses config files, not env
+  if (!spec.container_env_name) return {};   // no env var for this kind
   const cred = resolveProviderCredential(provider);
   if (!cred) return {};
   return { [spec.container_env_name]: cred };

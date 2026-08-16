@@ -511,7 +511,7 @@ export type ProviderKind =
   | 'mistral'
   | 'deepseek'
   | 'openrouter'
-  | 'ollama';
+  | 'openai-compatible';
 
 export interface ProviderKindSpec {
   kind: ProviderKind;
