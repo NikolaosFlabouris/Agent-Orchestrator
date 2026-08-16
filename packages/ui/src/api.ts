@@ -172,13 +172,19 @@ export const api = {
       'GET',
       `/api/providers/${encodeURIComponent(providerId)}/models`
     ),
-  createModel: (providerId: string, data: { model_id: string; display_name: string }) =>
+  createModel: (
+    providerId: string,
+    data: { model_id: string; display_name: string; context_window: number | null }
+  ) =>
     request<ModelResponse>(
       'POST',
       `/api/providers/${encodeURIComponent(providerId)}/models`,
       data
     ),
-  updateModel: (pk: number, data: Partial<Pick<ModelResponse, 'display_name'>>) =>
+  updateModel: (
+    pk: number,
+    data: Partial<Pick<ModelResponse, 'display_name' | 'context_window'>>
+  ) =>
     request<ModelResponse>('PATCH', `/api/models/${pk}`, data),
   deleteModel: (pk: number) =>
     request<void>('DELETE', `/api/models/${pk}`),
@@ -511,7 +517,7 @@ export type ProviderKind =
   | 'mistral'
   | 'deepseek'
   | 'openrouter'
-  | 'ollama';
+  | 'openai-compatible';
 
 export interface ProviderKindSpec {
   kind: ProviderKind;
@@ -564,6 +570,9 @@ export interface ModelResponse {
   provider_id: string;
   model_id: string;
   display_name: string;
+  /** Context window (tokens) to drive this model with, or null to let the
+   *  harness use its own default. */
+  context_window: number | null;
 }
 
 /** The set of harness ids the client currently knows about. New

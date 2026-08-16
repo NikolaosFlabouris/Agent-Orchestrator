@@ -52,7 +52,7 @@ describe('v28 reports indexes migration', () => {
 
     const names = indexNames(db);
     for (const idx of REPORT_INDEXES) expect(names.has(idx)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('34');
 
     db.close();
   });
@@ -76,7 +76,7 @@ describe('v28 reports indexes migration', () => {
     db = initDatabase(dbFile);
     const after = indexNames(db);
     for (const idx of REPORT_INDEXES) expect(after.has(idx)).toBe(true);
-    expect(schemaVersion(db)).toBe('32');
+    expect(schemaVersion(db)).toBe('34');
 
     db.close();
   });

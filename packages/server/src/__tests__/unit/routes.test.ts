@@ -93,7 +93,7 @@ describe('Provider routes', () => {
       payload: {
         id: 'evil',
         display_name: 'evil',
-        kind: 'ollama',
+        kind: 'openai-compatible',
         concurrency_limit: 1,
         base_url: 'javascript:alert(1)',
       },
@@ -119,14 +119,14 @@ describe('Provider routes', () => {
     expect(res.json().error).toMatch(/not both/);
   });
 
-  it('POST /api/providers requires base_url for ollama (kind-spec validation)', async () => {
+  it('POST /api/providers requires base_url for openai-compatible (kind-spec validation)', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/providers',
       payload: {
-        id: 'ollama-nourl',
-        display_name: 'Ollama',
-        kind: 'ollama',
+        id: 'selfhosted-nourl',
+        display_name: 'Self-hosted',
+        kind: 'openai-compatible',
         concurrency_limit: 1,
       },
     });
@@ -225,6 +225,111 @@ describe('Model routes', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().model_id).toBe('claude-test-1');
+  });
+
+  // ---- Optional per-model context window. The column is nullable and
+  // "unset" (NULL) must stay distinguishable from any real token count,
+  // because the harnesses branch on it to decide whether to emit a
+  // context-window key into their generated config at all. ----
+  it('POST /api/providers/:id/models defaults context_window to null', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/providers/anthropic/models',
+      payload: { model_id: 'claude-test-noctx', display_name: 'No ctx' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().context_window).toBeNull();
+  });
+
+  it('POST /api/providers/:id/models stores a supplied context_window', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/providers/anthropic/models',
+      payload: {
+        model_id: 'claude-test-ctx',
+        display_name: 'With ctx',
+        context_window: 32768,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().context_window).toBe(32768);
+  });
+
+  it('POST /api/providers/:id/models rejects a non-positive-integer context_window', async () => {
+    for (const context_window of [0, -1, 1.5, 'lots', true, ['32768'], {}]) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/providers/anthropic/models',
+        payload: {
+          model_id: 'claude-test-badctx',
+          display_name: 'Bad ctx',
+          context_window,
+        },
+      });
+      expect(res.statusCode, `context_window=${context_window}`).toBe(400);
+      expect(res.json().error).toMatch(/context_window/);
+    }
+  });
+
+  it('PATCH /api/models/:pk sets and clears context_window', async () => {
+    const sonnet = getDb()
+      .prepare(
+        "SELECT id FROM models WHERE provider_id = 'anthropic' AND model_id = 'claude-sonnet-4-6'"
+      )
+      .get() as { id: number };
+
+    const set = await app.inject({
+      method: 'PATCH',
+      url: `/api/models/${sonnet.id}`,
+      payload: { context_window: 200000 },
+    });
+    expect(set.statusCode).toBe(200);
+    expect(set.json().context_window).toBe(200000);
+
+    // An explicit null clears it back to "use the harness default".
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/api/models/${sonnet.id}`,
+      payload: { context_window: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().context_window).toBeNull();
+  });
+
+  it('PATCH /api/models/:pk leaves context_window alone when the key is absent', async () => {
+    const sonnet = getDb()
+      .prepare(
+        "SELECT id FROM models WHERE provider_id = 'anthropic' AND model_id = 'claude-sonnet-4-6'"
+      )
+      .get() as { id: number };
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/models/${sonnet.id}`,
+      payload: { context_window: 65536 },
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/models/${sonnet.id}`,
+      payload: { display_name: 'Renamed' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().display_name).toBe('Renamed');
+    expect(res.json().context_window).toBe(65536);
+  });
+
+  it('PATCH /api/models/:pk rejects a non-positive-integer context_window', async () => {
+    const sonnet = getDb()
+      .prepare(
+        "SELECT id FROM models WHERE provider_id = 'anthropic' AND model_id = 'claude-sonnet-4-6'"
+      )
+      .get() as { id: number };
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/models/${sonnet.id}`,
+      payload: { context_window: -5 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/context_window/);
   });
 
   it('PATCH /api/models/:pk rejects model_id changes (H5 immutability)', async () => {

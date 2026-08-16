@@ -1,6 +1,6 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys } from './config.js';
+import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
 import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
 
 /** Pi (pi-coding-agent) CLI harness. Bash-executed in the container.
@@ -22,26 +22,43 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      that declares the provider + model so pi recognises the
  *      `--model <pi-provider>/<model_id>` argument; no credential
  *      lives in the file.
- *    - For ollama: pi has no built-in Ollama definition, so the JSON
- *      declares the OpenAI-completions-compatible endpoint with URL
- *      and apiKey. The apiKey value is sourced at runtime from
- *      `$OLLAMA_AUTH_TOKEN` (orchestrator-exported) so the literal
- *      token never lives in agent_command / meta.json (H2).
+ *    - For openai-compatible: pi has no built-in definition for a
+ *      self-hosted endpoint, so the JSON declares a custom provider
+ *      with the OpenAI-completions API, the URL and an apiKey. The
+ *      apiKey value is sourced at runtime from
+ *      `$OPENAI_COMPAT_AUTH_TOKEN` (orchestrator-exported) so the
+ *      literal token never lives in agent_command / meta.json (H2).
  *
  *  Pi internal names vs orchestrator ProviderKind names — pi names its
  *  built-in Gemini provider "google" while reading GEMINI_API_KEY. All
  *  other cloud kinds use the same name on both sides. PI_PROVIDER_NAMES
  *  below is the canonical mapping; bumping it requires re-verifying
- *  against pi-mono/packages/ai/src/env-api-keys.ts.
+ *  against the provider table in the pi package's own docs
+ *  (`docs/providers.md` in @earendil-works/pi-coding-agent — the
+ *  "auth.json key" column is the provider name), which superseded the
+ *  old pi-mono/packages/ai/src/env-api-keys.ts source reference when
+ *  the project moved to github.com/earendil-works/pi.
+ *
+ *  Upstream version: verified against @earendil-works/pi-coding-agent
+ *  0.84.x, which is what images/agent/Dockerfile installs. Still current
+ *  there: `-p/--print` + `--mode json` + `--no-session`, `@<file>` prompt
+ *  arguments (rejected only in `--mode rpc`), `<provider>/<model_id>`
+ *  resolution for custom models.json providers, and the models.json
+ *  fields written below (`baseUrl`, `api`, `apiKey`, `compat`,
+ *  `models[].id`, `models[].contextWindow`). Pi's json mode emits an
+ *  event stream (`agent_start` / `message_end` / `agent_end`), not the
+ *  Claude-Code-style `{"type":"result"}` line that harness-cli.sh sums
+ *  usage from — so pi attempts leave the usage columns NULL, exactly as
+ *  they did before the package rename.
  *
  *  Operator-tunable knobs (config_json): none for v1. */
 
 /** Map orchestrator ProviderKind → pi's internal provider name. Pi
  *  expects the `--model` argument in `<pi-name>/<model_id>` form and
  *  models.json uses the same name as a key, so both must agree. Only
- *  populated for the kinds the harness actually supports; ollama is
- *  handled by a custom (non-built-in) provider stanza so it's not in
- *  this map. */
+ *  populated for the kinds the harness actually supports;
+ *  openai-compatible is handled by a custom (non-built-in) provider
+ *  stanza so it's not in this map. */
 const PI_PROVIDER_NAMES: Partial<Record<ProviderKind, string>> = {
   anthropic: 'anthropic',
   openai: 'openai',
@@ -59,9 +76,9 @@ export const piHarness: HarnessSpec = {
   id: 'pi',
   display_name: 'Pi CLI',
   runtime: 'cli',
-  // Mirrors PI_PROVIDER_NAMES (cloud kinds) plus ollama (custom
-  // provider via models.json). claude-subscription is excluded — pi's
-  // subscription path uses an interactive /login OAuth flow that
+  // Mirrors PI_PROVIDER_NAMES (cloud kinds) plus openai-compatible
+  // (custom provider via models.json). claude-subscription is excluded
+  // — pi's subscription path uses an interactive /login OAuth flow that
   // doesn't work in the sealed agent container.
   supported_provider_kinds: [
     'anthropic',
@@ -70,7 +87,7 @@ export const piHarness: HarnessSpec = {
     'mistral',
     'deepseek',
     'openrouter',
-    'ollama',
+    'openai-compatible',
   ] as const,
   buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
     if (!piHarness.supported_provider_kinds.includes(provider.kind)) {
@@ -100,13 +117,14 @@ export const piHarness: HarnessSpec = {
 };
 
 /** Resolve the pi-side provider name for a given orchestrator
- *  ProviderKind. For ollama we hardcode 'ollama' (custom provider, not
- *  in PI_PROVIDER_NAMES); for everything else we read the map and
- *  throw if the kind isn't covered, which would indicate
+ *  ProviderKind. For openai-compatible we hardcode the kind id itself
+ *  (custom provider declared in models.json, not in
+ *  PI_PROVIDER_NAMES); for everything else we read the map and throw if
+ *  the kind isn't covered, which would indicate
  *  supported_provider_kinds drifted from the map without updating
  *  both. */
 function piProviderNameFor(kind: ProviderKind): string {
-  if (kind === 'ollama') return 'ollama';
+  if (kind === 'openai-compatible') return 'openai-compatible';
   const name = PI_PROVIDER_NAMES[kind];
   if (!name) {
     throw new Error(
@@ -126,25 +144,41 @@ function buildPiConfigWriteCommand(
   model: Model,
   piProviderName: string
 ): string {
-  if (provider.kind === 'ollama') {
+  // Optional per-model `contextWindow`. Pi defaults to 128,000 and sizes
+  // compaction off this number, so against a local server started with a
+  // smaller --ctx-size the default silently overflows the server, and
+  // against a larger one pi compacts long before it has to. When the
+  // operator left the column NULL both fragments stay empty and the
+  // generated file is byte-identical to the pre-column output.
+  const contextWindow = resolveContextWindow(model, 'Pi harness');
+  const ctxArg =
+    contextWindow === null ? '' : `--argjson context_window ${contextWindow} `;
+  const ctxField = contextWindow === null ? '' : ',contextWindow:$context_window';
+
+  if (provider.kind === 'openai-compatible') {
     if (!provider.base_url) {
       throw new Error(
-        `Ollama provider '${provider.id}' has no base_url. ` +
-        `Configure the Ollama server URL under Settings → Providers.`
+        `OpenAI-compatible provider '${provider.id}' has no base_url. ` +
+        `Configure the server URL under Settings → Providers.`
       );
     }
     const baseUrl = provider.base_url.replace(/\/+$/, '') + '/v1';
-    // `${OLLAMA_AUTH_TOKEN:-ollama}` falls back to the literal "ollama"
-    // (Ollama's no-auth placeholder) when the env var is unset, so
-    // vanilla local Ollama works without any credential configured.
+    // `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` falls back to the literal
+    // "ollama" when the env var is unset: that exact string is the
+    // no-auth placeholder vanilla Ollama expects, and every other
+    // OpenAI-compatible server that ignores auth accepts it too, so an
+    // unauthenticated local endpoint works with no credential
+    // configured.
     return (
       `jq -n ` +
-      `--arg token "\${OLLAMA_AUTH_TOKEN:-ollama}" ` +
+      `--arg token "\${OPENAI_COMPAT_AUTH_TOKEN:-ollama}" ` +
+      `--arg provider ${sq(piProviderName)} ` +
       `--arg url ${sq(baseUrl)} ` +
       `--arg model_id ${sq(model.model_id)} ` +
-      `'{providers:{ollama:{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
+      ctxArg +
+      `'{providers:{($provider):{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
       `compat:{supportsDeveloperRole:false,supportsReasoningEffort:false},` +
-      `models:[{id:$model_id}]}}}' ` +
+      `models:[{id:$model_id${ctxField}}]}}}' ` +
       `> ~/.pi/agent/models.json`
     );
   }
@@ -159,7 +193,8 @@ function buildPiConfigWriteCommand(
     `jq -n ` +
     `--arg provider ${sq(piProviderName)} ` +
     `--arg model_id ${sq(model.model_id)} ` +
-    `'{providers:{($provider):{models:[{id:$model_id}]}}}' ` +
+    ctxArg +
+    `'{providers:{($provider):{models:[{id:$model_id${ctxField}}]}}}' ` +
     `> ~/.pi/agent/models.json`
   );
 }

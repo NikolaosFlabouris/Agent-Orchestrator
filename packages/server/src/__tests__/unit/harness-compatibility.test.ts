@@ -50,7 +50,7 @@ const EXPECTED_COMPAT: Record<HarnessId, ProviderKind[]> = {
 
   // OpenCode auto-detects standard env vars for each cloud kind
   // (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) and writes a custom
-  // opencode.json for Ollama. No native Anthropic-OAuth path so
+  // opencode.json for self-hosted endpoints. No native Anthropic-OAuth path so
   // claude-subscription is excluded.
   'opencode': [
     'anthropic',
@@ -59,12 +59,13 @@ const EXPECTED_COMPAT: Record<HarnessId, ProviderKind[]> = {
     'mistral',
     'deepseek',
     'openrouter',
-    'ollama',
+    'openai-compatible',
   ],
 
   // Pi has built-in support for every standard cloud kind we
   // expose via PROVIDER_KINDS (anthropic, openai, gemini, mistral,
-  // deepseek, openrouter) plus a custom-provider stanza for Ollama.
+  // deepseek, openrouter) plus a custom-provider stanza for
+  // openai-compatible endpoints.
   // The pi-side provider name differs from the orchestrator kind in
   // one case (gemini → "google") — see PI_PROVIDER_NAMES in pi.ts.
   // claude-subscription is excluded because pi's subscription auth
@@ -77,7 +78,7 @@ const EXPECTED_COMPAT: Record<HarnessId, ProviderKind[]> = {
     'mistral',
     'deepseek',
     'openrouter',
-    'ollama',
+    'openai-compatible',
   ],
 };
 

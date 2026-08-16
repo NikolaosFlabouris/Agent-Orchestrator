@@ -122,7 +122,7 @@ Open the UI and confirm:
 - **Settings > Providers & Models** — Anthropic should show `models_count: 3` and a green "credential configured" indicator if `ANTHROPIC_API_KEY` is set in `.env`. Other cloud providers are seeded but flagged "missing credential" until you point each one at an env var or paste an inline `auth_token`.
 - **Settings > Agent Profiles** — `default-claude-sdk` (harness `claude-sdk`, Anthropic / Claude Sonnet 4.6, timeout 120m) is the only profile.
 
-To add Ollama or another local LLM server, create a new provider with `kind: ollama` and the server's `base_url`, add the loaded models to it, then create a new agent profile pairing the OpenCode or pi harness with one of those models. See [Agents.md](./Agents.md) for the full configuration reference.
+To add Ollama, llama.cpp/llama-swap, vLLM or another local LLM server, create a new provider with `kind: openai-compatible` and the server's `base_url`, add the loaded models to it, then create a new agent profile pairing the OpenCode or pi harness with one of those models. See [Agents.md](./Agents.md) for the full configuration reference.
 
 ## 6. Register a repository
 

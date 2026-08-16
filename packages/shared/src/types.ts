@@ -257,7 +257,7 @@ export const INSTALL_STEP_KINDS: readonly InstallStepKind[] = [
 //
 //   provider — concrete connection identity (kind + credential + URL).
 //              Cloud kinds are typically singletons; self-hosted kinds
-//              (ollama) can have multiple instances.
+//              (openai-compatible) can have multiple instances.
 //   model    — a model_id known to a specific provider. Composite identity:
 //              (provider_id, model_id). Model strings are stored bare;
 //              harnesses prefix `<kind>/...` when the binary expects it.
@@ -275,7 +275,7 @@ export type ProviderKind =
   | 'mistral'
   | 'deepseek'
   | 'openrouter'
-  | 'ollama';
+  | 'openai-compatible';
 
 export const PROVIDER_KINDS: readonly ProviderKind[] = [
   'anthropic',
@@ -285,7 +285,7 @@ export const PROVIDER_KINDS: readonly ProviderKind[] = [
   'mistral',
   'deepseek',
   'openrouter',
-  'ollama',
+  'openai-compatible',
 ] as const;
 
 export interface Provider {
@@ -301,14 +301,15 @@ export interface Provider {
    *  max_agent_cpu_cores), which gates hardware capacity. */
   concurrency_limit: number;
   /** Connection URL. NULL for cloud kinds (uses kind's default endpoint).
-   *  REQUIRED for self-hosted kinds (ollama). */
+   *  REQUIRED for self-hosted kinds (openai-compatible). */
   base_url: string | null;
   /** Name of the orchestrator-side env var holding this provider's API
    *  key (e.g. 'ANTHROPIC_API_KEY'). The orchestrator reads from its own
    *  env at launch and exports the value into the agent container under
    *  the kind's standard name. NULL when auth_token is used instead. */
   api_key_env_var: string | null;
-  /** Inline secret for self-hosted providers (Ollama bearer/basic auth)
+  /** Inline secret for self-hosted providers (bearer/basic auth in front
+   *  of an OpenAI-compatible endpoint)
    *  OR for cloud providers when the operator wants to multi-instance a
    *  kind without using env-var indirection. NULL when api_key_env_var is
    *  used or no auth is required. Stored in the DB as plaintext. */
@@ -328,6 +329,15 @@ export interface Model {
    *  Harnesses that need '<provider>/<model>' form prefix at launch time. */
   model_id: string;
   display_name: string;
+  /** Context window (tokens) this model should be driven with, or NULL to
+   *  let the harness use its own default. Only matters for self-hosted
+   *  endpoints, where the server's actual `--ctx-size` is operator
+   *  business and no catalog knows it: pi sizes compaction off
+   *  `contextWindow` (default 128,000), so a smaller server silently
+   *  overflows and a larger one compacts far too early. NULL is the
+   *  "unset" signal — harnesses must emit exactly the config they emitted
+   *  before this field existed. */
+  context_window: number | null;
 }
 
 /** Stable identifiers for the harnesses the orchestrator knows about.

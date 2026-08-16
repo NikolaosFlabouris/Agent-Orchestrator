@@ -10,16 +10,18 @@ code-defined.
 - **Provider** — the connection identity for an LLM endpoint. A row in
   the `providers` table carries a `kind` (`anthropic`, `openai`,
   `gemini`, `mistral`, `deepseek`, `openrouter`, `claude-subscription`,
-  `ollama`), an optional `base_url` (required for `ollama`), a
+  `openai-compatible`), an optional `base_url` (required for
+  `openai-compatible`), a
   `concurrency_limit`, and exactly one of `api_key_env_var` (env-var
   pointer the orchestrator dereferences from its own `.env`) or
-  `auth_token` (inline plaintext, useful for self-hosted Ollama and for
+  `auth_token` (inline plaintext, useful for self-hosted servers and for
   multi-instancing a cloud kind). Cloud kinds are typically singletons;
-  Ollama is multi-instance (one row per server).
+  self-hosted (`openai-compatible`) is multi-instance (one row per
+  server).
 - **Model** — a `(provider_id, model_id, display_name)` triple under a
-  surrogate primary key. Models are scoped to providers, so the same
-  `model_id` (e.g. `claude-sonnet-4-6`) can exist under multiple
-  providers as separate rows.
+  surrogate primary key, plus an optional `context_window`. Models are
+  scoped to providers, so the same `model_id` (e.g. `claude-sonnet-4-6`)
+  can exist under multiple providers as separate rows.
 - **Agent profile** — the operator-composed pairing tasks reference. A
   profile names a `harness_id`, a `model_pk`, a `config_json` blob the
   harness understands, and a wall-clock `timeout_minutes`.
@@ -77,8 +79,8 @@ the provider.
 |---|---|---|
 | `claude-sdk` | sdk | `anthropic` |
 | `claude-code` | cli | `anthropic`, `claude-subscription` |
-| `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
-| `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `ollama` |
+| `opencode` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` |
+| `pi` | cli | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` |
 
 Harness↔provider compatibility is checked at **both** profile-save
 time and task-launch time. The save-time check (in the
@@ -105,16 +107,25 @@ Everything below is on the **Settings** page in the web UI.
 Add a provider row per LLM endpoint you'll use. Cloud providers (Anthropic,
 OpenAI, …) typically need just an `api_key_env_var` (e.g.
 `ANTHROPIC_API_KEY`) — drop the value into the orchestrator's `.env` and
-restart. Ollama needs a `base_url` (e.g. `http://192.168.1.50:11434`).
+restart. A self-hosted provider needs a `base_url` (e.g.
+`http://192.168.1.50:11434`); the orchestrator appends `/v1` itself.
 
 Under each provider, add the models you want to expose (`model_id` +
 `display_name`). The `model_id` must match what the inference endpoint
 expects, without provider prefix — harnesses that need
 `<provider>/<model>` form prefix at launch.
 
+`Context window` is optional and matters for self-hosted endpoints: pi
+sizes compaction off the model's `contextWindow` and assumes 128,000 when
+nothing says otherwise, so against a server started with a smaller
+`--ctx-size` the default silently overflows it, and against a larger one
+pi compacts long before it has to. Set it to the server's real context
+size; leave it blank for cloud models, whose real limits the harnesses
+already know.
+
 The v21 bootstrap seeds the standard cloud providers with reasonable
-defaults plus a representative set of models. Operators add Ollama
-themselves; they remove or extend the seeded list to match the team's
+defaults plus a representative set of models. Operators add self-hosted
+providers themselves; they remove or extend the seeded list to match the team's
 actual usage.
 
 ### Agent Profiles tab

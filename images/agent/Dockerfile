@@ -66,9 +66,16 @@ RUN npm install -g @anthropic-ai/claude-code
 # user's PATH).
 RUN npm install -g opencode-ai
 # pi-coding-agent — minimal terminal coding harness with multi-provider support
-# (Anthropic, OpenAI, Ollama via models.json, etc.). Invoked non-interactively
-# with `pi -p "<prompt>"` for autonomous dev-env use, same pattern as OpenCode.
-RUN npm install -g @mariozechner/pi-coding-agent
+# (Anthropic, OpenAI, and any OpenAI-compatible endpoint via models.json).
+# Invoked non-interactively with `pi -p "<prompt>"` for autonomous dev-env use,
+# same pattern as OpenCode. The package was renamed from
+# @mariozechner/pi-coding-agent when the project moved to
+# github.com/earendil-works/pi. Ranged at ^0.84.0 (0.84.x) because
+# packages/server/src/harnesses/pi.ts is verified against that line's CLI
+# flags and models.json schema — patches still float on rebuild, but a
+# minor bump means re-verifying the harness first. The other two CLIs
+# above float unpinned.
+RUN npm install -g @earendil-works/pi-coding-agent@^0.84.0
 
 # Install Claude Agent SDK for TypeScript harness
 RUN npm install -g @anthropic-ai/claude-agent-sdk

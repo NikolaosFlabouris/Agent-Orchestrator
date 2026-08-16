@@ -21,6 +21,7 @@ function mkModel(overrides: Partial<Model> = {}): Model {
     provider_id: 'p',
     model_id: 'claude-sonnet-4-6',
     display_name: 'Sonnet',
+    context_window: null,
     ...overrides,
   };
 }
@@ -72,10 +73,13 @@ describe('claude-sdk harness', () => {
       h.buildInvocation({
         profile: mkProfile(),
         model: mkModel(),
-        provider: mkProvider({ kind: 'ollama', base_url: 'http://localhost:11434' }),
+        provider: mkProvider({
+          kind: 'openai-compatible',
+          base_url: 'http://localhost:11434',
+        }),
         promptFilePath: '/task/prompt.md',
       })
-    ).toThrow(/does not support provider kind 'ollama'/);
+    ).toThrow(/does not support provider kind 'openai-compatible'/);
   });
 });
 
@@ -183,12 +187,12 @@ describe('opencode harness', () => {
     expect(inv.agent_command).toContain("--model 'anthropic/claude-sonnet-4-6'");
   });
 
-  it('builds opencode.json at runtime in /tmp for ollama providers (H3)', () => {
+  it('builds opencode.json at runtime in /tmp for openai-compatible providers (H3)', () => {
     const inv = h.buildInvocation({
       profile: mkProfile({ harness_id: 'opencode' }),
       model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
       provider: mkProvider({
-        kind: 'ollama',
+        kind: 'openai-compatible',
         base_url: 'http://192.168.1.10:11434',
         api_key_env_var: null,
       }),
@@ -207,27 +211,114 @@ describe('opencode harness', () => {
     // direct shell interpolation.
     expect(inv.agent_command).toContain('http://192.168.1.10:11434/v1');
     expect(inv.agent_command).toContain('qwen2.5-coder:14b');
-    expect(inv.resolved_model).toBe('ollama/qwen2.5-coder:14b');
+    expect(inv.resolved_model).toBe('openai-compatible/qwen2.5-coder:14b');
   });
 
-  it('throws for ollama providers without base_url', () => {
+  it('throws for openai-compatible providers without base_url', () => {
     expect(() =>
       h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel(),
-        provider: mkProvider({ kind: 'ollama', base_url: null }),
+        provider: mkProvider({ kind: 'openai-compatible', base_url: null }),
         promptFilePath: '/task/prompt.md',
       })
     ).toThrow(/base_url/);
   });
 
-  // ---- H3 fix: Ollama auth_token never lands on disk in /repo
-  // (previously the runtime jq+mv rewrote /repo/opencode.json with the
-  // real token; now agent_command builds /tmp/opencode.json from
-  // scratch using $OLLAMA_AUTH_TOKEN at runtime). The orchestrator
-  // emits no config file at all, so nothing the agent could later
-  // archive contains the literal token. ----
-  describe('H3: ollama credential never written under /repo', () => {
+  // ---- Optional per-model context window. OpenCode's config schema
+  // requires both keys of `limit` once the object is present, so the
+  // harness pairs the operator's context with `output: 0` — OpenCode's
+  // own default, which its maxOutputTokens() reads as "unset". ----
+  describe('context_window', () => {
+    const selfHosted = () =>
+      mkProvider({
+        kind: 'openai-compatible',
+        base_url: 'http://192.168.1.10:11434',
+        api_key_env_var: null,
+      });
+
+    it('emits the exact pre-column command when context_window is null', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({
+          model_id: 'qwen2.5-coder:14b',
+          display_name: 'Qwen',
+          context_window: null,
+        }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toBe(
+        "jq -n " +
+          "--arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" " +
+          "--arg provider 'openai-compatible' " +
+          "--arg url 'http://192.168.1.10:11434/v1' " +
+          "--arg name 'P' " +
+          "--arg model_id 'qwen2.5-coder:14b' " +
+          "--arg model_name 'Qwen' " +
+          "'{provider:{($provider):{npm:\"@ai-sdk/openai-compatible\",name:$name," +
+          "options:{baseURL:$url,apiKey:$token}," +
+          "models:{($model_id):{name:$model_name}}}}," +
+          "permission:{\"*\":\"allow\"}}' " +
+          "> /tmp/opencode.json && " +
+          "opencode run \"$(cat '/task/prompt.md')\" " +
+          "--config /tmp/opencode.json " +
+          "--model 'openai-compatible/qwen2.5-coder:14b' " +
+          "--format json --dangerously-skip-permissions --print-logs"
+      );
+      expect(inv.agent_command).not.toContain('limit');
+      expect(inv.agent_command).not.toContain('--argjson');
+    });
+
+    it('writes limit.context (with output 0) into the model entry when set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ model_id: 'qwen2.5-coder:14b', context_window: 32768 }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('--argjson context_window 32768');
+      expect(inv.agent_command).toContain(
+        'models:{($model_id):{name:$model_name,limit:{context:$context_window,output:0}}}'
+      );
+    });
+
+    it('emits no config file at all for cloud kinds, context window or not', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ context_window: 200000 }),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      // OpenCode reads the built-in model's real limits from models.dev;
+      // the orchestrator does not synthesise an override stanza for it.
+      expect(inv.agent_command).not.toContain('jq');
+      expect(inv.agent_command).not.toContain('limit');
+      expect(inv.config_files).toEqual([]);
+    });
+
+    it('rejects a non-integer context_window from a hand-edited row', () => {
+      expect(() =>
+        h.buildInvocation({
+          profile: mkProfile({ harness_id: 'opencode' }),
+          model: mkModel({
+            model_id: 'qwen2.5-coder:14b',
+            context_window: 0 as unknown as number,
+          }),
+          provider: selfHosted(),
+          promptFilePath: '/task/prompt.md',
+        })
+      ).toThrow(/invalid context_window/);
+    });
+  });
+
+  // ---- H3 fix: the self-hosted auth_token never lands on disk in
+  // /repo (previously the runtime jq+mv rewrote /repo/opencode.json
+  // with the real token; now agent_command builds /tmp/opencode.json
+  // from scratch using $OPENAI_COMPAT_AUTH_TOKEN at runtime). The
+  // orchestrator emits no config file at all, so nothing the agent
+  // could later archive contains the literal token. ----
+  describe('H3: openai-compatible credential never written under /repo', () => {
     const SECRET = 'super-secret-bearer-zzz';
 
     it('emits no orchestrator-written config file', () => {
@@ -235,7 +326,7 @@ describe('opencode harness', () => {
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
         provider: mkProvider({
-          kind: 'ollama',
+          kind: 'openai-compatible',
           base_url: 'http://192.168.1.10:11434',
           auth_token: SECRET,
         }),
@@ -244,18 +335,18 @@ describe('opencode harness', () => {
       expect(inv.config_files).toEqual([]);
     });
 
-    it('agent_command references $OLLAMA_AUTH_TOKEN, not the literal token, and writes to /tmp', () => {
+    it('agent_command references $OPENAI_COMPAT_AUTH_TOKEN, not the literal token, and writes to /tmp', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
         provider: mkProvider({
-          kind: 'ollama',
+          kind: 'openai-compatible',
           base_url: 'http://192.168.1.10:11434',
           auth_token: SECRET,
         }),
         promptFilePath: '/task/prompt.md',
       });
-      expect(inv.agent_command).toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).toContain('OPENAI_COMPAT_AUTH_TOKEN');
       expect(inv.agent_command).toContain('/tmp/opencode.json');
       expect(inv.agent_command).not.toContain('/repo/opencode.json');
       expect(inv.agent_command).not.toContain(SECRET);
@@ -266,7 +357,7 @@ describe('opencode harness', () => {
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel({ model_id: 'qwen2.5-coder:14b' }),
         provider: mkProvider({
-          kind: 'ollama',
+          kind: 'openai-compatible',
           base_url: 'http://192.168.1.10:11434',
           auth_token: null,
           api_key_env_var: null,
@@ -276,7 +367,7 @@ describe('opencode harness', () => {
       expect(inv.agent_command).toContain(':-ollama');
     });
 
-    it('skips the jq step for non-ollama (cloud) providers', () => {
+    it('skips the jq step for cloud providers', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'opencode' }),
         model: mkModel(),
@@ -284,7 +375,7 @@ describe('opencode harness', () => {
         promptFilePath: '/task/prompt.md',
       });
       expect(inv.agent_command).not.toContain('jq');
-      expect(inv.agent_command).not.toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).not.toContain('OPENAI_COMPAT_AUTH_TOKEN');
       expect(inv.agent_command).not.toContain('/tmp/opencode.json');
     });
   });
@@ -307,12 +398,12 @@ describe('pi harness', () => {
     expect(inv.resolved_model).toBe('anthropic/claude-sonnet-4-6');
   });
 
-  it('builds an ollama-targeted models.json via jq', () => {
+  it('builds an openai-compatible-targeted models.json via jq', () => {
     const inv = h.buildInvocation({
       profile: mkProfile({ harness_id: 'pi' }),
       model: mkModel({ model_id: 'qwen2.5:7b' }),
       provider: mkProvider({
-        kind: 'ollama',
+        kind: 'openai-compatible',
         base_url: 'http://gpu:11434',
         api_key_env_var: null,
       }),
@@ -324,7 +415,88 @@ describe('pi harness', () => {
     expect(inv.agent_command).toContain('jq -n');
     expect(inv.agent_command).toContain('http://gpu:11434/v1');
     expect(inv.agent_command).toContain('qwen2.5:7b');
-    expect(inv.resolved_model).toBe('ollama/qwen2.5:7b');
+    expect(inv.resolved_model).toBe('openai-compatible/qwen2.5:7b');
+  });
+
+  // ---- Optional per-model context window. Pi defaults to 128,000 and
+  // sizes compaction off `contextWindow`, so a local server started with
+  // a smaller --ctx-size silently overflows and a larger one compacts
+  // early. NULL must reproduce the pre-column output byte for byte. ----
+  describe('context_window', () => {
+    const selfHosted = () =>
+      mkProvider({
+        kind: 'openai-compatible',
+        base_url: 'http://gpu:11434',
+        api_key_env_var: null,
+      });
+
+    it('emits the exact pre-column command when context_window is null', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b', context_window: null }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toBe(
+        "mkdir -p ~/.pi/agent && jq -n " +
+          "--arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" " +
+          "--arg provider 'openai-compatible' " +
+          "--arg url 'http://gpu:11434/v1' " +
+          "--arg model_id 'qwen2.5:7b' " +
+          "'{providers:{($provider):{baseUrl:$url,api:\"openai-completions\",apiKey:$token," +
+          "compat:{supportsDeveloperRole:false,supportsReasoningEffort:false}," +
+          "models:[{id:$model_id}]}}}' " +
+          "> ~/.pi/agent/models.json && " +
+          "pi -p --mode json --no-session --model 'openai-compatible/qwen2.5:7b' @'/task/prompt.md'"
+      );
+      // Nothing context-window-shaped leaks in when the column is unset.
+      expect(inv.agent_command).not.toContain('contextWindow');
+      expect(inv.agent_command).not.toContain('--argjson');
+    });
+
+    it('writes contextWindow into the model entry when set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b', context_window: 32768 }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      // --argjson (not --arg) so jq emits a JSON number, not a string.
+      expect(inv.agent_command).toContain('--argjson context_window 32768');
+      expect(inv.agent_command).toContain(
+        'models:[{id:$model_id,contextWindow:$context_window}]'
+      );
+    });
+
+    it('honours context_window on cloud kinds too', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'some-model-id', context_window: 200000 }),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('--argjson context_window 200000');
+      expect(inv.agent_command).toContain(
+        "'{providers:{($provider):{models:[{id:$model_id,contextWindow:$context_window}]}}}'"
+      );
+    });
+
+    it('rejects a non-integer context_window from a hand-edited row', () => {
+      expect(() =>
+        h.buildInvocation({
+          profile: mkProfile({ harness_id: 'pi' }),
+          model: mkModel({
+            model_id: 'qwen2.5:7b',
+            // Route validation rejects this shape; a direct DB edit is
+            // not bound by it, and the value reaches the command line
+            // unquoted.
+            context_window: '32768; rm -rf /' as unknown as number,
+          }),
+          provider: selfHosted(),
+          promptFilePath: '/task/prompt.md',
+        })
+      ).toThrow(/invalid context_window/);
+    });
   });
 
   // ---- Cloud-kind support. Pi has built-in provider definitions for
@@ -363,9 +535,9 @@ describe('pi harness', () => {
         // provider key so the model id is reachable when pi resolves
         // the --model argument.
         expect(inv.agent_command).toContain(`--arg provider '${piName}'`);
-        // No Ollama-only fields leak into cloud-kind config.
+        // No self-hosted-only fields leak into cloud-kind config.
         expect(inv.agent_command).not.toContain('baseUrl');
-        expect(inv.agent_command).not.toContain('OLLAMA_AUTH_TOKEN');
+        expect(inv.agent_command).not.toContain('OPENAI_COMPAT_AUTH_TOKEN');
       });
     }
 
@@ -381,25 +553,26 @@ describe('pi harness', () => {
     });
   });
 
-  // ---- H2 fix: pi's ollama config is built by jq inside the agent
-  // container, reading the auth_token from $OLLAMA_AUTH_TOKEN. The
-  // operator's actual token never appears in agent_command or in any
-  // persisted artifact derived from it (meta.json, scheduler logs). ----
-  describe('H2: ollama credential never inlined', () => {
+  // ---- H2 fix: pi's openai-compatible config is built by jq inside
+  // the agent container, reading the auth_token from
+  // $OPENAI_COMPAT_AUTH_TOKEN. The operator's actual token never
+  // appears in agent_command or in any persisted artifact derived from
+  // it (meta.json, scheduler logs). ----
+  describe('H2: openai-compatible credential never inlined', () => {
     const SECRET = 'super-secret-bearer-zzz';
 
-    it('agent_command references $OLLAMA_AUTH_TOKEN, not the literal token', () => {
+    it('agent_command references $OPENAI_COMPAT_AUTH_TOKEN, not the literal token', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'pi' }),
         model: mkModel({ model_id: 'qwen2.5:7b' }),
         provider: mkProvider({
-          kind: 'ollama',
+          kind: 'openai-compatible',
           base_url: 'http://gpu:11434',
           auth_token: SECRET,
         }),
         promptFilePath: '/task/prompt.md',
       });
-      expect(inv.agent_command).toContain('OLLAMA_AUTH_TOKEN');
+      expect(inv.agent_command).toContain('OPENAI_COMPAT_AUTH_TOKEN');
       expect(inv.agent_command).not.toContain(SECRET);
     });
 
@@ -408,15 +581,16 @@ describe('pi harness', () => {
         profile: mkProfile({ harness_id: 'pi' }),
         model: mkModel({ model_id: 'qwen2.5:7b' }),
         provider: mkProvider({
-          kind: 'ollama',
+          kind: 'openai-compatible',
           base_url: 'http://gpu:11434',
           auth_token: null,
           api_key_env_var: null,
         }),
         promptFilePath: '/task/prompt.md',
       });
-      // The shell parameter default `${OLLAMA_AUTH_TOKEN:-ollama}` is
-      // what produces "ollama" at runtime when the env var is unset.
+      // The shell parameter default `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}`
+      // is what produces "ollama" at runtime when the env var is unset.
+      // Vanilla Ollama expects that exact placeholder string.
       expect(inv.agent_command).toContain(':-ollama');
     });
   });

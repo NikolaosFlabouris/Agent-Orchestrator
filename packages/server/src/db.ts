@@ -41,7 +41,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 32;
+const CURRENT_SCHEMA_VERSION = 34;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -265,20 +265,21 @@ function createTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
-      -- Provider kind (anthropic, openai, ollama, etc.). Determines
-      -- credential shape, env-var name, default base_url, and which
-      -- harnesses can target this provider. See PROVIDER_KINDS.
+      -- Provider kind (anthropic, openai, openai-compatible, etc.).
+      -- Determines credential shape, env-var name, default base_url, and
+      -- which harnesses can target this provider. See PROVIDER_KINDS.
       kind TEXT NOT NULL,
       -- Per-provider concurrency cap (an upstream LLM constraint, e.g. an
-      -- API rate-limit bucket or a single Ollama server). 0 means "paused"
+      -- API rate-limit bucket or a single self-hosted GPU box). 0 means "paused"
       -- (no task assigned to this provider launches). NULL is not allowed.
       -- Independent from the host resource pool (settings.max_agent_memory_mb /
       -- max_agent_cpu_cores), which gates hardware capacity for every task.
       concurrency_limit INTEGER NOT NULL DEFAULT 1 CHECK (concurrency_limit >= 0),
       -- Connection URL. NULL for cloud kinds (uses kind's default). REQUIRED
-      -- for self-hosted kinds (ollama).
+      -- for self-hosted kinds (openai-compatible).
       base_url TEXT,
-      -- Inline secret (Ollama bearer/basic auth token, or a cloud API key
+      -- Inline secret (bearer/basic auth token for a self-hosted
+      -- endpoint, or a cloud API key
       -- when the operator is multi-instancing a kind without env-var
       -- indirection). NULL when api_key_env_var is used or no auth needed.
       auth_token TEXT,
@@ -296,6 +297,12 @@ function createTables(db: Database.Database): void {
       -- any provider prefix (e.g. 'claude-sonnet-4-6', 'qwen2.5-coder:14b').
       model_id TEXT NOT NULL,
       display_name TEXT NOT NULL,
+      -- Context window (tokens) to drive this model with. NULL = unset,
+      -- i.e. the harness falls back to its own default (pi's is 128,000).
+      -- Operator-supplied because only they know the self-hosted server's
+      -- actual --ctx-size; harnesses that can express it write it into
+      -- their generated config.
+      context_window INTEGER,
       UNIQUE(provider_id, model_id)
     );
 
@@ -773,6 +780,42 @@ function runMigrations(db: Database.Database): void {
           }
         }
       }
+      if (version < 33) {
+        // v33: the local-inference provider kind was renamed
+        // 'ollama' → 'openai-compatible'. Nothing about it was ever
+        // Ollama-specific — both harnesses that support it drive a
+        // generic OpenAI-completions endpoint at <base_url>/v1 — and in
+        // practice it fronts llama-swap/llama.cpp/vLLM just as often.
+        // Rewrite the kind on existing provider rows so they keep
+        // resolving against SPECS (providers/kinds.ts) after the rename;
+        // provider row ids are operator data and are left untouched.
+        // Idempotent (the WHERE matches nothing on a second run) and
+        // scoped to the one kind, so no other provider row is touched.
+        db.prepare(
+          "UPDATE providers SET kind = 'openai-compatible' WHERE kind = 'ollama'"
+        ).run();
+      }
+      if (version < 34) {
+        // v34: operator-configurable context window per model. Nullable —
+        // existing rows get NULL, which every harness reads as "unset" and
+        // keeps emitting the config it emitted before this column existed
+        // (pi then falls back to its own 128,000 default). createTables
+        // holds the canonical shape; the ALTER below forward-migrates
+        // existing installs. SQLite has no ADD COLUMN IF NOT EXISTS, so
+        // guard via pragma_table_info to stay idempotent after a
+        // partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        if (!hasColumn('models', 'context_window')) {
+          db.exec('ALTER TABLE models ADD COLUMN context_window INTEGER');
+        }
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -887,8 +930,8 @@ function rebuildTasksWithRepoScopedUnique(db: Database.Database): void {
  *    set, the bootstrap profile launches successfully out of the box; if
  *    not, the profile is visible but flagged "missing credential" by the
  *    Settings UI.
- *  - Local Ollama is NOT seeded — operators add their own with the URL of
- *    their server. */
+ *  - No self-hosted (openai-compatible) provider is seeded — operators add
+ *    their own with the URL of their server. */
 function seedBootstrapProfile(db: Database.Database): void {
   const insertProvider = db.prepare(
     `INSERT OR IGNORE INTO providers
@@ -1607,23 +1650,37 @@ export function insertModel(m: {
   provider_id: string;
   model_id: string;
   display_name: string;
+  context_window?: number | null;
 }): Model {
   const result = getDb()
     .prepare(
-      'INSERT INTO models (provider_id, model_id, display_name) VALUES (?, ?, ?)'
+      'INSERT INTO models (provider_id, model_id, display_name, context_window) VALUES (?, ?, ?, ?)'
     )
-    .run(m.provider_id, m.model_id, m.display_name);
+    .run(m.provider_id, m.model_id, m.display_name, m.context_window ?? null);
   return getModel(result.lastInsertRowid as number)!;
 }
 
+/** Patch the editable fields of a model row. Only the keys present in
+ *  `updates` are written, so clearing `context_window` needs an explicit
+ *  `null` (an absent key leaves the stored value alone). */
 export function updateModel(
   id: number,
-  updates: Partial<Pick<Model, 'display_name'>>
+  updates: Partial<Pick<Model, 'display_name' | 'context_window'>>
 ): void {
-  if (updates.display_name === undefined) return;
+  const sets: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (updates.display_name !== undefined) {
+    sets.push('display_name = ?');
+    values.push(updates.display_name);
+  }
+  if (updates.context_window !== undefined) {
+    sets.push('context_window = ?');
+    values.push(updates.context_window);
+  }
+  if (sets.length === 0) return;
   getDb()
-    .prepare('UPDATE models SET display_name = ? WHERE id = ?')
-    .run(updates.display_name, id);
+    .prepare(`UPDATE models SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...values, id);
 }
 
 export function deleteModel(id: number): void {

@@ -5,12 +5,12 @@ import type { ProviderKindSpec } from '../api.js';
 // ---------------------------------------------------------------------------
 // Spec fixtures mirroring packages/server/src/providers/kinds.ts
 // ---------------------------------------------------------------------------
-const OLLAMA_SPEC: ProviderKindSpec = {
-  kind: 'ollama',
-  display_name: 'Ollama (self-hosted)',
+const SELF_HOSTED_SPEC: ProviderKindSpec = {
+  kind: 'openai-compatible',
+  display_name: 'OpenAI-compatible (self-hosted)',
   description: '',
   requires_base_url: true,
-  container_env_name: 'OLLAMA_AUTH_TOKEN',
+  container_env_name: 'OPENAI_COMPAT_AUTH_TOKEN',
   auth_optional: true,
 };
 
@@ -23,8 +23,8 @@ const OPENAI_SPEC: ProviderKindSpec = {
   auth_optional: false,
 };
 
-describe('buildProviderSavePayload — auth-optional (Ollama)', () => {
-  // The reported bug: a new Ollama provider's auth-token control starts in
+describe('buildProviderSavePayload — auth-optional (self-hosted)', () => {
+  // The reported bug: a new self-hosted provider's auth-token control starts in
   // 'set' mode with an empty draft, and the old guard rejected that before
   // honouring auth_optional, so the row could never be saved.
   it('saves a new auth-optional provider with an empty inline token', () => {
@@ -32,14 +32,14 @@ describe('buildProviderSavePayload — auth-optional (Ollama)', () => {
       editing: {
         id: 'ollama-local',
         display_name: 'Ollama (Local)',
-        kind: 'ollama',
+        kind: 'openai-compatible',
         concurrency_limit: 1,
         base_url: 'http://host.docker.internal:11434',
         has_auth_token: false,
-        api_key_env_var: 'OLLAMA_AUTH_TOKEN',
+        api_key_env_var: 'OPENAI_COMPAT_AUTH_TOKEN',
         notes: null,
       },
-      spec: OLLAMA_SPEC,
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'set',
       authTokenDraft: '',
     });
@@ -49,14 +49,14 @@ describe('buildProviderSavePayload — auth-optional (Ollama)', () => {
       // No inline token is sent — the field is omitted, not blanked.
       expect('auth_token' in result.payload).toBe(false);
       expect(result.payload.base_url).toBe('http://host.docker.internal:11434');
-      expect(result.payload.api_key_env_var).toBe('OLLAMA_AUTH_TOKEN');
+      expect(result.payload.api_key_env_var).toBe('OPENAI_COMPAT_AUTH_TOKEN');
     }
   });
 
   it('still requires base_url for a self-hosted kind', () => {
     const result = buildProviderSavePayload({
-      editing: { kind: 'ollama', has_auth_token: false, api_key_env_var: null, base_url: '' },
-      spec: OLLAMA_SPEC,
+      editing: { kind: 'openai-compatible', has_auth_token: false, api_key_env_var: null, base_url: '' },
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'set',
       authTokenDraft: '',
     });
@@ -65,8 +65,8 @@ describe('buildProviderSavePayload — auth-optional (Ollama)', () => {
 
   it('sends the trimmed inline token when one is entered', () => {
     const result = buildProviderSavePayload({
-      editing: { kind: 'ollama', has_auth_token: false, api_key_env_var: null, base_url: 'http://x:11434' },
-      spec: OLLAMA_SPEC,
+      editing: { kind: 'openai-compatible', has_auth_token: false, api_key_env_var: null, base_url: 'http://x:11434' },
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'set',
       authTokenDraft: '  bearer-secret  ',
     });
@@ -80,8 +80,8 @@ describe('buildProviderSavePayload — the Replace-then-blank guard', () => {
   // even for an auth-optional kind — because there IS a value to remove.
   it('rejects blanking an existing stored token in set mode', () => {
     const result = buildProviderSavePayload({
-      editing: { kind: 'ollama', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
-      spec: OLLAMA_SPEC,
+      editing: { kind: 'openai-compatible', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'set',
       authTokenDraft: '',
     });
@@ -117,8 +117,8 @@ describe('buildProviderSavePayload — required-auth (cloud) kinds', () => {
 describe('buildProviderSavePayload — tri-state payload shaping', () => {
   it('omits auth_token in keep mode so the stored value is preserved', () => {
     const result = buildProviderSavePayload({
-      editing: { kind: 'ollama', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
-      spec: OLLAMA_SPEC,
+      editing: { kind: 'openai-compatible', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'keep',
       authTokenDraft: '',
     });
@@ -127,8 +127,8 @@ describe('buildProviderSavePayload — tri-state payload shaping', () => {
 
   it('sends null in clear mode to remove the stored token', () => {
     const result = buildProviderSavePayload({
-      editing: { kind: 'ollama', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
-      spec: OLLAMA_SPEC,
+      editing: { kind: 'openai-compatible', has_auth_token: true, api_key_env_var: null, base_url: 'http://x:11434' },
+      spec: SELF_HOSTED_SPEC,
       authTokenMode: 'clear',
       authTokenDraft: '',
     });

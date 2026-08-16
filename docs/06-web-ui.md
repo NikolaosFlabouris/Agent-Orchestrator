@@ -88,7 +88,7 @@ The Settings page has five tabs. **The active tab is the URL**, not component st
 
 **Repositories.** List of configured repos. Per-repo fields: base branch, default implementation profile (`agent_profile_id`, nullable — blank means inherit the global default), default review profile (`review_agent_profile_id`, nullable — blank means inherit the global review default, then the implementation profile), `install_steps` (typed entries: kind from a fixed dropdown plus optional `cwd`, plus an `allow_script_steps` toggle for the script escape hatch), per-repo container memory/CPU overrides (blank = compile-time defaults), preferred merge strategy (squash / merge / rebase).
 
-**Providers & Models.** Nested layout: the providers list is the outer view, and selecting a provider expands its model list. Provider fields: `id`, `display_name`, `kind` (anthropic / claude-subscription / openai / gemini / mistral / deepseek / openrouter / ollama), `concurrency_limit`, `base_url` (required for ollama, hidden for cloud kinds), and exactly one of `api_key_env_var` (env-var pointer) or `auth_token` (inline plaintext). Per-kind form components render only the fields that kind supports. Model fields are just `model_id` and `display_name` under a fixed `provider_id`.
+**Providers & Models.** Nested layout: the providers list is the outer view, and selecting a provider expands its model list. Provider fields: `id`, `display_name`, `kind` (anthropic / claude-subscription / openai / gemini / mistral / deepseek / openrouter / openai-compatible), `concurrency_limit`, `base_url` (required for openai-compatible, hidden for cloud kinds), and exactly one of `api_key_env_var` (env-var pointer) or `auth_token` (inline plaintext). The single form renders only the fields the selected kind declares in its `ProviderKindSpec` (served by `GET /api/provider-kinds`) — there are no per-kind form components. Model fields are `model_id`, `display_name` and an optional `context_window` (tokens) under a fixed `provider_id`. Leave `context_window` blank to let the harness use its own default; set it to a self-hosted server's real `--ctx-size` so the harness sizes compaction off the truth instead of overflowing (pi assumes 128,000).
 
 **Agent Profiles.** Operator-composed pairings. Fields: `id`, `display_name`, `harness_id` (one of the four code-defined harnesses), `model_pk` (picker scoped to the chosen harness's `supported_provider_kinds`), `timeout_minutes`, and a per-harness `config_json` form. The UI renders a different form component per `harness_id`; harnesses with no operator-tunable knobs render an empty form.
 
@@ -377,7 +377,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
     {
       "id": "ollama-gpu",
       "display_name": "Ollama (gpu host)",
-      "kind": "ollama",
+      "kind": "openai-compatible",
       "concurrency_limit": 1,
       "base_url": "http://192.168.1.50:11434",
       "auth_token": null,
@@ -390,7 +390,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 }
 ```
 
-`POST /api/providers` request — required: `id`, `display_name`, `kind`. `concurrency_limit` defaults to `1`. `base_url` is required for `kind=ollama` and forbidden for cloud kinds. Operators choose between `api_key_env_var` (env-var pointer) and `auth_token` (inline plaintext); leave both null when no auth is required.
+`POST /api/providers` request — required: `id`, `display_name`, `kind`. `concurrency_limit` defaults to `1`. `base_url` is required for `kind=openai-compatible` and forbidden for cloud kinds. Operators choose between `api_key_env_var` (env-var pointer) and `auth_token` (inline plaintext); leave both null when no auth is required.
 
 `GET /api/providers/:id/models` returns the models scoped to one provider:
 
@@ -411,7 +411,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 {
   "kinds": [
     { "kind": "anthropic", "display_name": "Anthropic", "requires_base_url": false, "container_env_name": "ANTHROPIC_API_KEY", "auth_optional": false, "description": "..." },
-    { "kind": "ollama",    "display_name": "Ollama (self-hosted)", "requires_base_url": true,  "container_env_name": null,                "auth_optional": true,  "description": "..." }
+    { "kind": "openai-compatible", "display_name": "OpenAI-compatible (self-hosted)", "requires_base_url": true, "container_env_name": "OPENAI_COMPAT_AUTH_TOKEN", "auth_optional": true, "description": "..." }
   ]
 }
 ```
@@ -450,8 +450,8 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
   "harnesses": [
     { "id": "claude-sdk",  "display_name": "Claude Agent SDK", "runtime": "sdk", "supported_provider_kinds": ["anthropic"] },
     { "id": "claude-code", "display_name": "Claude Code CLI",  "runtime": "cli", "supported_provider_kinds": ["anthropic", "claude-subscription"] },
-    { "id": "opencode",    "display_name": "OpenCode",         "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "ollama"] },
-    { "id": "pi",          "display_name": "pi",               "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "ollama"] }
+    { "id": "opencode",    "display_name": "OpenCode",         "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] },
+    { "id": "pi",          "display_name": "pi",               "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] }
   ]
 }
 ```

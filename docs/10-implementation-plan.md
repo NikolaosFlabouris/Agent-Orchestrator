@@ -116,7 +116,7 @@ The mock agent image (from the testing strategy) is used throughout slices 2–4
    - `resolveProviderCredential(provider)` and `buildProviderEnv(provider)` helpers used by the scheduler at launch
 
 4. **Agent image** (`images/agent/Dockerfile`)
-   - Ubuntu 24.04, git, jq, curl, Node.js 22, Python 3, Go 1.24, all four agent CLIs / SDK (`@anthropic-ai/claude-agent-sdk`, `@anthropic-ai/claude-code`, `opencode-ai`, `@mariozechner/pi-coding-agent`)
+   - Ubuntu 24.04, git, jq, curl, Node.js 22, Python 3, Go 1.24, all four agent CLIs / SDK (`@anthropic-ai/claude-agent-sdk`, `@anthropic-ai/claude-code`, `opencode-ai`, `@earendil-works/pi-coding-agent`)
    - Both harness scripts copied in
    - Non-root `agent` user (UID 1000)
    - No ENTRYPOINT — set per-task to `harness-sdk` or `harness-cli`

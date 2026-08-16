@@ -8,6 +8,10 @@ import type {
   ModelResponse,
 } from '../../api.js';
 import { buildProviderSavePayload, type AuthTokenMode } from './providerSavePayload.js';
+import {
+  formatContextWindowInput,
+  parseContextWindowInput,
+} from './contextWindow.js';
 import { Button } from '../../components/Button.js';
 import { Input, Select, Textarea, inputClasses } from '../../components/Input.js';
 
@@ -156,7 +160,8 @@ export function ProviderSettings() {
         (for self-hosted), and credential. Each provider has its own
         concurrency limit. Cloud kinds (Anthropic, OpenAI…) are typically
         singletons with the API key in the orchestrator's <span className="font-mono">.env</span>.
-        Self-hosted (Ollama) can have multiple instances with different URLs.
+        Self-hosted (OpenAI-compatible) can have multiple instances with
+        different URLs.
       </div>
 
       {error && (
@@ -237,7 +242,7 @@ export function ProviderSettings() {
                     kind: newKind,
                     // Reset auth fields to the new kind's defaults when
                     // switching, so an operator doesn't accidentally save an
-                    // anthropic provider with an ollama URL.
+                    // anthropic provider with a self-hosted URL.
                     base_url: spec?.requires_base_url ? editing.base_url ?? '' : null,
                     api_key_env_var: spec?.container_env_name ?? null,
                   });
@@ -573,11 +578,15 @@ function ProviderModels({ providerId }: { providerId: string }) {
   const [adding, setAdding] = useState(false);
   const [draftId, setDraftId] = useState('');
   const [draftName, setDraftName] = useState('');
+  const [draftContext, setDraftContext] = useState('');
+  // PK of the model whose inline editor is open, or null for none.
+  const [editingPk, setEditingPk] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const modelsVersion = useStore((s) => s.resourceVersions.models);
   const uid = useId();
   const draftIdId = `${uid}-model-id`;
   const draftNameId = `${uid}-model-name`;
+  const draftContextId = `${uid}-model-context-window`;
 
   function refresh(): void {
     api
@@ -592,17 +601,43 @@ function ProviderModels({ providerId }: { providerId: string }) {
 
   async function handleAdd(): Promise<void> {
     setError(null);
+    const context_window = parseContextWindowInput(draftContext);
+    if (context_window === undefined) {
+      setError('Context window must be a positive whole number of tokens.');
+      return;
+    }
     try {
       await api.createModel(providerId, {
         model_id: draftId.trim(),
         display_name: draftName.trim(),
+        context_window,
       });
       setDraftId('');
       setDraftName('');
+      setDraftContext('');
       setAdding(false);
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Add failed');
+    }
+  }
+
+  async function handleSaveContextWindow(
+    pk: number,
+    raw: string
+  ): Promise<void> {
+    setError(null);
+    const context_window = parseContextWindowInput(raw);
+    if (context_window === undefined) {
+      setError('Context window must be a positive whole number of tokens.');
+      return;
+    }
+    try {
+      await api.updateModel(pk, { context_window });
+      setEditingPk(null);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed');
     }
   }
 
@@ -637,15 +672,44 @@ function ProviderModels({ providerId }: { providerId: string }) {
               <span className="min-w-0 break-words">
                 <span className="font-mono">{m.model_id}</span>
                 <span className="text-gray-500 ml-2">{m.display_name}</span>
+                <span className="text-gray-500 ml-2">
+                  {m.context_window === null
+                    ? 'ctx: default'
+                    : `ctx: ${m.context_window.toLocaleString()}`}
+                </span>
               </span>
-              <button
-                type="button"
-                onClick={() => handleDelete(m.id)}
-                aria-label={`Delete model ${m.model_id}`}
-                className={`shrink-0 text-red-400 hover:text-red-300 ${TOUCH_TARGET_Y_XS}`}
-              >
-                Delete
-              </button>
+              <span className="flex flex-wrap items-center gap-3 shrink-0">
+                {editingPk === m.id ? (
+                  <ContextWindowEditor
+                    model={m}
+                    onSave={(raw) => handleSaveContextWindow(m.id, raw)}
+                    onCancel={() => {
+                      setEditingPk(null);
+                      setError(null);
+                    }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingPk(m.id);
+                      setError(null);
+                    }}
+                    aria-label={`Edit context window for model ${m.model_id}`}
+                    className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y_XS}`}
+                  >
+                    Context window
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => handleDelete(m.id)}
+                  aria-label={`Delete model ${m.model_id}`}
+                  className={`text-red-400 hover:text-red-300 ${TOUCH_TARGET_Y_XS}`}
+                >
+                  Delete
+                </button>
+              </span>
             </li>
           ))}
         </ul>
@@ -676,6 +740,20 @@ function ProviderModels({ providerId }: { providerId: string }) {
             placeholder="display name"
             className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
           />
+          {/* Optional. Leave blank to let the harness use its own default
+              (pi's is 128,000). Set it to the self-hosted server's real
+              --ctx-size so compaction is sized off the truth. */}
+          <label htmlFor={draftContextId} className="sr-only">
+            Context window in tokens (optional)
+          </label>
+          <input
+            id={draftContextId}
+            value={draftContext}
+            onChange={(e) => setDraftContext(e.target.value)}
+            inputMode="numeric"
+            placeholder="context window (optional)"
+            className="w-full min-w-0 sm:w-auto sm:flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+          />
           <Button
             onClick={handleAdd}
             disabled={!draftId.trim() || !draftName.trim()}
@@ -689,6 +767,7 @@ function ProviderModels({ providerId }: { providerId: string }) {
               setAdding(false);
               setDraftId('');
               setDraftName('');
+              setDraftContext('');
               setError(null);
             }}
             className="min-h-11 sm:min-h-0 text-gray-400 hover:text-gray-200 px-2 text-xs"
@@ -706,5 +785,56 @@ function ProviderModels({ providerId }: { providerId: string }) {
         </button>
       )}
     </div>
+  );
+}
+
+/** Inline editor for one model's optional context window. Blank clears
+ *  the value back to "unset" (the harness default), which is why this is
+ *  a text input rather than a number spinner. Exported for the render
+ *  test — the models list itself only populates from an effect, which a
+ *  static render never runs. */
+export function ContextWindowEditor({
+  model,
+  onSave,
+  onCancel,
+}: {
+  model: ModelResponse;
+  onSave: (raw: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(
+    formatContextWindowInput(model.context_window)
+  );
+  const uid = useId();
+  const inputId = `${uid}-context-window`;
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <label htmlFor={inputId} className="sr-only">
+        Context window in tokens for {model.model_id} (blank for the harness
+        default)
+      </label>
+      <input
+        id={inputId}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        inputMode="numeric"
+        placeholder="context window"
+        className="w-28 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+      />
+      <button
+        type="button"
+        onClick={() => onSave(draft)}
+        className={`text-blue-400 hover:text-blue-300 ${TOUCH_TARGET_Y_XS}`}
+      >
+        Save
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        className={`text-gray-400 hover:text-gray-200 ${TOUCH_TARGET_Y_XS}`}
+      >
+        Cancel
+      </button>
+    </span>
   );
 }
