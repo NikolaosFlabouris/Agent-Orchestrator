@@ -256,7 +256,7 @@ describe('Model routes', () => {
   });
 
   it('POST /api/providers/:id/models rejects a non-positive-integer context_window', async () => {
-    for (const context_window of [0, -1, 1.5, 'lots']) {
+    for (const context_window of [0, -1, 1.5, 'lots', true, ['32768'], {}]) {
       const res = await app.inject({
         method: 'POST',
         url: '/api/providers/anthropic/models',

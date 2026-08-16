@@ -444,7 +444,7 @@ function AgentProfilesSection() {
         </li>
         <li>
           <Code>pi</Code> —{' '}
-          <Code>@mariozechner/pi-coding-agent</Code> CLI subprocess. Targets
+          <Code>@earendil-works/pi-coding-agent</Code> CLI subprocess. Targets
           every provider kind pi supports.
         </li>
       </ul>

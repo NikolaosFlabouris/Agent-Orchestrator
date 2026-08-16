@@ -61,7 +61,11 @@ function parseContextWindow(
   raw: unknown
 ): number | null | undefined {
   if (raw === null || raw === '') return null;
-  const n = typeof raw === 'number' ? raw : Number(raw);
+  // Only a number or a numeric string is a token count. Coercing anything
+  // else through Number() would quietly turn `true` into 1 and `['5']`
+  // into 5.
+  if (typeof raw !== 'number' && typeof raw !== 'string') return undefined;
+  const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) return undefined;
   return n;
 }

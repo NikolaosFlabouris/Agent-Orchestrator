@@ -245,7 +245,7 @@ Pino is included with Fastify (not a separate dependency). Webhook HMAC verifica
 | `@anthropic-ai/claude-agent-sdk` | Claude Agent SDK (TypeScript), used by the `claude-sdk` harness |
 | `@anthropic-ai/claude-code` | Claude Code CLI, used by the `claude-code` harness |
 | `opencode-ai` | OpenCode CLI, used by the `opencode` harness |
-| `@mariozechner/pi-coding-agent` | pi CLI, used by the `pi` harness |
+| `@earendil-works/pi-coding-agent` | pi CLI, used by the `pi` harness |
 
 **Total: 7 runtime dependencies for backend, 6 for frontend.**
 

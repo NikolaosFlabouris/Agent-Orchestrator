@@ -39,6 +39,18 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  old pi-mono/packages/ai/src/env-api-keys.ts source reference when
  *  the project moved to github.com/earendil-works/pi.
  *
+ *  Upstream version: verified against @earendil-works/pi-coding-agent
+ *  0.84.x, which is what images/agent/Dockerfile installs. Still current
+ *  there: `-p/--print` + `--mode json` + `--no-session`, `@<file>` prompt
+ *  arguments (rejected only in `--mode rpc`), `<provider>/<model_id>`
+ *  resolution for custom models.json providers, and the models.json
+ *  fields written below (`baseUrl`, `api`, `apiKey`, `compat`,
+ *  `models[].id`, `models[].contextWindow`). Pi's json mode emits an
+ *  event stream (`agent_start` / `message_end` / `agent_end`), not the
+ *  Claude-Code-style `{"type":"result"}` line that harness-cli.sh sums
+ *  usage from — so pi attempts leave the usage columns NULL, exactly as
+ *  they did before the package rename.
+ *
  *  Operator-tunable knobs (config_json): none for v1. */
 
 /** Map orchestrator ProviderKind → pi's internal provider name. Pi
