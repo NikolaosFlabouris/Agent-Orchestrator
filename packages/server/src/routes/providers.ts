@@ -52,6 +52,20 @@ const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+@-]*$/;
 /** Same allow-list applied to provider ids (operator-supplied). */
 const PROVIDER_ID_RE = /^[A-Za-z0-9._-]+$/;
 
+/** Parse an operator-supplied `context_window` value into the column's
+ *  domain: a positive integer, or NULL for "unset — use the harness
+ *  default". `null` and `''` both mean unset so the UI can clear the
+ *  field by submitting an empty input. Returns `undefined` for anything
+ *  that isn't a usable token count, which callers turn into a 400. */
+function parseContextWindow(
+  raw: unknown
+): number | null | undefined {
+  if (raw === null || raw === '') return null;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return undefined;
+  return n;
+}
+
 /** Pre-computed map of provider_id → active slot count, shared across
  *  one batch of `enrich(provider)` calls so we don't walk the task list
  *  N times per dashboard refresh. Pass an empty Map for the single-
@@ -338,6 +352,17 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
             "model_id may only contain letters, digits, and the characters '.', '-', '_', ':', '/', '+', '@'",
         });
       }
+      // Optional — omitted entirely means "unset" (harness default).
+      const contextWindow =
+        'context_window' in body
+          ? parseContextWindow(body.context_window)
+          : null;
+      if (contextWindow === undefined) {
+        return reply.status(400).send({
+          error:
+            'context_window must be a positive integer (or null to use the harness default)',
+        });
+      }
       if (getModelByProviderAndId(provider.id, modelId)) {
         return reply.status(409).send({
           error: `Model '${modelId}' already exists for provider '${provider.id}'`,
@@ -348,6 +373,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
           provider_id: provider.id,
           model_id: modelId,
           display_name: displayName,
+          context_window: contextWindow,
         });
         broadcastResourceChanged('models');
         return reply.status(201).send(inserted);
@@ -367,7 +393,11 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
 
   // PATCH /api/models/:pk — update by surrogate PK.
   //
-  // Editable fields are deliberately restricted to `display_name` only.
+  // Editable fields are deliberately restricted to `display_name` and
+  // `context_window`. Both are read at launch time only (the harness
+  // reads context_window when it builds the config), so an edit while an
+  // attempt is in flight can't desync a running container: the running
+  // agent keeps the value snapshotted into its agent_command.
   //
   // DO NOT add `model_id` (or `provider_id`) to this allowlist without
   // first auditing every consumer that reads model.model_id at launch
@@ -407,7 +437,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
           error: 'provider_id is immutable on an existing model row.',
         });
       }
-      const updates: Partial<Pick<Model, 'display_name'>> = {};
+      const updates: Partial<Pick<Model, 'display_name' | 'context_window'>> = {};
       if ('display_name' in body) {
         const v = String(body.display_name ?? '').trim();
         if (!v) {
@@ -416,6 +446,16 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
             .send({ error: 'display_name must be non-empty' });
         }
         updates.display_name = v;
+      }
+      if ('context_window' in body) {
+        const v = parseContextWindow(body.context_window);
+        if (v === undefined) {
+          return reply.status(400).send({
+            error:
+              'context_window must be a positive integer (or null to use the harness default)',
+          });
+        }
+        updates.context_window = v;
       }
       // M1: an empty `updates` map would still trigger a broadcast and
       // make every connected client refetch for no reason. The only way
@@ -426,8 +466,8 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       if (Object.keys(updates).length === 0) {
         return reply.status(400).send({
           error:
-            'No editable fields supplied. Only display_name is editable on an ' +
-            'existing model row.',
+            'No editable fields supplied. Only display_name and context_window ' +
+            'are editable on an existing model row.',
         });
       }
       updateModel(pk, updates);

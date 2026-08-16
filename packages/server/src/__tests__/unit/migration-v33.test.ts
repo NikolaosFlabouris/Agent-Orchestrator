@@ -55,7 +55,7 @@ describe('v33 provider-kind rename migration', () => {
   it('a fresh install is already at schema_version 33', () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), 'orch-mig-v33-fresh-'));
     const db = initDatabase(path.join(tmpDir, 'v33-fresh.db'));
-    expect(schemaVersion(db)).toBe('33');
+    expect(schemaVersion(db)).toBe('34');
     // The bootstrap seeds no self-hosted provider, so nothing carries the
     // old kind on a fresh DB either.
     expect(
@@ -80,7 +80,7 @@ describe('v33 provider-kind rename migration', () => {
       display_name: 'Ollama (Local)',
       base_url: 'http://host.docker.internal:11434',
     });
-    expect(schemaVersion(db)).toBe('33');
+    expect(schemaVersion(db)).toBe('34');
     db.close();
   });
 
@@ -110,13 +110,13 @@ describe('v33 provider-kind rename migration', () => {
 
     let db = initDatabase(dbFile);
     expect(kindOf(db, 'ollama-local')).toBe('openai-compatible');
-    expect(schemaVersion(db)).toBe('33');
+    expect(schemaVersion(db)).toBe('34');
     db.close();
 
     // And a second boot at 33 changes nothing further.
     db = initDatabase(dbFile);
     expect(kindOf(db, 'ollama-local')).toBe('openai-compatible');
-    expect(schemaVersion(db)).toBe('33');
+    expect(schemaVersion(db)).toBe('34');
     db.close();
   });
 });

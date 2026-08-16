@@ -329,6 +329,15 @@ export interface Model {
    *  Harnesses that need '<provider>/<model>' form prefix at launch time. */
   model_id: string;
   display_name: string;
+  /** Context window (tokens) this model should be driven with, or NULL to
+   *  let the harness use its own default. Only matters for self-hosted
+   *  endpoints, where the server's actual `--ctx-size` is operator
+   *  business and no catalog knows it: pi sizes compaction off
+   *  `contextWindow` (default 128,000), so a smaller server silently
+   *  overflows and a larger one compacts far too early. NULL is the
+   *  "unset" signal — harnesses must emit exactly the config they emitted
+   *  before this field existed. */
+  context_window: number | null;
 }
 
 /** Stable identifiers for the harnesses the orchestrator knows about.

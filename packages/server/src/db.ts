@@ -41,7 +41,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 33;
+const CURRENT_SCHEMA_VERSION = 34;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -297,6 +297,12 @@ function createTables(db: Database.Database): void {
       -- any provider prefix (e.g. 'claude-sonnet-4-6', 'qwen2.5-coder:14b').
       model_id TEXT NOT NULL,
       display_name TEXT NOT NULL,
+      -- Context window (tokens) to drive this model with. NULL = unset,
+      -- i.e. the harness falls back to its own default (pi's is 128,000).
+      -- Operator-supplied because only they know the self-hosted server's
+      -- actual --ctx-size; harnesses that can express it write it into
+      -- their generated config.
+      context_window INTEGER,
       UNIQUE(provider_id, model_id)
     );
 
@@ -788,6 +794,27 @@ function runMigrations(db: Database.Database): void {
         db.prepare(
           "UPDATE providers SET kind = 'openai-compatible' WHERE kind = 'ollama'"
         ).run();
+      }
+      if (version < 34) {
+        // v34: operator-configurable context window per model. Nullable —
+        // existing rows get NULL, which every harness reads as "unset" and
+        // keeps emitting the config it emitted before this column existed
+        // (pi then falls back to its own 128,000 default). createTables
+        // holds the canonical shape; the ALTER below forward-migrates
+        // existing installs. SQLite has no ADD COLUMN IF NOT EXISTS, so
+        // guard via pragma_table_info to stay idempotent after a
+        // partially-applied migration.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        if (!hasColumn('models', 'context_window')) {
+          db.exec('ALTER TABLE models ADD COLUMN context_window INTEGER');
+        }
       }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
@@ -1623,23 +1650,37 @@ export function insertModel(m: {
   provider_id: string;
   model_id: string;
   display_name: string;
+  context_window?: number | null;
 }): Model {
   const result = getDb()
     .prepare(
-      'INSERT INTO models (provider_id, model_id, display_name) VALUES (?, ?, ?)'
+      'INSERT INTO models (provider_id, model_id, display_name, context_window) VALUES (?, ?, ?, ?)'
     )
-    .run(m.provider_id, m.model_id, m.display_name);
+    .run(m.provider_id, m.model_id, m.display_name, m.context_window ?? null);
   return getModel(result.lastInsertRowid as number)!;
 }
 
+/** Patch the editable fields of a model row. Only the keys present in
+ *  `updates` are written, so clearing `context_window` needs an explicit
+ *  `null` (an absent key leaves the stored value alone). */
 export function updateModel(
   id: number,
-  updates: Partial<Pick<Model, 'display_name'>>
+  updates: Partial<Pick<Model, 'display_name' | 'context_window'>>
 ): void {
-  if (updates.display_name === undefined) return;
+  const sets: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (updates.display_name !== undefined) {
+    sets.push('display_name = ?');
+    values.push(updates.display_name);
+  }
+  if (updates.context_window !== undefined) {
+    sets.push('context_window = ?');
+    values.push(updates.context_window);
+  }
+  if (sets.length === 0) return;
   getDb()
-    .prepare('UPDATE models SET display_name = ? WHERE id = ?')
-    .run(updates.display_name, id);
+    .prepare(`UPDATE models SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...values, id);
 }
 
 export function deleteModel(id: number): void {

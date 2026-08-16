@@ -410,6 +410,10 @@ CREATE TABLE models (
   -- Harnesses that need '<provider>/<model>' form prefix at launch time.
   model_id TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  -- Context window (tokens) to drive this model with. NULL = unset, i.e.
+  -- the harness applies its own default (pi's is 128,000). Operator-
+  -- supplied because only they know a self-hosted server's --ctx-size.
+  context_window INTEGER,
   UNIQUE(provider_id, model_id)
 );
 

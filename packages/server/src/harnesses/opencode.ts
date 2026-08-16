@@ -1,6 +1,6 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys } from './config.js';
+import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
 
 /** OpenCode CLI harness. The in-container `harness-cli.sh` bash-executes
  *  the agent_command.
@@ -76,6 +76,21 @@ export const opencodeHarness: HarnessSpec = {
       // placeholder vanilla Ollama expects when no auth is configured,
       // and an arbitrary ignored string for every other server.
       const baseUrl = provider.base_url.replace(/\/+$/, '') + '/v1';
+      // Optional per-model context window. OpenCode expresses it as
+      // `limit: {context, output}` and its config schema requires BOTH
+      // keys once `limit` is present — so `output` is emitted as 0, the
+      // exact value OpenCode itself defaults to for a custom-provider
+      // model with no limit block (see its provider.ts), and which its
+      // maxOutputTokens() reads as "unset" and replaces with the built-in
+      // cap. Setting only `context` is therefore behaviour-preserving for
+      // output while enabling auto-compaction, which OpenCode disables
+      // entirely while `limit.context` is 0. Left NULL, no `limit` key is
+      // emitted at all and the config is byte-identical to before.
+      const contextWindow = resolveContextWindow(model, 'OpenCode harness');
+      const limitArg =
+        contextWindow === null ? '' : `--argjson context_window ${contextWindow} `;
+      const limitField =
+        contextWindow === null ? '' : ',limit:{context:$context_window,output:0}';
       const writeConfig =
         `jq -n ` +
         `--arg token "\${OPENAI_COMPAT_AUTH_TOKEN:-ollama}" ` +
@@ -84,9 +99,10 @@ export const opencodeHarness: HarnessSpec = {
         `--arg name ${sq(provider.display_name)} ` +
         `--arg model_id ${sq(model.model_id)} ` +
         `--arg model_name ${sq(model.display_name)} ` +
+        limitArg +
         `'{provider:{($provider):{npm:"@ai-sdk/openai-compatible",name:$name,` +
         `options:{baseURL:$url,apiKey:$token},` +
-        `models:{($model_id):{name:$model_name}}}},` +
+        `models:{($model_id):{name:$model_name${limitField}}}}},` +
         `permission:{"*":"allow"}}' ` +
         `> /tmp/opencode.json`;
       return {
@@ -104,6 +120,11 @@ export const opencodeHarness: HarnessSpec = {
 
     // Cloud kinds — no config file, OpenCode picks up the standard env
     // var the scheduler exports plus its built-in provider definitions.
+    // A model's `context_window` is deliberately not honoured here:
+    // expressing it would mean synthesising a whole provider stanza to
+    // override a built-in model whose real limits OpenCode already pulls
+    // from models.dev. The field exists for self-hosted endpoints, where
+    // no catalog knows the operator's --ctx-size.
     return {
       agent_command:
         `opencode run "$(cat ${sq(promptFilePath)})" ` +

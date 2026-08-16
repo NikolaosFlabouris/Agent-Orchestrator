@@ -21,6 +21,7 @@ function mkModel(overrides: Partial<Model> = {}): Model {
     provider_id: 'p',
     model_id: 'claude-sonnet-4-6',
     display_name: 'Sonnet',
+    context_window: null,
     ...overrides,
   };
 }
@@ -224,6 +225,93 @@ describe('opencode harness', () => {
     ).toThrow(/base_url/);
   });
 
+  // ---- Optional per-model context window. OpenCode's config schema
+  // requires both keys of `limit` once the object is present, so the
+  // harness pairs the operator's context with `output: 0` — OpenCode's
+  // own default, which its maxOutputTokens() reads as "unset". ----
+  describe('context_window', () => {
+    const selfHosted = () =>
+      mkProvider({
+        kind: 'openai-compatible',
+        base_url: 'http://192.168.1.10:11434',
+        api_key_env_var: null,
+      });
+
+    it('emits the exact pre-column command when context_window is null', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({
+          model_id: 'qwen2.5-coder:14b',
+          display_name: 'Qwen',
+          context_window: null,
+        }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toBe(
+        "jq -n " +
+          "--arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" " +
+          "--arg provider 'openai-compatible' " +
+          "--arg url 'http://192.168.1.10:11434/v1' " +
+          "--arg name 'P' " +
+          "--arg model_id 'qwen2.5-coder:14b' " +
+          "--arg model_name 'Qwen' " +
+          "'{provider:{($provider):{npm:\"@ai-sdk/openai-compatible\",name:$name," +
+          "options:{baseURL:$url,apiKey:$token}," +
+          "models:{($model_id):{name:$model_name}}}}," +
+          "permission:{\"*\":\"allow\"}}' " +
+          "> /tmp/opencode.json && " +
+          "opencode run \"$(cat '/task/prompt.md')\" " +
+          "--config /tmp/opencode.json " +
+          "--model 'openai-compatible/qwen2.5-coder:14b' " +
+          "--format json --dangerously-skip-permissions --print-logs"
+      );
+      expect(inv.agent_command).not.toContain('limit');
+      expect(inv.agent_command).not.toContain('--argjson');
+    });
+
+    it('writes limit.context (with output 0) into the model entry when set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ model_id: 'qwen2.5-coder:14b', context_window: 32768 }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('--argjson context_window 32768');
+      expect(inv.agent_command).toContain(
+        'models:{($model_id):{name:$model_name,limit:{context:$context_window,output:0}}}'
+      );
+    });
+
+    it('emits no config file at all for cloud kinds, context window or not', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'opencode' }),
+        model: mkModel({ context_window: 200000 }),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      // OpenCode reads the built-in model's real limits from models.dev;
+      // the orchestrator does not synthesise an override stanza for it.
+      expect(inv.agent_command).not.toContain('jq');
+      expect(inv.agent_command).not.toContain('limit');
+      expect(inv.config_files).toEqual([]);
+    });
+
+    it('rejects a non-integer context_window from a hand-edited row', () => {
+      expect(() =>
+        h.buildInvocation({
+          profile: mkProfile({ harness_id: 'opencode' }),
+          model: mkModel({
+            model_id: 'qwen2.5-coder:14b',
+            context_window: 0 as unknown as number,
+          }),
+          provider: selfHosted(),
+          promptFilePath: '/task/prompt.md',
+        })
+      ).toThrow(/invalid context_window/);
+    });
+  });
+
   // ---- H3 fix: the self-hosted auth_token never lands on disk in
   // /repo (previously the runtime jq+mv rewrote /repo/opencode.json
   // with the real token; now agent_command builds /tmp/opencode.json
@@ -328,6 +416,87 @@ describe('pi harness', () => {
     expect(inv.agent_command).toContain('http://gpu:11434/v1');
     expect(inv.agent_command).toContain('qwen2.5:7b');
     expect(inv.resolved_model).toBe('openai-compatible/qwen2.5:7b');
+  });
+
+  // ---- Optional per-model context window. Pi defaults to 128,000 and
+  // sizes compaction off `contextWindow`, so a local server started with
+  // a smaller --ctx-size silently overflows and a larger one compacts
+  // early. NULL must reproduce the pre-column output byte for byte. ----
+  describe('context_window', () => {
+    const selfHosted = () =>
+      mkProvider({
+        kind: 'openai-compatible',
+        base_url: 'http://gpu:11434',
+        api_key_env_var: null,
+      });
+
+    it('emits the exact pre-column command when context_window is null', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b', context_window: null }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toBe(
+        "mkdir -p ~/.pi/agent && jq -n " +
+          "--arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" " +
+          "--arg provider 'openai-compatible' " +
+          "--arg url 'http://gpu:11434/v1' " +
+          "--arg model_id 'qwen2.5:7b' " +
+          "'{providers:{($provider):{baseUrl:$url,api:\"openai-completions\",apiKey:$token," +
+          "compat:{supportsDeveloperRole:false,supportsReasoningEffort:false}," +
+          "models:[{id:$model_id}]}}}' " +
+          "> ~/.pi/agent/models.json && " +
+          "pi -p --mode json --no-session --model 'openai-compatible/qwen2.5:7b' @'/task/prompt.md'"
+      );
+      // Nothing context-window-shaped leaks in when the column is unset.
+      expect(inv.agent_command).not.toContain('contextWindow');
+      expect(inv.agent_command).not.toContain('--argjson');
+    });
+
+    it('writes contextWindow into the model entry when set', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'qwen2.5:7b', context_window: 32768 }),
+        provider: selfHosted(),
+        promptFilePath: '/task/prompt.md',
+      });
+      // --argjson (not --arg) so jq emits a JSON number, not a string.
+      expect(inv.agent_command).toContain('--argjson context_window 32768');
+      expect(inv.agent_command).toContain(
+        'models:[{id:$model_id,contextWindow:$context_window}]'
+      );
+    });
+
+    it('honours context_window on cloud kinds too', () => {
+      const inv = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'pi' }),
+        model: mkModel({ model_id: 'some-model-id', context_window: 200000 }),
+        provider: mkProvider({ kind: 'anthropic' }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(inv.agent_command).toContain('--argjson context_window 200000');
+      expect(inv.agent_command).toContain(
+        "'{providers:{($provider):{models:[{id:$model_id,contextWindow:$context_window}]}}}'"
+      );
+    });
+
+    it('rejects a non-integer context_window from a hand-edited row', () => {
+      expect(() =>
+        h.buildInvocation({
+          profile: mkProfile({ harness_id: 'pi' }),
+          model: mkModel({
+            model_id: 'qwen2.5:7b',
+            // Route validation rejects this shape; a direct DB edit is
+            // not bound by it, and the value reaches the command line
+            // unquoted.
+            context_window: '32768; rm -rf /' as unknown as number,
+          }),
+          provider: selfHosted(),
+          promptFilePath: '/task/prompt.md',
+        })
+      ).toThrow(/invalid context_window/);
+    });
   });
 
   // ---- Cloud-kind support. Pi has built-in provider definitions for

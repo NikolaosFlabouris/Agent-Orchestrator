@@ -1,6 +1,6 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys } from './config.js';
+import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
 import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
 
 /** Pi (pi-coding-agent) CLI harness. Bash-executed in the container.
@@ -132,6 +132,17 @@ function buildPiConfigWriteCommand(
   model: Model,
   piProviderName: string
 ): string {
+  // Optional per-model `contextWindow`. Pi defaults to 128,000 and sizes
+  // compaction off this number, so against a local server started with a
+  // smaller --ctx-size the default silently overflows the server, and
+  // against a larger one pi compacts long before it has to. When the
+  // operator left the column NULL both fragments stay empty and the
+  // generated file is byte-identical to the pre-column output.
+  const contextWindow = resolveContextWindow(model, 'Pi harness');
+  const ctxArg =
+    contextWindow === null ? '' : `--argjson context_window ${contextWindow} `;
+  const ctxField = contextWindow === null ? '' : ',contextWindow:$context_window';
+
   if (provider.kind === 'openai-compatible') {
     if (!provider.base_url) {
       throw new Error(
@@ -152,9 +163,10 @@ function buildPiConfigWriteCommand(
       `--arg provider ${sq(piProviderName)} ` +
       `--arg url ${sq(baseUrl)} ` +
       `--arg model_id ${sq(model.model_id)} ` +
+      ctxArg +
       `'{providers:{($provider):{baseUrl:$url,api:"openai-completions",apiKey:$token,` +
       `compat:{supportsDeveloperRole:false,supportsReasoningEffort:false},` +
-      `models:[{id:$model_id}]}}}' ` +
+      `models:[{id:$model_id${ctxField}}]}}}' ` +
       `> ~/.pi/agent/models.json`
     );
   }
@@ -169,7 +181,8 @@ function buildPiConfigWriteCommand(
     `jq -n ` +
     `--arg provider ${sq(piProviderName)} ` +
     `--arg model_id ${sq(model.model_id)} ` +
-    `'{providers:{($provider):{models:[{id:$model_id}]}}}' ` +
+    ctxArg +
+    `'{providers:{($provider):{models:[{id:$model_id${ctxField}}]}}}' ` +
     `> ~/.pi/agent/models.json`
   );
 }
