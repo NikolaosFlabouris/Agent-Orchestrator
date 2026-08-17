@@ -331,7 +331,14 @@ export function Dashboard() {
           {activeTasks.length === 0 ? (
             <p className="text-gray-500 text-sm">No active tasks</p>
           ) : (
-            <div className="grid gap-3">
+            /* `grid-cols-1` — i.e. `minmax(0, 1fr)` — rather than the
+               implicit `auto` track this had. An `auto` track's base size is
+               the widest item's min-content width, and the card's min-content
+               width is the full, unwrapped issue title, so a long title sized
+               the column (and the card) past `main`'s max-width instead of
+               truncating, and the whole page scrolled sideways. The `min-w-0`
+               on the card is the other half of the fix. */
+            <div className="grid grid-cols-1 gap-3">
               {activeTasks.map((task) => (
                 <ActiveTaskCard key={task.id} task={task} />
               ))}
@@ -508,8 +515,18 @@ function ActiveTaskCard({ task }: { task: TaskResponse }) {
        ctrl/cmd+click open the task in a new tab — which an onClick+navigate
        <div role="link"> could never offer. Anything else that must stay
        clickable (the Forgejo issue link) is raised above the overlay with
-       `relative z-10`. */
-    <div className="relative block bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer">
+       `relative z-10`.
+
+       `min-w-0` because this card is a GRID item, and a grid item's automatic
+       minimum size is its content's min-content width — here the full,
+       unwrapped issue title. Without it the card sizes itself wider than the
+       page container no matter how much room there is, which is what made a
+       long-titled active task hang off the right edge of the screen at every
+       width. The `min-w-0`s further down only let the card's own children
+       shrink; they never get the chance if the card itself never shrinks.
+       Queue and Recent rows don't need this — they are block-level, so their
+       containing block sizes them. */
+    <div className="relative block min-w-0 bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors cursor-pointer">
       {/* Below `sm` the metadata cluster gets its own line under the title
           instead of being squeezed against it; `sm:` restores the original
           single centred row (flex `gap: normal` computes to 0, so
