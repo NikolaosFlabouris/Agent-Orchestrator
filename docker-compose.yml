@@ -70,7 +70,7 @@ services:
     # and also set ORCHESTRATOR_BIND_HOST=0.0.0.0 in .env. Both layers
     # must opt in; either one alone keeps you on loopback.
     ports:
-      - "0.0.0.0:8081:8080"
+      - "127.0.0.1:8081:8080"
     # Wait for the agent-image build to complete before the orchestrator
     # boots. If we didn't, the orchestrator could come up and accept task
     # creations before the agent image was tagged, and the first task to
