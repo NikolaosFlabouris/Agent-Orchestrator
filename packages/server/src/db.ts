@@ -1414,6 +1414,21 @@ export function updateAttempt(
     .run(...params);
 }
 
+/**
+ * Re-point every attempt of a task at one log location.
+ *
+ * Every attempt of a task already records the same `log_path` — the task's
+ * `<workspace>/.output/progress.log` — so when that log is archived they all
+ * move together; hence one statement rather than a per-attempt
+ * `updateAttempt`. Called by `archiveTaskArtifacts` so `attempts.log_path`
+ * keeps pointing at a file that still exists after the workspace is swept.
+ */
+export function updateAttemptsLogPath(taskId: number, logPath: string): void {
+  getDb()
+    .prepare('UPDATE attempts SET log_path = ? WHERE task_id = ?')
+    .run(logPath, taskId);
+}
+
 export function getAttempts(taskId: number): Attempt[] {
   return getDb()
     .prepare('SELECT * FROM attempts WHERE task_id = ? ORDER BY id ASC')

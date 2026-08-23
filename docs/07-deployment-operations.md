@@ -202,6 +202,14 @@ The `orchestrator-data` volume contains a single SQLite file. Copy it for backup
 docker cp orchestrator:/data/orchestrator.db ./backup/
 ```
 
+The same volume also holds `/data/archive` (run artifacts of completed
+tasks — see [Run Artifact Archive](#run-artifact-archive)). Back it up with
+the database if you care about historical agent logs:
+
+```bash
+docker cp orchestrator:/data/archive ./backup/
+```
+
 The workspaces and caches volumes are transient and do not need backup.
 Because they are named volumes (not host folders), browse their contents
 through the orchestrator container when debugging, e.g.
@@ -226,7 +234,7 @@ plain `down`.
 
 Workspaces (`/workspaces/issue-{id}/`) accumulate as tasks are processed. The orchestrator runs a two-pass cleanup on every poll cycle, governed by the `WORKSPACE_RETENTION_DAYS` constant in `packages/server/src/constants.ts` (default: 7 days).
 
-**Pass 1 — task-driven sweep:** for any task in a terminal state (`merged`, `failed`, `cancelled`, `reset`, `awaiting-human-*`, `needs-human-review`) whose `completed_at` is older than the retention window, the corresponding `/workspaces/issue-N/` directory is deleted. Same window applies uniformly to all terminal states — there is no "keep merged forever" carve-out.
+**Pass 1 — task-driven sweep:** for any task in a terminal state (`merged`, `failed`, `cancelled`, `reset`, `awaiting-human-*`, `needs-human-review`) whose `completed_at` is older than the retention window, the task's run artifacts are archived to `/data/archive/` and the corresponding `/workspaces/issue-N/` directory is then deleted. Same window applies uniformly to all terminal states — there is no "keep merged forever" carve-out. **Archiving vetoes deletion:** if the archive step fails the workspace is left in place (logged as `artifacts_archive_failed`) and the whole thing is retried on the next poll cycle — an undeleted workspace costs disk, a lost log is unrecoverable.
 
 **Pass 2 — orphan sweep:** lists `/workspaces/` for `issue-N` directories whose N has no matching task row. If the directory's mtime is older than the retention window, it is deleted. Catches stranded workspaces from manual DB intervention, restored backups, or test runs. The mtime + retention buffer guarantees a freshly-launched workspace can't be swept (workspaces are mkdir'd after the task row is inserted).
 
@@ -237,6 +245,8 @@ cleanup_workspaces():
   # Pass 1: task-driven
   for task in db.tasks where task.status in TERMINAL_STATUSES:
     if task.completed_at < cutoff:
+      try archive_artifacts(task)      # → /data/archive/{repo_id}/issue-{n}/
+      except: warn and skip this task  # retried next cycle; do NOT delete
       rm -rf /workspaces/issue-{task.issue_id}/
 
   # Pass 2: orphan sweep
@@ -246,7 +256,37 @@ cleanup_workspaces():
       rm -rf dir
 ```
 
-Resumption cost on a deleted workspace is one fresh `git clone` (~30s for a typical repo, plus a warm-cache dependency install since the per-repo `/caches/...` directory is shared and persists). No state is lost: the branch and PR live on Forgejo; the task row in the DB carries everything else.
+Pass 2 does not archive — an orphan directory has no task row to attribute artifacts to.
+
+Resumption cost on a deleted workspace is one fresh `git clone` (~30s for a typical repo, plus a warm-cache dependency install since the per-repo `/caches/...` directory is shared and persists). No state is lost: the branch and PR live on Forgejo; the task row in the DB carries everything else, and the agent's own logs survive in the archive below.
+
+### Run Artifact Archive
+
+Attempt rows live in the database forever, but the files an agent produces live in the task workspace, which the sweep above deletes. Before that happens the four small text artifacts are copied onto the persistent `orchestrator-data` volume, so log-based analysis of historical runs ("why did model X fail on task Y three weeks ago?") keeps working.
+
+**Location:** `/data/archive/{repo_id}/issue-{issue_id}/` — repo-scoped for the same reason workspaces are, since Forgejo issue numbers are per-repo. The root is the `ARCHIVE_ROOT` constant in `packages/server/src/constants.ts`, overridable via the `ARCHIVE_ROOT` env var (like `DB_PATH`) when running the server outside the container.
+
+**Contents** — only these, copied out of the workspace's `.output/` (and `.task/` for `meta.json`); nothing else from the workspace is archived:
+
+| File | Notes |
+|---|---|
+| `progress.log.gz` | The agent's progress log, gzipped — the only artifact that can reach megabytes. |
+| `result.json` | Harness run result (status, usage, exit code). |
+| `review.json` | Review verdict. Absent for attempts that never ran a review. |
+| `meta.json` | Launch context snapshot (role, resolved harness/model). |
+
+Files an attempt never produced are skipped (logged at debug level), so a missing `review.json` is normal rather than an error. Note that `progress.log` in the workspace holds the *latest* attempt only — the orchestrator rotates earlier attempts into `<workspace>/.output/archive/attempt-N-role/` at each launch, and those rotated copies are not archived.
+
+**When it runs:** eagerly when a task reaches a terminal state (so a crash or volume loss between completion and the sweep can't lose the artifacts), and again immediately before the retention sweep deletes the workspace. Archiving is idempotent — the second pass overwrites each file with the current workspace copy, writing to a `.partial` file and renaming so an interrupted copy can never truncate an existing archive entry.
+
+**Retention:** indefinite. There is no archive sweep. The size is bounded by (number of tasks × gzipped log), which is orders of magnitude below the workspaces it outlives; if it ever needs pruning, delete per-repo or per-issue directories by hand.
+
+**Reading a log:** `GET /api/tasks/:id/log` (and the Download button in the UI) serves the workspace copy while it exists and transparently gunzips the archived copy once it doesn't — 404 only when the log is in neither place. `attempts.log_path` is re-pointed at the archived `progress.log.gz` when a task is archived, so the DB never references a deleted file. Directly:
+
+```bash
+docker exec orchestrator ls /data/archive/1/issue-371
+docker exec orchestrator zcat /data/archive/1/issue-371/progress.log.gz | tail -50
+```
 
 ### Dependency Cache Cleanup
 

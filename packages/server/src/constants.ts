@@ -124,6 +124,16 @@ export const DEFAULT_CONTAINER_CPU_CORES = 2;
 export const WORKSPACES_ROOT = '/workspaces';
 export const CACHES_ROOT = '/caches';
 
+/** Persistent home for archived agent run artifacts (`progress.log.gz`,
+ *  `result.json`, `review.json`, `meta.json`), laid out as
+ *  `<ARCHIVE_ROOT>/<repo_id>/issue-<issue_id>/`. Lives on the same
+ *  `orchestrator-data` volume as the SQLite database — unlike /workspaces,
+ *  which is swept after WORKSPACE_RETENTION_DAYS, this is retained
+ *  indefinitely so log-based analysis of historical runs stays possible
+ *  (see archive.ts). Env-overridable like DB_PATH so `npm run dev` outside
+ *  the container can point at a local directory. */
+export const ARCHIVE_ROOT = process.env.ARCHIVE_ROOT ?? '/data/archive';
+
 /** Default look-back window (days) for the Reports API when a request
  *  omits explicit `from`/`to` bounds. 90 days is a pragmatic default for
  *  a model/harness/repo performance gauge: long enough to accumulate a
