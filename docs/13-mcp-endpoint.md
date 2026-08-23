@@ -1,6 +1,6 @@
 # 13. MCP Endpoint
 
-The orchestrator can expose its task surface as a **Model Context Protocol** server at `/mcp`, consumable by MCP clients (Claude Code's `agent-orchestrator` plugin, primarily). This makes "create and queue a task" a first-class tool any developer can invoke from any project, with no Forgejo credentials, Docker access, or repo checkout required on the developer's machine.
+The orchestrator can expose its task surface as a **Model Context Protocol** server at `/mcp`, consumable by MCP clients (Claude Code's `agent-orchestrator` plugin, primarily). This makes "create and queue a task" a first-class tool any developer can invoke from any project, with no Forgejo credentials, Docker access, or repo checkout required on the developer's machine — and, through the read-only tools, lets an agent analyse how the orchestrator and its models are actually performing without leaving the session.
 
 The endpoint is OAuth-protected. The orchestrator is both the **MCP Resource Server** (validates bearer JWTs on `/mcp`) and the **OAuth 2.1 Authorization Server** (issues those tokens via discovery, DCR, authorize, and token endpoints). The human-identity step reuses the existing Forgejo-OAuth-backed UI login — no new IdP and no second account to manage.
 
@@ -21,6 +21,39 @@ Token model:
 - **Access tokens** — HS256 JWTs, 1-hour TTL, audience-bound to `${ORCHESTRATOR_URL}/mcp`, validated statelessly at `/mcp`.
 - **Refresh tokens** — opaque rows in `mcp_oauth_refresh`, 30-day TTL, **rotated on every exchange**. Replaying a rotated-out refresh revokes the entire token family — the OAuth 2.1 reuse-detection model.
 - **Authorization codes** — opaque, PKCE-bound (S256), audience-bound, 60-second TTL, one-time-use.
+
+## Tool surface
+
+The server registers eight tools: three that manage work, five that read the orchestrator's telemetry. All five read tools are annotated `readOnlyHint: true` / `openWorldHint: false` and are side-effect free.
+
+| Tool | Inputs | Returns |
+|---|---|---|
+| `list_repos` | *(none)* | Every registered repo with its effective implementation and review agent profile, and which tier each was resolved from. |
+| `list_agent_profiles` | *(none)* | Every agent profile with its joined model / provider / usage stats. |
+| `create_task` | `repo_id`, `title`, `description`, `dependencies?`, `agent_profile_id?`, `review_agent_profile_id?`, `max_attempts?`, `human_merge?`, `human_review?` | The created task + Forgejo issue. The only non-read-only tool. |
+| `list_tasks` | `repo_id?`, `status?` (a `TaskStatus`), `limit?` (default 50, max 200), `offset?` | Tasks newest first: id, issue id/title, repo tuple, status, attempt/max_attempts, PR number, per-task profile overrides, created/started/completed timestamps. Plus `count`, `total`, `limit`, `offset`. No date window — covers all history. |
+| `get_task` | `task_id` | `{ task, attempts, events, forgejo_links }` — the same data `GET /api/tasks/:id` returns, assembled by the same code (`services/task-detail.ts`), just with the three collections under their own keys. |
+| `get_task_log` | `task_id`, `tail_lines?` (default 500, max 5000) | `{ log, total_lines, returned_lines, truncated }` — the tail of the task's `progress.log`, read from the live workspace or transparently from the gzipped archive once the workspace has been swept. |
+| `query_attempts` | `repos?`, `from?`, `to?`, `model?`, `harness?`, `role?`, `status?`, `include_feedback?`, `limit?` (default 200, max 2000), `offset?` | `{ rows, count, limit, offset }` — the flat `ExportAttemptRow` records `GET /api/export/attempts` serves. **No default window**: omit `from`/`to` and you get all history. |
+| `get_report` | `kind` (`overview`\|`timeseries`\|`leaderboard`\|`durations`\|`funnel`\|`reliability`\|`heatmap`), `repos?`, `from?`, `to?`, `bucket?` (timeseries/reliability), `group_by?` (leaderboard/durations), `metric?` (durations/heatmap) | `{ kind, report }`, where `report` is exactly what the matching `/api/reports/*` route returns. |
+
+Every read tool is a thin wrapper: the queries are `db.ts`'s, the task-detail assembly is the REST endpoint's, the log lookup is the archive-aware reader, and the `repos`/`from`/`to` parsing is the reports routes' own `parseFilter`. An MCP answer therefore cannot disagree with the dashboard or the REST API.
+
+### Data semantics
+
+- **Units.** Every `*_seconds` field is wall-clock seconds. Token counts and turn/tool-call counts are raw; the orchestrator derives **no** dollar cost anywhere. Timestamps are ISO-8601 UTC.
+- **`null` means unknown**, never 0 — a null `input_tokens` is a harness that reported no usage, not a free run.
+- **Date window.** `get_report` defaults to the last `DEFAULT_REPORT_WINDOW_DAYS` (90) when `from`/`to` are omitted, matching the Reports page. `query_attempts` deliberately does not: an export that silently truncated to 90 days would corrupt whatever consumed it. `list_tasks` applies no window either.
+- **Bounds are enforced server-side.** `limit` / `tail_lines` above their maxima are rejected (`Invalid input: …`) rather than silently clamped, so a client never analyses a truncated set believing it is complete.
+- **Errors** use the same two prefixes `create_task` uses: `Invalid input: …` for a bad argument (unknown `kind`, a `group_by` that doesn't apply to the kind, an over-max `limit`) and `Not found: …` for an unknown task, repo, or missing log.
+
+### Analysis workflow
+
+The read tools are designed to be composed in this order:
+
+1. **Compare** — `get_report kind=leaderboard group_by=model` (or `harness` / `repo`) to see which model merges the most tasks with the least effort; `kind=durations` for how long runs take; `kind=funnel` for where tasks drop out of the lifecycle; `kind=reliability` for the orchestrator's *own* incidents (prep failures, orphan recoveries, git outages) as opposed to the agents'.
+2. **Drill down** — `query_attempts` for row-level analysis an aggregate can't answer ("every failed review attempt for model X, with its `error_message`"). For a full-history bulk pull, use the REST endpoint `GET /api/export/attempts?format=jsonl` instead of paging this tool.
+3. **Investigate one task** — `list_tasks` to find it, `get_task` for its full state plus attempts and events, then `get_task_log` to read why a specific attempt failed. The log survives workspace retention, so old failures stay inspectable.
 
 ## Operator setup
 
@@ -151,7 +184,7 @@ These are compile-time constants in `packages/server/src/mcp/oauth/config.ts`. C
 ### Known limitations (v1)
 
 - **No background pruning of expired rows.** Authorization codes and revoked refresh tokens stay in their tables after TTL. Volumes are small (one row per authorize/token call) so this is fine for a long time, but a periodic `DELETE FROM mcp_oauth_codes WHERE expires_at < datetime('now', '-1 day')` cron is worth adding eventually.
-- **No per-tool scopes.** A valid MCP token grants the same surface a UI cookie session does. Fine-grained scoping (e.g., a read-only token for `list_repos`/`list_agent_profiles`) is a future enhancement.
+- **No per-tool scopes.** A valid MCP token grants the same surface a UI cookie session does. Fine-grained scoping (e.g., a token limited to the five read-only tools, with no `create_task`) is a future enhancement.
 - **DCR is unauthenticated.** Any client that can reach the endpoint can register and start the OAuth flow. The loopback-redirect constraint means a stolen client_id is only useful from the legitimate user's machine, but if you need stricter onboarding, put the orchestrator on a private network.
 
 ## Troubleshooting
@@ -176,4 +209,7 @@ These are compile-time constants in `packages/server/src/mcp/oauth/config.ts`. C
 - `packages/server/src/mcp/oauth/config.ts` — TTLs, signing-key resolution, canonical-URL helper.
 - `packages/server/src/routes/mcp-oauth.ts` — endpoint implementations.
 - `packages/server/src/routes/mcp.ts` — bearer-validated transport.
+- `packages/server/src/mcp/server.ts` — `list_repos` / `list_agent_profiles` / `create_task`.
+- `packages/server/src/mcp/read-tools.ts` — the five read-only telemetry tools.
+- `packages/server/src/routes/reports.ts` / `routes/export.ts` — the REST siblings of `get_report` and `query_attempts`.
 - `plugin/` — the Claude Code plugin distributed via this repo's marketplace.
