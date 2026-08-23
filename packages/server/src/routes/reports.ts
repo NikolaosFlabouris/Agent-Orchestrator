@@ -58,8 +58,13 @@ const MS_PER_DAY = 86_400_000;
  *  - `from` (inclusive) / `to` (exclusive): ISO date bounds; defaults to
  *    the last DEFAULT_REPORT_WINDOW_DAYS up to now. Invalid values fall back
  *    to the defaults rather than erroring — the endpoints are a best-effort
- *    gauge, not a strict query API. */
-function parseFilter(query: Record<string, unknown>): ReportFilter {
+ *    gauge, not a strict query API.
+ *
+ *  Exported because `GET /api/export/attempts` (routes/export.ts) takes the
+ *  same query params and must parse them IDENTICALLY — it then drops the
+ *  bounds the caller didn't supply, since the export doesn't default to a
+ *  window. One parser, one set of semantics. */
+export function parseFilter(query: Record<string, unknown>): ReportFilter {
   const now = Date.now();
 
   const toRaw = typeof query.to === 'string' ? Date.parse(query.to) : NaN;

@@ -78,6 +78,8 @@ Both modes result in the same outcome: a Forgejo issue with `status/queued` that
 
 **The filter bar is the query string.** `?from=YYYY-MM-DD&to=YYYY-MM-DD&repos=1,3`, so a filtered view is bookmarkable and survives a reload; `repos` absent means all repos and both dates absent means the default last-90-day window (`DEFAULT_REPORT_WINDOW_DAYS` on the backend). The URL is the single source of truth — there is no mirrored `useState` — and `parseReportParams` / `serializeReportParams` in `Reports.tsx` are the pure round-trip pair, unit-tested in `reportParams.test.ts`. Malformed input degrades rather than errors: a date that isn't `YYYY-MM-DD` falls back to that bound's default (per bound, so one bad date doesn't lose the other) and non-numeric repo ids are dropped individually. Filter writes use `{ replace: true }` — the bar is a control surface, not navigation, so dragging a date picker must not bury the page the operator arrived from under history entries.
 
+**The raw rows are a separate endpoint.** Everything on this page is pre-aggregated server-side; the per-attempt rows behind it are not shipped to the browser. An operator who wants those — for a notebook, a spreadsheet, or an agent comparing models — pulls them from `GET /api/export/attempts` (documented under Orchestrator API below), not from this page. The page's own export buttons (`reportExport.ts`) remain a client-side CSV/JSON dump of exactly what is currently rendered.
+
 **It refreshes itself.** The page is meant to be left open, so a `refreshTick` re-runs both fetches (aggregate bundle and All Tasks) on a 5-minute interval, and on `focus`/`visibilitychange` when the last successful fetch is older than 60s — the guard is what stops an alt-tab to copy a number from re-running eleven aggregate queries. A background refresh never shows the full-page "Loading reports…" state, which is gated on `loading && !data`, and never resets the All Tasks pagination (the offset-reset effect is deliberately not keyed on the tick).
 
 ### Settings View
@@ -527,6 +529,51 @@ Note: `poll_interval_seconds` (60s), `default_max_attempts` (7), and
 `max_attempts` overrides are settable via `POST /api/tasks` at create time
 and via `PATCH /api/tasks/:id` (with `{ max_attempts: N }`) on the Task
 Detail page for non-terminal tasks.
+
+#### GET /api/export/attempts
+
+Server-side export of the RAW attempt history: one flat, denormalised row per attempt, joined with its task, repo and (where resolvable) model. This is the counterpart to `/api/reports/*` — those return roll-ups for the Reports page, this returns the rows underneath them for external analysis (a notebook comparing models per repo, and later an MCP read tool). Read-only and side-effect free; behind the same global `/api/*` auth hook as every other endpoint, so an unauthenticated request gets the same `401`.
+
+Query parameters:
+
+| Param | Meaning |
+|---|---|
+| `repos` | Comma-separated repo ids; omitted = all repos |
+| `from` / `to` | ISO bounds, `from` inclusive / `to` exclusive |
+| `model` | Exact match on the attempt's `model_id` snapshot |
+| `harness` | Exact match on the attempt's `harness_id` snapshot |
+| `role` | `develop` \| `review` |
+| `status` | `running` \| `completed` \| `failed` \| `timeout` |
+| `include_feedback` | `1` adds the review `feedback` blob (omitted by default — it is a full review document per row) |
+| `format` | `jsonl` (default) \| `json` |
+
+`repos` / `from` / `to` are parsed by the very same `parseFilter()` the reports routes use, so their semantics can't drift apart. **One deliberate difference: the export has no default window.** With both `from` and `to` omitted it returns ALL history rather than falling back to `DEFAULT_REPORT_WINDOW_DAYS` — an export that silently truncated to the last 90 days would quietly corrupt whatever analysis consumed it. Supplying one bound leaves the other open-ended. The window applies to the attempt's own `started_at` (falling back to its task's `created_at` for an attempt that never started), not to the created-in-range task cohort the report endpoints use. An unknown `format`, `role`, or `status` is a `400` — a mistyped filter must not read as "no matching rows".
+
+`format=jsonl` streams one JSON object per line as `application/x-ndjson`, generated incrementally from the SQL result (rows are pulled in batches, so memory stays flat over an unbounded history). `format=json` returns the whole set at once as `{ "rows": [...], "count": N, "filter": {...} }`, where `filter` echoes the filter actually applied (with `null` for each unbounded field). Both order rows by `attempt_id` ascending.
+
+Row contract — snake_case field names, stable for downstream consumers:
+
+```
+attempt: attempt_id, task_id, attempt_number, role, status, started_at,
+         completed_at, duration_seconds, model_id, harness_id,
+         timeout_minutes_snapshot, verdict, num_turns, input_tokens,
+         output_tokens, tool_calls, changed_files, additions, deletions,
+         exit_code, error_message
+task:    issue_id, issue_title, task_status, task_attempt, max_attempts,
+         pr_number, branch_name, task_created_at, task_started_at,
+         task_completed_at
+repo:    repo_id, repo_owner, repo_name
+model:   provider_id, model_display_name
+opt-in:  feedback   (only with include_feedback=1)
+```
+
+Three properties the rows guarantee:
+
+- **`null` means unknown, never `0`.** A harness that reported no usage leaves `input_tokens`/`num_turns`/churn null; they are not coerced (same convention as the `attempts` usage columns in `db.ts`). `duration_seconds` is null whenever either timestamp is missing — a running attempt has no duration, not a zero one.
+- **No derived cost.** Token counts ship raw; the orchestrator deliberately never turns them into dollars (provider pricing is the operator's to look up).
+- **Timestamps are canonical ISO-8601 UTC**, normalised out of the two shapes that coexist on disk.
+
+`task_status` is the *stored* orchestrator status: the export never calls out to Forgejo to derive one, unlike `GET /api/tasks`. `provider_id` / `model_display_name` are best-effort — `attempts.model_id` is a launch-time snapshot string, not a foreign key, so a harness-prefixed id (`openrouter/qwen-3-coder`) or a since-deleted model row resolves to `null` rather than dropping the row.
 
 #### HTTP Status Codes
 

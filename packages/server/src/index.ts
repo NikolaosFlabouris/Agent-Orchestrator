@@ -27,6 +27,7 @@ import { providerRoutes } from "./routes/providers.js";
 import { agentProfileRoutes } from "./routes/agent-profiles.js";
 import { createStatusRoutes } from "./routes/status.js";
 import { createReportsRoutes } from "./routes/reports.js";
+import { exportRoutes } from "./routes/export.js";
 import { createMeRoutes } from "./routes/me.js";
 import { createWebhookRoutes } from "./routes/webhooks.js";
 import { createMcpRoutes } from "./routes/mcp.js";
@@ -228,6 +229,9 @@ async function main() {
   await app.register(providerRoutes);
   await app.register(agentProfileRoutes);
   await app.register(createReportsRoutes(forgejo));
+  // Raw attempt-history export (/api/export/attempts). Same global /api/*
+  // auth hook as the reports routes it sits beside.
+  await app.register(exportRoutes);
   // MCP OAuth (Phase 3 Workstream C). Discovery + DCR + authorize +
   // token endpoints. These are NOT gated by MCP_ENABLED — the
   // discovery + DCR endpoints publish metadata about the MCP

@@ -37,6 +37,8 @@ import type {
   HeatmapCell,
   ReportsHeatmap,
   ReportTasksSort,
+  ExportAttemptsFilter,
+  ExportAttemptRow,
 } from '@orchestrator/shared';
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
@@ -2292,22 +2294,41 @@ interface RangeFragment {
   params: unknown[];
 }
 
+/** A filter with repo scoping and optional date bounds. {@link ReportFilter}
+ *  satisfies it (its bounds are always set); the attempts export passes null
+ *  bounds to mean "all history". */
+interface RangeFilter {
+  repos: number[] | null;
+  from: string | null;
+  to: string | null;
+}
+
 /** WHERE fragment (alias `t`) selecting rows whose `col` falls in
- *  [from, to), optionally narrowed to `filter.repos`. */
-function rangeClause(col: string, filter: ReportFilter): RangeFragment {
+ *  [from, to), optionally narrowed to `filter.repos`. A null bound is
+ *  omitted (open-ended); with no bounds and no repos the fragment is the
+ *  always-true `1=1` so it can be interpolated unconditionally. */
+function rangeClause(col: string, filter: RangeFilter): RangeFragment {
   const n = `${juld(col)}`;
-  const parts = [`${n} >= julianday(?)`, `${n} < julianday(?)`];
-  const params: unknown[] = [filter.from, filter.to];
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  if (filter.from !== null) {
+    parts.push(`${n} >= julianday(?)`);
+    params.push(filter.from);
+  }
+  if (filter.to !== null) {
+    parts.push(`${n} < julianday(?)`);
+    params.push(filter.to);
+  }
   if (filter.repos && filter.repos.length > 0) {
     parts.push(`t.repo_id IN (${filter.repos.map(() => '?').join(',')})`);
     params.push(...filter.repos);
   }
-  return { clause: parts.join(' AND '), params };
+  return { clause: parts.length > 0 ? parts.join(' AND ') : '1=1', params };
 }
 
 /** Repo-only WHERE fragment (alias `t`) for point-in-time metrics that
  *  ignore the date window (e.g. current backlog). */
-function repoClause(filter: ReportFilter): RangeFragment {
+function repoClause(filter: RangeFilter): RangeFragment {
   if (filter.repos && filter.repos.length > 0) {
     return {
       clause: `t.repo_id IN (${filter.repos.map(() => '?').join(',')})`,
@@ -3335,4 +3356,248 @@ export function getReportTasks(
     .all(...params, limit, offset) as ReportTaskDbRow[];
 
   return { total, offset, limit, tasks };
+}
+
+// ---------------------------------------------------------------------------
+// Attempts export (raw, flat rows)
+// ---------------------------------------------------------------------------
+//
+// The counterpart to the getReport* aggregations above: instead of rolling
+// the history up, ship it. One denormalised row per attempt, joined to its
+// task, repo and (where resolvable) model, for external analysis tooling —
+// `GET /api/export/attempts` today, an MCP read tool later. Deliberately
+// free of Fastify types so any caller can use it.
+//
+// Three properties this owes its consumers:
+//   * NO DEFAULT WINDOW — null from/to means all history (unlike the report
+//     endpoints, which fall back to DEFAULT_REPORT_WINDOW_DAYS).
+//   * NULL STAYS NULL — an unknown token count is null, never 0 (see the
+//     usage-column note on the attempts schema).
+//   * NO DERIVED COST — raw token counts only, same as everywhere else.
+
+/** Options for {@link getAttemptsExport} / {@link iterateAttemptsExport}. */
+export interface AttemptsExportOptions {
+  /** Include the review `feedback` blob. Off by default: it is a full
+   *  review document per row and would dominate the payload. */
+  includeFeedback?: boolean;
+  /** Rows fetched per underlying query while streaming (test seam). */
+  batchSize?: number;
+}
+
+/** Rows pulled per query while streaming. Bounds peak memory to this many
+ *  rows regardless of history size, and — the reason it isn't a single
+ *  `stmt.iterate()` — keeps the better-sqlite3 connection unlocked between
+ *  batches. An open iterator marks the connection busy for its whole
+ *  lifetime, so a slow HTTP consumer would make every concurrent WRITE
+ *  (scheduler tick, webhook, event log) throw "database connection is
+ *  busy". Batching yields flat memory without holding that lock. */
+const EXPORT_BATCH_ROWS = 500;
+
+/** Raw SELECT shape, before timestamp normalisation / duration derivation. */
+type RawExportRow = Omit<
+  ExportAttemptRow,
+  'duration_seconds' | 'feedback'
+> & { feedback?: string | null };
+
+/** Build the single JOINed statement behind the export. Paged by keyset on
+ *  `a.id` (`a.id > ?` + LIMIT, appended last), so the same prepared
+ *  statement serves every batch. */
+function buildAttemptsExportSql(
+  filter: ExportAttemptsFilter,
+  includeFeedback: boolean
+): { sql: string; params: unknown[] } {
+  // Time filter runs on the attempt's own start, falling back to the task's
+  // creation for an attempt that never started — an attempt export should
+  // window on when the attempt happened, not when its task was filed (which
+  // is what the report cohorts use).
+  const range = rangeClause('COALESCE(a.started_at, t.created_at)', filter);
+  const conditions = [range.clause];
+  const params: unknown[] = [...range.params];
+
+  if (filter.model) {
+    conditions.push('a.model_id = ?');
+    params.push(filter.model);
+  }
+  if (filter.harness) {
+    conditions.push('a.harness_id = ?');
+    params.push(filter.harness);
+  }
+  if (filter.role) {
+    conditions.push('a.role = ?');
+    params.push(filter.role);
+  }
+  if (filter.status) {
+    conditions.push('a.status = ?');
+    params.push(filter.status);
+  }
+
+  // Model resolution. attempts.model_id is a launch-time SNAPSHOT of the
+  // string handed to the harness, not an FK — some harnesses prefix it with
+  // a provider ("openai/qwen…"), and the model row may since have been
+  // renamed or deleted. So we resolve it best-effort and leave the columns
+  // null when it doesn't match: first via an agent_profile with the same
+  // harness (which disambiguates one model_id configured under several
+  // providers), then via any model row with that id. ROW_NUMBER() keeps
+  // both lookups single-valued, so neither join can multiply attempt rows.
+  const sql = `
+    WITH model_by_harness AS (
+      SELECT m.model_id AS model_id, ap.harness_id AS harness_id,
+             m.provider_id AS provider_id, m.display_name AS display_name,
+             ROW_NUMBER() OVER (
+               PARTITION BY m.model_id, ap.harness_id ORDER BY m.id
+             ) AS rn
+      FROM models m JOIN agent_profiles ap ON ap.model_pk = m.id
+    ),
+    model_any AS (
+      SELECT model_id, provider_id, display_name,
+             ROW_NUMBER() OVER (PARTITION BY model_id ORDER BY id) AS rn
+      FROM models
+    )
+    SELECT
+      a.id AS attempt_id,
+      a.task_id AS task_id,
+      a.attempt_number AS attempt_number,
+      a.role AS role,
+      a.status AS status,
+      a.started_at AS started_at,
+      a.completed_at AS completed_at,
+      a.model_id AS model_id,
+      a.harness_id AS harness_id,
+      a.timeout_minutes_snapshot AS timeout_minutes_snapshot,
+      a.verdict AS verdict,
+      a.num_turns AS num_turns,
+      a.input_tokens AS input_tokens,
+      a.output_tokens AS output_tokens,
+      a.tool_calls AS tool_calls,
+      a.changed_files AS changed_files,
+      a.additions AS additions,
+      a.deletions AS deletions,
+      a.exit_code AS exit_code,
+      a.error_message AS error_message,
+      t.issue_id AS issue_id,
+      t.issue_title AS issue_title,
+      t.status AS task_status,
+      t.attempt AS task_attempt,
+      t.max_attempts AS max_attempts,
+      t.pr_number AS pr_number,
+      t.branch_name AS branch_name,
+      t.created_at AS task_created_at,
+      t.started_at AS task_started_at,
+      t.completed_at AS task_completed_at,
+      t.repo_id AS repo_id,
+      r.owner AS repo_owner,
+      r.name AS repo_name,
+      COALESCE(mh.provider_id, ma.provider_id) AS provider_id,
+      COALESCE(mh.display_name, ma.display_name) AS model_display_name${
+        includeFeedback ? ',\n      a.feedback AS feedback' : ''
+      }
+    FROM attempts a
+    JOIN tasks t ON t.id = a.task_id
+    LEFT JOIN repos r ON r.id = t.repo_id
+    LEFT JOIN model_by_harness mh
+      ON mh.model_id = a.model_id AND mh.harness_id = a.harness_id AND mh.rn = 1
+    LEFT JOIN model_any ma
+      ON ma.model_id = a.model_id AND ma.rn = 1
+    WHERE ${conditions.join(' AND ')}
+      AND a.id > ?
+    ORDER BY a.id ASC
+    LIMIT ?`;
+
+  return { sql, params };
+}
+
+/** Post-process one raw row: normalise the two on-disk timestamp shapes to
+ *  canonical ISO-8601 UTC, derive the duration, and coerce numerics without
+ *  ever turning a NULL into a 0. */
+function mapExportRow(raw: RawExportRow, includeFeedback: boolean): ExportAttemptRow {
+  const started_at = raw.started_at ? normalizeTimestamp(raw.started_at) : null;
+  const completed_at = raw.completed_at
+    ? normalizeTimestamp(raw.completed_at)
+    : null;
+  const row: ExportAttemptRow = {
+    attempt_id: Number(raw.attempt_id),
+    task_id: Number(raw.task_id),
+    attempt_number: numOrNull(raw.attempt_number),
+    role: raw.role,
+    status: raw.status,
+    started_at,
+    completed_at,
+    duration_seconds:
+      raw.started_at && raw.completed_at
+        ? durationSeconds(raw.started_at, raw.completed_at)
+        : null,
+    model_id: raw.model_id,
+    harness_id: raw.harness_id,
+    timeout_minutes_snapshot: numOrNull(raw.timeout_minutes_snapshot),
+    verdict: raw.verdict,
+    num_turns: numOrNull(raw.num_turns),
+    input_tokens: numOrNull(raw.input_tokens),
+    output_tokens: numOrNull(raw.output_tokens),
+    tool_calls: numOrNull(raw.tool_calls),
+    changed_files: numOrNull(raw.changed_files),
+    additions: numOrNull(raw.additions),
+    deletions: numOrNull(raw.deletions),
+    exit_code: numOrNull(raw.exit_code),
+    error_message: raw.error_message,
+    issue_id: Number(raw.issue_id),
+    issue_title: raw.issue_title,
+    task_status: raw.task_status,
+    task_attempt: numOrNull(raw.task_attempt),
+    max_attempts: numOrNull(raw.max_attempts),
+    pr_number: numOrNull(raw.pr_number),
+    branch_name: raw.branch_name,
+    task_created_at: raw.task_created_at
+      ? normalizeTimestamp(raw.task_created_at)
+      : null,
+    task_started_at: raw.task_started_at
+      ? normalizeTimestamp(raw.task_started_at)
+      : null,
+    task_completed_at: raw.task_completed_at
+      ? normalizeTimestamp(raw.task_completed_at)
+      : null,
+    repo_id: Number(raw.repo_id),
+    repo_owner: raw.repo_owner,
+    repo_name: raw.repo_name,
+    provider_id: raw.provider_id,
+    model_display_name: raw.model_display_name,
+  };
+  // Absent, not null, when the caller didn't opt in — the field's presence
+  // is itself part of the contract.
+  if (includeFeedback) row.feedback = raw.feedback ?? null;
+  return row;
+}
+
+/** Stream the filtered attempt history in `attempt_id` order, one row at a
+ *  time, without materialising it. Pulls {@link EXPORT_BATCH_ROWS} rows per
+ *  query, so peak memory is flat in history size.
+ *
+ *  Paging across separate queries means the result is not a point-in-time
+ *  snapshot: an attempt inserted while a long export streams may land in a
+ *  later batch. Attempt ids are append-only and monotonic, so that is the
+ *  full extent of it — no row is ever duplicated or skipped. */
+export function* iterateAttemptsExport(
+  filter: ExportAttemptsFilter,
+  opts: AttemptsExportOptions = {}
+): Generator<ExportAttemptRow> {
+  const includeFeedback = opts.includeFeedback === true;
+  const { sql, params } = buildAttemptsExportSql(filter, includeFeedback);
+  const stmt = getDb().prepare(sql);
+  const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? EXPORT_BATCH_ROWS));
+
+  let afterId = 0;
+  for (;;) {
+    const rows = stmt.all(...params, afterId, batchSize) as RawExportRow[];
+    for (const raw of rows) yield mapExportRow(raw, includeFeedback);
+    if (rows.length < batchSize) return;
+    afterId = Number(rows[rows.length - 1].attempt_id);
+  }
+}
+
+/** Materialised form of {@link iterateAttemptsExport}, for callers that want
+ *  the whole result set in hand (`format=json`, and the planned MCP tool). */
+export function getAttemptsExport(
+  filter: ExportAttemptsFilter,
+  opts: AttemptsExportOptions = {}
+): ExportAttemptRow[] {
+  return Array.from(iterateAttemptsExport(filter, opts));
 }

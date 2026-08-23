@@ -813,3 +813,98 @@ export interface ReportsTasksPage {
   sort: ReportTasksSort;
   tasks: ReportTaskRow[];
 }
+
+// --- Attempts export (raw, flat rows) --------------------------------------
+//
+// `GET /api/export/attempts` (and db.getAttemptsExport) ship the RAW attempt
+// history — one denormalised row per attempt, joined with its task, repo and
+// (where resolvable) model — for external analysis tooling. This is the
+// deliberate counterpart to the pre-aggregated `/api/reports/*` endpoints:
+// no roll-up, no derived cost, no truncation to a default window.
+
+/** Filter for the attempts export. Same `repos` semantics as
+ *  {@link ReportFilter}, but BOTH bounds are optional: null means
+ *  "unbounded", i.e. the export defaults to ALL history rather than the
+ *  last DEFAULT_REPORT_WINDOW_DAYS. */
+export interface ExportAttemptsFilter {
+  /** Repo ids the export is scoped to, or null for all repos. */
+  repos: number[] | null;
+  /** Inclusive lower bound (ISO-8601), or null for no lower bound. */
+  from: string | null;
+  /** Exclusive upper bound (ISO-8601), or null for no upper bound. */
+  to: string | null;
+  /** Exact match on `attempts.model_id` (the launch-time snapshot). */
+  model?: string | null;
+  /** Exact match on `attempts.harness_id` (the launch-time snapshot). */
+  harness?: string | null;
+  /** Narrow to implementation or review attempts. */
+  role?: AttemptRole | null;
+  /** Narrow to a single attempt status. */
+  status?: AttemptStatus | null;
+}
+
+/** One flat, denormalised attempt row. Field names are snake_case and are a
+ *  STABLE WIRE CONTRACT for downstream consumers (notebooks, the planned MCP
+ *  read tool) — rename nothing here without versioning the endpoint.
+ *
+ *  Nullability is meaningful throughout: NULL means "unknown / not
+ *  applicable" and is never coerced to 0 (see the usage-column note in
+ *  db.ts). Timestamps are normalised to canonical ISO-8601 UTC, which the
+ *  raw columns are not (two on-disk shapes coexist). No dollar cost is
+ *  derived — token counts are shipped raw, on purpose. */
+export interface ExportAttemptRow {
+  // -- attempt --
+  attempt_id: number;
+  task_id: number;
+  attempt_number: number | null;
+  role: AttemptRole;
+  status: AttemptStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  /** Wall-clock seconds between started_at and completed_at; null when
+   *  either endpoint is missing (e.g. a still-running attempt). */
+  duration_seconds: number | null;
+  model_id: string | null;
+  harness_id: string | null;
+  timeout_minutes_snapshot: number | null;
+  verdict: string | null;
+  num_turns: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  tool_calls: number | null;
+  changed_files: number | null;
+  additions: number | null;
+  deletions: number | null;
+  exit_code: number | null;
+  error_message: string | null;
+  // -- task --
+  issue_id: number;
+  issue_title: string | null;
+  /** Stored orchestrator task status (NOT the Forgejo-derived one — the
+   *  export is a raw dump and never calls out to Forgejo). */
+  task_status: TaskStatus;
+  /** `tasks.attempt` — the task's current attempt counter. */
+  task_attempt: number | null;
+  max_attempts: number | null;
+  pr_number: number | null;
+  branch_name: string | null;
+  task_created_at: string | null;
+  task_started_at: string | null;
+  task_completed_at: string | null;
+  // -- repo --
+  repo_id: number;
+  /** Null only if the repo row has been hand-deleted out from under the
+   *  task — the join is LEFT so an attempt is never dropped from the
+   *  export by a missing repo. */
+  repo_owner: string | null;
+  repo_name: string | null;
+  // -- model / provider (resolved from the model_id snapshot; null when the
+  //    snapshot doesn't match a configured model row) --
+  provider_id: string | null;
+  model_display_name: string | null;
+  // -- opt-in --
+  /** Review feedback JSON blob. Present ONLY when the caller opts in
+   *  (`include_feedback=1`); omitted entirely otherwise because it can be
+   *  large. */
+  feedback?: string | null;
+}
