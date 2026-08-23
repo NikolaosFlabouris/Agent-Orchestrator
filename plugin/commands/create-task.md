@@ -10,11 +10,13 @@ Walk through each step interactively. Ask one question at a time, confirm choice
 
 You talk to the orchestrator over MCP (Model Context Protocol). The plugin's `.mcp.json` declares a remote MCP server pointing at `${user_config.orchestrator_url}/mcp`; Claude Code handles the OAuth flow (Dynamic Client Registration + PKCE + browser-delegated user consent through the orchestrator's existing Forgejo login) the first time a tool is invoked, and stores + refreshes the access token transparently. The skill itself never sees or handles a credential.
 
-Three MCP tools cover the whole flow:
+Three of the orchestrator's MCP tools cover this flow:
 
 - **`list_repos`** — registered repos with the agent profiles that will run a fresh task against them by default, one per workflow stage (implementation and review). Read-only.
 - **`list_agent_profiles`** — every configured agent profile, with model + provider + usage stats. Read-only.
 - **`create_task`** — creates the Forgejo issue, applies the `status/queued` label (plus optional `human-merge` / `human-review`), inserts the matching orchestrator task row with any overrides set atomically, broadcasts on the dashboard websocket, and triggers the scheduler. Returns the created task + issue identity.
+
+The same server also exposes read-only tools that are not part of this flow but are useful once a task exists — `list_tasks`, `get_task`, `get_task_log`, `query_attempts`, and `get_report`. If the developer asks how a similar task went before, or which model tends to do best on this repo, reach for those (start with `get_report kind=leaderboard group_by=model`) rather than guessing.
 
 Validation, label semantics, override resolution, and the scheduler kick all happen server-side inside the orchestrator — the path is race-free by construction and stays consistent with the orchestrator's REST API. If the developer hasn't authenticated to this orchestrator before, the first MCP call surfaces an OAuth prompt; instruct them to run `/mcp` if they need to manage the connection.
 

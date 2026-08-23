@@ -4,7 +4,6 @@ import {
   getTasks,
   getDashboardTasks,
   getRepo,
-  getAttempts,
   getTaskEvents,
   getTaskDependencies,
   getAgentProfile,
@@ -24,15 +23,13 @@ import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
 import { readTaskLog } from '../archive.js';
 import { warmRepoSnapshots } from '../forgejo-snapshot.js';
-import { getContainerDisplayName } from '../orphan-recovery.js';
-import { listContainers } from '../docker.js';
+import { loadManagedContainerIds } from '../container-list.js';
 import {
   createTask as createTaskService,
   queueExistingIssue as queueExistingIssueService,
   type TaskIntakeError,
 } from '../services/task-intake.js';
-
-const FORGEJO_URL = process.env.FORGEJO_URL ?? 'http://forgejo:3000';
+import { buildTaskDetail } from '../services/task-detail.js';
 
 const ACTIVE_STATUSES = new Set([
   'preparing',
@@ -172,28 +169,9 @@ export function createTaskRoutes(
         const task = getTask(id);
         if (!task) return reply.status(404).send({ error: 'Task not found' });
 
-        const managedIds = await loadManagedContainerIds(log);
-        const containerName = await getContainerDisplayName(
-          task.container_id,
-          log
-        );
-        const enriched = await enrichTaskWithDerivation(task, forgejo, {
-          managedIds,
-          containerName,
-        });
-        const attempts = getAttempts(task.id);
-        const repo = getRepo(task.repo_id);
-
-        const forgejoLinks: Record<string, string> = {};
-        if (repo) {
-          forgejoLinks.issue = `${FORGEJO_URL}/${repo.owner}/${repo.name}/issues/${task.issue_id}`;
-          if (task.pr_number) {
-            forgejoLinks.pr = `${FORGEJO_URL}/${repo.owner}/${repo.name}/pulls/${task.pr_number}`;
-          }
-        }
-
-        const events = getTaskEvents(task.id);
-        return { ...enriched, attempts, events, forgejo_links: forgejoLinks };
+        // Assembly lives in the shared service so the MCP `get_task` tool
+        // returns exactly this object (see services/task-detail.ts).
+        return buildTaskDetail(task, { forgejo, log });
       }
     );
 
@@ -668,67 +646,11 @@ export {
   resolveEffectiveReviewAgentProfile,
 } from '../task-view.js';
 
-/** How long one `listContainers()` result is reused. Sized to be shorter
- *  than any UI cadence but long enough that the requests a single dashboard
- *  refresh fans out — N open tabs polling `GET /api/tasks`, plus the detail
- *  endpoint and the reports route — collapse onto one Docker round-trip
- *  instead of one each. Container health is derived from it, so it must
- *  stay short: a container that vanishes is noticed within this window. */
-const CONTAINER_LIST_TTL_MS = 3_000;
-
-/** In-flight-or-fresh managed-container listing. Holds the PROMISE, not the
- *  resolved value, so concurrent callers inside the window share the same
- *  round-trip rather than each starting their own. Every consumer only reads
- *  the set (`computeTaskHealth` does a `.has`), so handing out one shared
- *  instance is safe. */
-let containerListCache: {
-  expiresAt: number;
-  promise: Promise<Set<string>>;
-} | null = null;
-
-/** Drop the memoized container listing. Exported for tests. */
-export function _clearManagedContainerCache(): void {
-  containerListCache = null;
-}
-
-export async function loadManagedContainerIds(
-  log: Parameters<typeof getContainerDisplayName>[1]
-): Promise<Set<string> | undefined> {
-  // Returns undefined on Docker failure so callers propagate the "unknown"
-  // signal down to enrichTask, which will fall back to the Docker-less
-  // health derivation. Returning an empty Set here would incorrectly
-  // flag every containerised task as orphaned.
-  try {
-    return await cachedManagedContainerIds();
-  } catch (err) {
-    log.warn(
-      { event: 'tasks_route_docker_unavailable', err },
-      'Could not list containers — task health will degrade to partial'
-    );
-    return undefined;
-  }
-}
-
-function cachedManagedContainerIds(): Promise<Set<string>> {
-  const now = Date.now();
-  if (containerListCache && containerListCache.expiresAt > now) {
-    return containerListCache.promise;
-  }
-
-  const promise = listContainers().then(
-    (containers) => new Set(containers.map((c) => c.Id))
-  );
-  const entry = { expiresAt: now + CONTAINER_LIST_TTL_MS, promise };
-  containerListCache = entry;
-
-  // A rejection must not be served for the rest of the window — a daemon
-  // that came back should be retried by the next caller. Concurrent callers
-  // still share this one failed round-trip. The handler also keeps the
-  // shared promise from surfacing as an unhandled rejection when every
-  // caller happens to be a cache hit.
-  promise.catch(() => {
-    if (containerListCache === entry) containerListCache = null;
-  });
-
-  return promise;
-}
+// The memoized managed-container listing moved to `../container-list.ts`
+// so non-route consumers (the task-detail service, and through it the MCP
+// read tools) can share it without importing a route module. Re-exported
+// here because existing call sites and tests import it from this module.
+export {
+  loadManagedContainerIds,
+  _clearManagedContainerCache,
+} from '../container-list.js';

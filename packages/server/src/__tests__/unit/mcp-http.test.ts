@@ -136,11 +136,20 @@ afterEach(async () => {
 });
 
 describe('MCP HTTP transport — real wire', () => {
-  it('completes the initialize handshake and lists the three tools', async () => {
+  it('completes the initialize handshake and lists every tool', async () => {
     const { client } = booted!;
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(['create_task', 'list_agent_profiles', 'list_repos']);
+    expect(names).toEqual([
+      'create_task',
+      'get_report',
+      'get_task',
+      'get_task_log',
+      'list_agent_profiles',
+      'list_repos',
+      'list_tasks',
+      'query_attempts',
+    ]);
   });
 
   it('list_repos round-trips the structured content over HTTP', async () => {

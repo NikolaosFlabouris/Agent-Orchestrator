@@ -116,12 +116,21 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('MCP server — tool registration', () => {
-  it('advertises exactly list_repos, list_agent_profiles, and create_task', async () => {
+  it('advertises the three task-management tools plus the five read-only ones', async () => {
     const pair = await connectPair();
     try {
       const { tools } = await pair.client.listTools();
       const names = tools.map((t) => t.name).sort();
-      expect(names).toEqual(['create_task', 'list_agent_profiles', 'list_repos']);
+      expect(names).toEqual([
+        'create_task',
+        'get_report',
+        'get_task',
+        'get_task_log',
+        'list_agent_profiles',
+        'list_repos',
+        'list_tasks',
+        'query_attempts',
+      ]);
     } finally {
       await pair.close();
     }
@@ -137,6 +146,16 @@ describe('MCP server — tool registration', () => {
       expect(byName.get('create_task')?.annotations?.readOnlyHint).toBe(false);
       expect(byName.get('create_task')?.annotations?.destructiveHint).toBe(false);
       expect(byName.get('create_task')?.annotations?.openWorldHint).toBe(true);
+      for (const name of [
+        'list_tasks',
+        'get_task',
+        'get_task_log',
+        'query_attempts',
+        'get_report',
+      ]) {
+        expect(byName.get(name)?.annotations?.readOnlyHint).toBe(true);
+        expect(byName.get(name)?.annotations?.openWorldHint).toBe(false);
+      }
     } finally {
       await pair.close();
     }

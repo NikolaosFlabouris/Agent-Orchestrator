@@ -2,8 +2,10 @@
  * MCP (Model Context Protocol) server module.
  *
  * Builds an `McpServer` instance that exposes the orchestrator's
- * task-management surface as three tools an MCP client (Claude Code,
- * the create-task-forgejo plugin's skill, …) can invoke:
+ * task-management surface as tools an MCP client (Claude Code, the
+ * create-task-forgejo plugin's skill, …) can invoke.
+ *
+ * The write + configuration surface, registered here:
  *
  *   - `list_repos`           — registered repos + their effective agent
  *                              profiles for both workflow stages
@@ -15,6 +17,14 @@
  *                              per-task overrides (agent_profile_id,
  *                              review_agent_profile_id, max_attempts,
  *                              human_merge, human_review).
+ *
+ * The read-only telemetry surface — `list_tasks`, `get_task`,
+ * `get_task_log`, `query_attempts`, `get_report` — is registered by
+ * `registerReadTools` (`./read-tools.ts`), which is where an agent gets
+ * the data to analyse LLM performance and the orchestrator's own
+ * reliability. Same file split as the code they wrap: writes go through
+ * `services/task-intake.ts`, reads through `db.ts` / the reports
+ * aggregation / the archive-aware log reader.
  *
  * `create_task` is a thin wrapper over the shared task-intake service
  * (`../services/task-intake.ts`) — the same service `POST /api/tasks`
@@ -48,6 +58,7 @@ import {
   listReposWithEffectiveProfile,
   type TaskIntakeError,
 } from '../services/task-intake.js';
+import { registerReadTools } from './read-tools.js';
 
 /** Reported to the client during the MCP initialization handshake. The
  *  version is intentionally independent of the orchestrator's package
@@ -55,10 +66,13 @@ import {
  *  change in client-visible ways. */
 const MCP_SERVER_INFO = {
   name: 'agent-orchestrator',
+  // 0.3.0: read-only telemetry tools (list_tasks, get_task, get_task_log,
+  // query_attempts, get_report). Additive — the three original tools are
+  // untouched, so old clients keep working.
   // 0.2.0: per-stage agent profiles — create_task gained the optional
   // review_agent_profile_id override; list_repos gained the effective
   // review-profile fields. Both additive (old clients keep working).
-  version: '0.2.0',
+  version: '0.3.0',
 } as const;
 
 /** Joined-through profile info shape shared by the implementation and
@@ -84,8 +98,8 @@ export interface McpServerDeps {
 }
 
 /**
- * Build a fresh McpServer with the three tools registered. The caller
- * is responsible for connecting it to a transport.
+ * Build a fresh McpServer with every tool registered. The caller is
+ * responsible for connecting it to a transport.
  *
  * Note on the McpServer lifecycle: an instance can only be connected
  * to one transport at a time. The transport-mounting plugin
@@ -375,6 +389,13 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
       };
     }
   );
+
+  // ─── read-only telemetry tools ─────────────────────────────────────
+  // list_tasks / get_task / get_task_log / query_attempts / get_report.
+  // Same authorization posture as the tools above: the bearer check in
+  // routes/mcp.ts has already run, and none of them do per-user scoping
+  // (create_task doesn't either).
+  registerReadTools(server, deps);
 
   return server;
 }

@@ -27,6 +27,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import type { Readable } from 'node:stream';
@@ -211,4 +212,72 @@ export async function readTaskLog(task: Task): Promise<Readable | null> {
   }
 
   return null;
+}
+
+/** Last-N-lines view of a task's progress log, as produced by
+ *  {@link readTaskLogTail}. */
+export interface TaskLogTail {
+  /** The last `lines.length` lines of the log, oldest first, without their
+   *  terminating newline. */
+  lines: string[];
+  /** How many lines the whole log has, however many were returned. */
+  total_lines: number;
+  /** True when earlier lines were dropped to honour `maxLines`. */
+  truncated: boolean;
+}
+
+/**
+ * Read the tail of a task's progress log, from wherever
+ * {@link readTaskLog} finds it. Returns null when no log exists in either
+ * the workspace or the archive.
+ *
+ * Streams and keeps only a `maxLines` ring buffer, so reading the tail of a
+ * multi-hundred-megabyte log costs a constant amount of memory. That's the
+ * whole point: bounded output for callers (the MCP `get_task_log` tool)
+ * that must not pull an entire log into a model's context. Consumers
+ * wanting the full text stream `GET /api/tasks/:id/log` instead.
+ */
+export async function readTaskLogTail(
+  task: Task,
+  maxLines: number
+): Promise<TaskLogTail | null> {
+  const stream = await readTaskLog(task);
+  if (!stream) return null;
+
+  const cap = Math.max(1, Math.trunc(maxLines));
+  // Fixed-size circular buffer: `ring[total % cap]` is always the slot the
+  // next line goes in, so no per-line shift() over a growing array.
+  const ring: string[] = new Array<string>(cap);
+  let total = 0;
+  const push = (line: string): void => {
+    ring[total % cap] = line;
+    total += 1;
+  };
+
+  const decoder = new StringDecoder('utf8');
+  // `pending` only ever holds the trailing partial line between chunks —
+  // each chunk is scanned in place and sliced once, never per line.
+  let pending = '';
+  for await (const chunk of stream) {
+    pending += decoder.write(chunk as Buffer);
+    let start = 0;
+    let nl = pending.indexOf('\n', start);
+    while (nl !== -1) {
+      push(pending.slice(start, nl));
+      start = nl + 1;
+      nl = pending.indexOf('\n', start);
+    }
+    if (start > 0) pending = pending.slice(start);
+  }
+  pending += decoder.end();
+  // A log that doesn't end in a newline still has a final line; one that
+  // does must not report a phantom empty one.
+  if (pending !== '') push(pending);
+
+  const lines =
+    total <= cap
+      ? ring.slice(0, total)
+      : [...ring.slice(total % cap), ...ring.slice(0, total % cap)];
+
+  return { lines, total_lines: total, truncated: total > lines.length };
 }
