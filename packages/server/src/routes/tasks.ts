@@ -22,7 +22,7 @@ import type { Scheduler } from '../scheduler.js';
 import { cancelTask, closeTask, resetTask, requeueTask, extendTask } from '../actions.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import { attemptMerge } from '../agents/review.js';
-import { getOutputDir } from '../workspace.js';
+import { readTaskLog } from '../archive.js';
 import { warmRepoSnapshots } from '../forgejo-snapshot.js';
 import { getContainerDisplayName } from '../orphan-recovery.js';
 import { listContainers } from '../docker.js';
@@ -244,6 +244,10 @@ export function createTaskRoutes(
     );
 
     // GET /api/tasks/:id/log
+    // Served from the live workspace while it exists and transparently from
+    // the gzipped archive once the retention sweep has removed it — see
+    // readTaskLog, which owns that lookup for every consumer. 404 means the
+    // log is in neither place.
     app.get<{ Params: { id: string } }>(
       '/api/tasks/:id/log',
       async (request, reply) => {
@@ -251,16 +255,13 @@ export function createTaskRoutes(
         const task = getTask(id);
         if (!task) return reply.status(404).send({ error: 'Task not found' });
 
-        const path = await import('node:path');
-        const fs = await import('node:fs');
-
-        const logPath = path.join(getOutputDir(task), 'progress.log');
-        if (!fs.existsSync(logPath)) {
+        const stream = await readTaskLog(task);
+        if (!stream) {
           return reply.status(404).send({ error: 'Log not found' });
         }
 
         reply.type('text/plain');
-        return fs.createReadStream(logPath);
+        return stream;
       }
     );
 

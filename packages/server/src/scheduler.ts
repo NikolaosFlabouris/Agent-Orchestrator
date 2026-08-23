@@ -10,6 +10,7 @@ import type {
   AttemptRole,
   AgentResult,
 } from '@orchestrator/shared';
+import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import {
   getTask,
   getRepo,
@@ -91,6 +92,7 @@ import {
   handleReviewFailure,
 } from './agents/review.js';
 import { updateTaskWithSync, notifyStreamComplete, recordTaskEvent } from './state-sync.js';
+import { archiveTaskArtifacts } from './archive.js';
 import { getSnapshot, invalidateSnapshot } from './forgejo-snapshot.js';
 import { runOrphanSweep } from './orphan-recovery.js';
 import { reapOrphanedContainers } from './container-reaper.js';
@@ -990,6 +992,13 @@ export class Scheduler {
     } else {
       await this.onReviewAgentComplete(task, result);
     }
+
+    // The dispatch above is where a run's own artifacts are finished being
+    // written and where most terminal transitions happen (merged, failed,
+    // awaiting-human-*, needs-human-review). Archive now rather than waiting
+    // for the retention sweep so a crash or volume loss in between doesn't
+    // take the logs with it.
+    await this.archiveIfTerminal(task.id);
   }
 
   // ---- Step 2: Fill slots ----
@@ -1140,6 +1149,7 @@ export class Scheduler {
             `Skipped: issue #${task.issue_id} closed on Forgejo before task launch`
           );
           invalidateSnapshot(task.id);
+          await this.archiveIfTerminal(task.id);
           this.log.info(
             { event: 'scheduler_skip_closed', task_id: task.id },
             'Skipping task — Forgejo issue is closed'
@@ -1593,6 +1603,7 @@ export class Scheduler {
         );
       } catch { /* best effort */ }
       activeState.delete(task.id);
+      await this.archiveIfTerminal(task.id);
       this.log.info(
         { event: 'awaiting_human_review', task_id: task.id },
         'Awaiting human review'
@@ -2044,6 +2055,7 @@ export class Scheduler {
           },
           'Workspace preparation failed in a new outage window with the prep budget already exhausted'
         );
+        await this.archiveIfTerminal(task.id);
         return;
       }
 
@@ -2090,6 +2102,7 @@ export class Scheduler {
         { event: 'prep_failed_permanent', task_id: task.id, error: errorMsg },
         'Workspace preparation failed permanently'
       );
+      await this.archiveIfTerminal(task.id);
     } else {
       // Transient failure — return to queue
       updateTaskWithSync(task.id, {
@@ -2292,6 +2305,28 @@ export class Scheduler {
       } catch {
         /* best effort */
       }
+    }
+  }
+
+  /**
+   * Eagerly copy a task's run artifacts to the persistent archive if — and
+   * only if — the task has just landed in a terminal state. Re-reads the row
+   * because the transition happens inside the handlers this is called after.
+   *
+   * Best effort by design: the retention sweep archives again (and refuses to
+   * delete the workspace if it can't), so a failure here costs nothing beyond
+   * the warning. Idempotent, so overlapping calls just overwrite.
+   */
+  private async archiveIfTerminal(taskId: number): Promise<void> {
+    const fresh = getTask(taskId);
+    if (!fresh || !TERMINAL_STATUSES.has(fresh.status)) return;
+    try {
+      await archiveTaskArtifacts(fresh, this.log);
+    } catch (err) {
+      this.log.warn(
+        { event: 'artifacts_archive_failed', task_id: taskId, err },
+        'Failed to archive run artifacts on terminal transition'
+      );
     }
   }
 

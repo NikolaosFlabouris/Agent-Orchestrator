@@ -540,6 +540,7 @@ Compile-time constants (live in `packages/server/src/constants.ts` — not edita
 | `POLL_INTERVAL_SECONDS` | `60` | Fallback reconciliation tick / Forgejo poll cadence. Webhooks drive the real-time path. |
 | `DEFAULT_MAX_ATTEMPTS` | `7` | Default cap on dev/review cycles before a task is marked `failed`. Per-task override is editable from the Task Detail page. |
 | `WORKSPACE_RETENTION_DAYS` | `7` | How long workspaces stick around after a task hits a terminal state, and how long an orphan workspace (no task row) must persist before the orphan-sweep deletes it. |
+| `ARCHIVE_ROOT` | `/data/archive` | Persistent home for archived run artifacts (`progress.log.gz`, `result.json`, `review.json`, `meta.json`), laid out as `<repo_id>/issue-<issue_id>/`. Written before the workspace sweep and retained indefinitely. Env-overridable (`ARCHIVE_ROOT`) like `DB_PATH`. |
 | `DRAIN_TIMEOUT_MINUTES` | `30` | Hard cap on how long the orchestrator's graceful shutdown waits for in-flight agent containers. Long-running tasks (per-tool timeouts can be 48 h) get SIGKILL'd at the cap; recovery handles them on the next boot. Must align with `stop_grace_period` in docker-compose.yml. |
 | `STUCK_TASK_TIMEOUT_MULTIPLIER` | `2` | Multiplier on a task's per-tool timeout above which the alerts pass flags it as stuck. |
 | `DEFAULT_CONTAINER_MEMORY_MB` | `4096` | Default agent container memory limit when a repo doesn't override it via `repos.container_memory_mb`. Heavy workloads (Rust, large Next.js, Bazel) need the per-repo override. |

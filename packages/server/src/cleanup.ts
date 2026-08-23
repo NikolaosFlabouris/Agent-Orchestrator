@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { getTasks } from './db.js';
 import { getWorkdir } from './workspace.js';
+import { archiveTaskArtifacts } from './archive.js';
 import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { WORKSPACE_RETENTION_DAYS, WORKSPACES_ROOT } from './constants.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -15,13 +16,16 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  *      `completed_at` is older than WORKSPACE_RETENTION_DAYS, delete the
  *      corresponding /workspaces/issue-N/ directory. Applies uniformly to
  *      `merged`, `failed`, `cancelled`, `reset`, `awaiting-human-*`, and
- *      `needs-human-review`.
+ *      `needs-human-review`. The task's run artifacts are archived to
+ *      ARCHIVE_ROOT first (see archive.ts); if that fails the workspace is
+ *      left in place and retried on the next cycle.
  *
  *   2. Orphan sweep — list /workspaces/ for issue-N directories whose N has
  *      no matching task row. If the directory's mtime is older than the same
  *      retention, delete it. Catches stranded workspaces from manual DB
  *      intervention, restored backups, or test runs. The mtime + retention
- *      buffer guarantees a freshly-launched workspace can't be swept.
+ *      buffer guarantees a freshly-launched workspace can't be swept. No
+ *      archiving here — there is no task row to attribute the artifacts to.
  *
  * Async fs operations throughout so the recursive delete doesn't block the
  * event loop. Per-repo dependency caches under /caches/ are NOT touched —
@@ -48,6 +52,25 @@ export async function cleanupOldWorkspaces(log: FastifyBaseLogger): Promise<void
     try {
       await fsp.access(workdir);
     } catch {
+      continue;
+    }
+
+    // Copy the small run artifacts onto the persistent volume BEFORE the
+    // workspace goes. A failure here skips the delete for this cycle (the
+    // next poll retries) — an undeleted workspace costs disk, a lost log is
+    // gone for good.
+    try {
+      await archiveTaskArtifacts(task, log);
+    } catch (err) {
+      log.warn(
+        {
+          event: 'artifacts_archive_failed',
+          task_id: task.id,
+          issue_id: task.issue_id,
+          err,
+        },
+        'Failed to archive run artifacts — keeping workspace for retry on the next cycle'
+      );
       continue;
     }
 
