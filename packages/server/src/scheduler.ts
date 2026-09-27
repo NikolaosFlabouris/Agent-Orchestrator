@@ -111,7 +111,7 @@ import type { FastifyBaseLogger } from 'fastify';
 // Result / meta types (read from container output files)
 // ---------------------------------------------------------------------------
 
-interface TaskMeta {
+export interface TaskMeta {
   issue_id: number;
   branch_name: string;
   base_branch: string;
@@ -2245,20 +2245,7 @@ export class Scheduler {
    *  provider's resolved credential (under the kind's standard name, via
    *  buildProviderEnv) with any harness-specific extras. */
   private buildEnv(provider: Provider, invocation: HarnessInvocation): string[] {
-    const env: string[] = [];
-    // Provider credential under the standard env-var name for its kind
-    // (e.g. ANTHROPIC_API_KEY for kind=anthropic). May be empty if the
-    // provider is self-hosted with no auth or if the configured env-var
-    // pointer isn't set in the orchestrator's environment.
-    const providerEnv = buildProviderEnv(provider);
-    for (const [k, v] of Object.entries(providerEnv)) {
-      env.push(`${k}=${v}`);
-    }
-    // Harness-specific extras (typically empty).
-    for (const [k, v] of Object.entries(invocation.extra_env)) {
-      env.push(`${k}=${v}`);
-    }
-    return env;
+    return buildContainerEnv(provider, invocation);
   }
 
   private async writeTaskFiles(
@@ -2389,6 +2376,29 @@ export class Scheduler {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Env-var array for an agent container launch. Exported so the harness
+ *  smoke-test runner (scripts/harness-smoke.ts) launches with exactly the
+ *  env real tasks get. */
+export function buildContainerEnv(
+  provider: Provider,
+  invocation: HarnessInvocation
+): string[] {
+  const env: string[] = [];
+  // Provider credential under the standard env-var name for its kind
+  // (e.g. ANTHROPIC_API_KEY for kind=anthropic). May be empty if the
+  // provider is self-hosted with no auth or if the configured env-var
+  // pointer isn't set in the orchestrator's environment.
+  const providerEnv = buildProviderEnv(provider);
+  for (const [k, v] of Object.entries(providerEnv)) {
+    env.push(`${k}=${v}`);
+  }
+  // Harness-specific extras (typically empty).
+  for (const [k, v] of Object.entries(invocation.extra_env)) {
+    env.push(`${k}=${v}`);
+  }
+  return env;
+}
 
 function isNotFoundError(err: unknown): boolean {
   return (

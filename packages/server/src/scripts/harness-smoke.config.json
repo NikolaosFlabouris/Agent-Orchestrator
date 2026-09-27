@@ -1,0 +1,7 @@
+{
+  "$comment": "Built-in harness smoke cases (see docs/04-agent-harness.md#harness-smoke-test). Each entry is a (harness_id, provider_id, model_id) triple resolved against the orchestrator DB at run time, so harnesses without a free-provider agent profile still get a live test. Every harness in packages/server/src/harnesses/index.ts must be covered by at least one profile or entry here.",
+  "cases": [
+    { "harness_id": "opencode", "provider_id": "llama-swap-local", "model_id": "qwen3.6-35b-a3b-fast" },
+    { "harness_id": "pi", "provider_id": "llama-swap-local", "model_id": "qwen3.6-35b-a3b-fast" }
+  ]
+}

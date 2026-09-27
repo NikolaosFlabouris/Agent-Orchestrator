@@ -66,7 +66,7 @@ async function chownRecursive(dir: string): Promise<void> {
  *  collide them onto one checkout. Pre-v27 workspaces used the bare
  *  `issue-<n>` name; `migrateLegacyWorkdir` renames them in place on the
  *  next prepare so the existing clone is reused rather than re-cloned. */
-export function getWorkdir(task: Task): string {
+export function getWorkdir(task: Pick<Task, 'repo_id' | 'issue_id'>): string {
   return path.join(WORKSPACES_ROOT, `${task.repo_id}-issue-${task.issue_id}`);
 }
 
@@ -552,14 +552,16 @@ async function assertNoSymlinkOnPath(target: string, workdir: string): Promise<v
 }
 
 export async function writeHarnessConfigFiles(
-  task: Task,
+  task: Pick<Task, 'id' | 'repo_id' | 'issue_id'>,
   files: HarnessConfigFile[],
   harnessId: string,
-  log: FastifyBaseLogger
+  log: FastifyBaseLogger,
+  // Overridden only by the harness smoke-test runner, whose throwaway
+  // workspaces don't follow the per-task naming scheme.
+  workdir: string = getWorkdir(task)
 ): Promise<void> {
   if (files.length === 0) return;
 
-  const workdir = getWorkdir(task);
   const repoExcludeEntries: string[] = [];
   for (const file of files) {
     const v = validateHarnessConfigPath(file.path, workdir);

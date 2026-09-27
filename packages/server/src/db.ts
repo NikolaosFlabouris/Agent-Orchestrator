@@ -85,6 +85,18 @@ export function initDatabase(dbPath: string): Database.Database {
   return db;
 }
 
+/** Open an existing database read-only, without creating tables or running
+ *  migrations, and make it the instance the getters below use. For
+ *  out-of-process tools (the harness smoke-test runner) that must read
+ *  configuration from the live orchestrator DB and be structurally unable
+ *  to write to it: any write throws SQLITE_READONLY. */
+export function openDatabaseReadOnly(dbPath: string): Database.Database {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 5000');
+  _db = db;
+  return db;
+}
+
 /** Get the initialized database instance. */
 export function getDb(): Database.Database {
   if (!_db) {
