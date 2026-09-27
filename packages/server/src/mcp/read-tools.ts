@@ -125,8 +125,9 @@ const UNITS_NOTE =
 
 const ROUTING_NOTE =
   'Choosing a tool: use `get_report kind=leaderboard group_by=model` (or ' +
-  'group_by=harness / group_by=repo) to COMPARE models, harnesses or repos ' +
-  'on success rate and effort; `get_report kind=durations` for how long ' +
+  'group_by=harness / group_by=repo / group_by=effort_level) to COMPARE ' +
+  'models, harnesses, repos or effort levels on success rate and effort; ' +
+  '`get_report kind=durations` for how long ' +
   'runs take, `kind=funnel` for where tasks drop out of the lifecycle, ' +
   '`kind=reliability` for the orchestrator\'s OWN failure incidents (as ' +
   'opposed to the agents\'), `kind=timeseries`/`kind=heatmap` for trends ' +
@@ -355,10 +356,14 @@ interface KindSpec {
 const REPORT_SPECS: Record<ReportKind, KindSpec> = {
   overview: { bucket: false, groupBy: null, metric: null },
   timeseries: { bucket: true, groupBy: null, metric: null },
-  leaderboard: { bucket: false, groupBy: ['model', 'harness', 'repo'], metric: null },
+  leaderboard: {
+    bucket: false,
+    groupBy: ['model', 'harness', 'repo', 'effort_level'],
+    metric: null,
+  },
   durations: {
     bucket: false,
-    groupBy: ['model', 'harness'],
+    groupBy: ['model', 'harness', 'effort_level'],
     metric: { values: ['implementation', 'review'] },
   },
   funnel: { bucket: false, groupBy: null, metric: null },
@@ -832,10 +837,17 @@ export function registerReadTools(server: McpServer, deps: McpReadToolDeps): voi
         '- `timeseries`: tasks created vs merged per bucket (`bucket`=day ' +
         'or week) — trend over time.\n' +
         '- `leaderboard`: per-group success/effort stats ' +
-        '(`group_by`=model|harness|repo). THE tool for "which model is ' +
-        'doing best".\n' +
+        '(`group_by`=model|harness|repo|effort_level). THE tool for "which ' +
+        'model is doing best".\n' +
         '- `durations`: p50/p90/p99 + min/max/avg run duration per group ' +
-        '(`group_by`=model|harness, `metric`=implementation|review).\n' +
+        '(`group_by`=model|harness|effort_level, ' +
+        '`metric`=implementation|review).\n' +
+        '`group_by=effort_level` groups by the attempt\'s launch-time ' +
+        '(model_id, effort_level) PAIR, since effort levels are not ' +
+        'comparable across models; each row is keyed and labelled ' +
+        '`<model_id> · <level>`. EXCEPTION to the null convention below: a ' +
+        'NULL effort_level means "not set, the agent\'s default effort" (not ' +
+        '"unknown") and is labelled `<model_id> · default`.\n' +
         '- `funnel`: created → preparing → in-progress → in-review → merged ' +
         'conversion, i.e. where tasks fall out.\n' +
         '- `reliability`: the ORCHESTRATOR\'s own operational incidents ' +
@@ -880,8 +892,11 @@ export function registerReadTools(server: McpServer, deps: McpReadToolDeps): voi
           .string()
           .optional()
           .describe(
-            'Grouping key. Required for kind=leaderboard (model|harness|repo) ' +
-              'and kind=durations (model|harness); rejected for other kinds.'
+            'Grouping key. Required for kind=leaderboard ' +
+              '(model|harness|repo|effort_level) and kind=durations ' +
+              '(model|harness|effort_level); rejected for other kinds. ' +
+              'effort_level groups by the (model_id, effort_level) pair, ' +
+              'labelled `<model_id> · <level>` (`· default` when unset).'
           ),
         metric: z
           .string()

@@ -2661,11 +2661,31 @@ function enumerateBuckets(
   return out;
 }
 
+/** Attempt-snapshot grouping key expression shared by the leaderboard and
+ *  duration reports. effort_level groups by the (model_id, effort_level)
+ *  PAIR — levels aren't comparable across models — rendered as
+ *  `<model_id> · <level>`. A NULL effort_level means "not set, agent
+ *  default" (not "unknown"), so it becomes `<model_id> · default`; 'default'
+ *  is not a valid EffortLevel, so it can't collide with a real level. */
+function attemptKeyCol(groupBy: 'model' | 'harness' | 'effort_level'): string {
+  if (groupBy === 'model') return 'a.model_id';
+  if (groupBy === 'harness') return 'a.harness_id';
+  return "a.model_id || ' · ' || COALESCE(a.effort_level, 'default')";
+}
+
+/** Excludes attempts with a NULL/empty snapshot for the grouping column.
+ *  effort_level grouping only requires the model_id (a NULL level is the
+ *  agent default, a real group). */
+function attemptKeyNotNull(groupBy: 'model' | 'harness' | 'effort_level'): string {
+  const col = groupBy === 'harness' ? 'a.harness_id' : 'a.model_id';
+  return `${col} IS NOT NULL AND ${col} != ''`;
+}
+
 /** Per-group leaderboard for `GET /api/reports/leaderboard`.
  *
- *  model/harness grouping keys off the per-attempt snapshots
- *  (attempts.model_id / .harness_id) so historical accuracy survives
- *  profile edits; a task touched by two models contributes to both. repo
+ *  model/harness/effort_level grouping keys off the per-attempt snapshots
+ *  (attempts.model_id / .harness_id / .effort_level) so historical accuracy
+ *  survives profile edits; a task touched by two models contributes to both. repo
  *  grouping keys off tasks.repo_id and counts every cohort task (even ones
  *  with no attempts yet). All three sub-queries are SQL aggregates; results
  *  are merged by key in JS (O(groups)). */
@@ -2690,17 +2710,8 @@ export function getReportLeaderboard(
   const profileParams: unknown[] =
     profile && attemptGrouped ? [profile.model, profile.harness] : [];
   const keyCol =
-    groupBy === 'model'
-      ? 'a.model_id'
-      : groupBy === 'harness'
-        ? 'a.harness_id'
-        : 'CAST(t.repo_id AS TEXT)';
-  const keyNotNull =
-    groupBy === 'model'
-      ? "a.model_id IS NOT NULL AND a.model_id != ''"
-      : groupBy === 'harness'
-        ? "a.harness_id IS NOT NULL AND a.harness_id != ''"
-        : null;
+    groupBy === 'repo' ? 'CAST(t.repo_id AS TEXT)' : attemptKeyCol(groupBy);
+  const keyNotNull = groupBy === 'repo' ? null : attemptKeyNotNull(groupBy);
   const andKey = keyNotNull ? ` AND ${keyNotNull}` : '';
 
   const dur = `(${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0`;
@@ -2945,10 +2956,12 @@ export function getReportProfileGauge(
  *
  *  Returns nearest-rank p50/p90/p99 plus min/max/avg/count over the
  *  implementation (develop-role) or review (review-role) attempt durations,
- *  grouped by the per-attempt model/harness snapshot. Like the leaderboard,
- *  grouping keys off attempts.* so historical accuracy survives profile
- *  edits, and an attempt with a NULL/empty snapshot is excluded. All
- *  aggregation runs in one SQL pass (window functions partitioned by key). */
+ *  grouped by the per-attempt model/harness (or model+effort_level)
+ *  snapshot. Like the leaderboard, grouping keys off attempts.* so
+ *  historical accuracy survives profile edits, and an attempt with a
+ *  NULL/empty snapshot is excluded (for effort_level only the model_id must
+ *  be set — a NULL level is the "default" group). All aggregation runs in
+ *  one SQL pass (window functions partitioned by key). */
 export function getReportDurations(
   filter: ReportFilter,
   groupBy: DurationGroupBy,
@@ -2957,8 +2970,8 @@ export function getReportDurations(
   const db = getDb();
   const cohort = rangeClause('t.created_at', filter);
 
-  const keyCol = groupBy === 'model' ? 'a.model_id' : 'a.harness_id';
-  const keyNotNull = `${keyCol} IS NOT NULL AND ${keyCol} != ''`;
+  const keyCol = attemptKeyCol(groupBy);
+  const keyNotNull = attemptKeyNotNull(groupBy);
   const role = metric === 'implementation' ? 'develop' : 'review';
   const dur = `(${juld('a.completed_at')} - ${juld('a.started_at')}) * 86400.0`;
 

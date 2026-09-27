@@ -161,6 +161,41 @@ describe('GET /api/reports/durations', () => {
     expect(sdk.count).toBe(1); // single review attempt, 600s
     expect(sdk.p50_seconds).toBeCloseTo(600, 1);
   });
+
+  it('groups by the (model, effort_level) pair, NULL as default (repo 1 impl)', async () => {
+    // Mixed levels for one model: sonnet develop attempts 1–2 ran at 'low',
+    // 3–4 with no level set (agent default).
+    getDb()
+      .prepare(
+        `UPDATE attempts SET effort_level = 'low'
+         WHERE task_id = 1 AND role = 'develop' AND attempt_number IN (1, 2)`
+      )
+      .run();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/durations?groupBy=effort_level&metric=implementation&repos=1&${Q}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as ReportsDurations;
+    expect(body.group_by).toBe('effort_level');
+    expect(body.groups.map((g) => g.key).sort()).toEqual([
+      'sonnet · default',
+      'sonnet · low',
+    ]);
+
+    const low = body.groups.find((g) => g.key === 'sonnet · low')!;
+    expect(low.label).toBe('sonnet · low');
+    expect(low.count).toBe(2); // [100, 200]
+    expect(low.avg_seconds).toBeCloseTo(150, 1);
+    expect(low.max_seconds).toBeCloseTo(200, 1);
+
+    const dflt = body.groups.find((g) => g.key === 'sonnet · default')!;
+    expect(dflt.label).toBe('sonnet · default');
+    expect(dflt.count).toBe(2); // [300, 400]
+    expect(dflt.avg_seconds).toBeCloseTo(350, 1);
+    expect(dflt.min_seconds).toBeCloseTo(300, 1);
+  });
 });
 
 describe('GET /api/reports/funnel', () => {

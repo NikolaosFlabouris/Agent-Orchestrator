@@ -560,10 +560,15 @@ export interface ReportsTimeseries {
   series: ReportsTimeseriesBucket[];
 }
 
-export type LeaderboardGroupBy = 'model' | 'harness' | 'repo';
+/** `effort_level` groups by the attempt-snapshot PAIR (model_id,
+ *  effort_level) — levels aren't comparable across models — keyed and
+ *  labelled `<model_id> · <level>`. A NULL effort_level means "not set,
+ *  agent default" and is labelled `<model_id> · default`. */
+export type LeaderboardGroupBy = 'model' | 'harness' | 'repo' | 'effort_level';
 
 export interface LeaderboardRow {
-  /** Grouping key: model_id, harness_id, or repo id (as a string). */
+  /** Grouping key: model_id, harness_id, repo id (as a string), or
+   *  `<model_id> · <level|default>` for effort_level grouping. */
   key: string;
   /** Human-readable label (repo "owner/name"; otherwise same as key). */
   label: string;
@@ -656,14 +661,15 @@ export interface ProfileGauge {
 /** Distributions and the funnel group by the per-attempt model/harness
  *  snapshot — the same keys the leaderboard uses (repo grouping isn't
  *  meaningful for a per-attempt duration distribution). */
-export type DurationGroupBy = 'model' | 'harness';
+export type DurationGroupBy = 'model' | 'harness' | 'effort_level';
 /** Which attempt-role duration the distribution endpoint summarises. */
 export type DurationMetric = 'implementation' | 'review';
 
 /** Full percentile summary of a set of durations (seconds) for one group.
  *  Percentiles are nearest-rank. All stat fields are null when count = 0. */
 export interface DurationDistribution {
-  /** Grouping key (model_id or harness_id). */
+  /** Grouping key (model_id, harness_id, or `<model_id> · <level|default>`
+   *  for effort_level grouping). */
   key: string;
   /** Human-readable label (same as key today; reserved for future maps). */
   label: string;

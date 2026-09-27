@@ -108,32 +108,33 @@ export function createReportsRoutes(forgejo: ForgejoClient) {
     return getReportTimeseries(filter, bucket);
   });
 
-  // GET /api/reports/leaderboard?groupBy=model|harness|repo — per-group stats.
+  // GET /api/reports/leaderboard?groupBy=model|harness|repo|effort_level —
+  // per-group stats.
   app.get('/api/reports/leaderboard', async (request, reply) => {
     const query = request.query as Record<string, unknown>;
     const filter = parseFilter(query);
     const raw = query.groupBy;
-    const allowed: LeaderboardGroupBy[] = ['model', 'harness', 'repo'];
+    const allowed: LeaderboardGroupBy[] = ['model', 'harness', 'repo', 'effort_level'];
     if (typeof raw !== 'string' || !allowed.includes(raw as LeaderboardGroupBy)) {
       return reply
         .status(400)
-        .send({ error: 'groupBy must be one of: model, harness, repo' });
+        .send({ error: 'groupBy must be one of: model, harness, repo, effort_level' });
     }
     return getReportLeaderboard(filter, raw as LeaderboardGroupBy);
   });
 
-  // GET /api/reports/durations?groupBy=model|harness&metric=implementation|review
+  // GET /api/reports/durations?groupBy=model|harness|effort_level&metric=implementation|review
   // — per-group p50/p90/p99 + min/max/avg duration distribution.
   app.get('/api/reports/durations', async (request, reply) => {
     const query = request.query as Record<string, unknown>;
     const filter = parseFilter(query);
 
     const groupRaw = query.groupBy;
-    const groups: DurationGroupBy[] = ['model', 'harness'];
+    const groups: DurationGroupBy[] = ['model', 'harness', 'effort_level'];
     if (typeof groupRaw !== 'string' || !groups.includes(groupRaw as DurationGroupBy)) {
       return reply
         .status(400)
-        .send({ error: 'groupBy must be one of: model, harness' });
+        .send({ error: 'groupBy must be one of: model, harness, effort_level' });
     }
 
     const metricRaw = query.metric;
