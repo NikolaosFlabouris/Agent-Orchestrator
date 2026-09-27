@@ -563,4 +563,58 @@ describe.skipIf(SKIP)('Harness usage-limit retry integration', { timeout: 180_00
     const prompt = fs.readFileSync(path.join(dirs.taskDir, 'prompt.md'), 'utf-8');
     expect(prompt).not.toContain('Interrupted Earlier Run');
   });
+  it('pi: exit 0 with a terminal stopReason "error" → failure with the errorMessage, no retry', async () => {
+    const dirs = setupDirs('pi-exit0-error');
+
+    // pi JSON mode: one retried attempt (willRetry: true), then the terminal
+    // one (willRetry: false), both ending in an assistant error — and exit 0.
+    const err = (willRetry: boolean) =>
+      JSON.stringify({
+        type: 'agent_end',
+        messages: [
+          { role: 'user', content: [] },
+          { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'Connection error.' },
+        ],
+        willRetry,
+      });
+    const agentCommand = [
+      'echo run >> /output/.mock-run-count',
+      "cat <<'PIEOF'",
+      '{"type":"session","id":"abc"}',
+      '{"type":"agent_start"}',
+      err(true),
+      '{"type":"agent_start"}',
+      err(false),
+      '{"type":"agent_settled"}',
+      'PIEOF',
+      'exit 0',
+    ].join('\n');
+
+    const { exitCode } = await runHarness(
+      dirs,
+      {
+        role: 'develop',
+        issue_id: 5,
+        branch_name: 'main',
+        attempt: 1,
+        max_runtime_minutes: 5,
+        agent_command: agentCommand,
+        install_commands: [],
+      },
+      ['HARNESS_USAGE_RETRY_SECONDS=2']
+    );
+
+    expect(exitCode).toBe(0);
+
+    const result = JSON.parse(
+      fs.readFileSync(path.join(dirs.outputDir, 'result.json'), 'utf-8')
+    );
+    expect(result.status).toBe('failure');
+    expect(result.exit_code).toBe(0);
+    expect(result.error_message).toBe('Connection error.');
+    expect(result.usage).toBeUndefined();
+
+    const runs = fs.readFileSync(path.join(dirs.outputDir, '.mock-run-count'), 'utf-8');
+    expect(runs.trim().split('\n')).toHaveLength(1);
+  });
 });
