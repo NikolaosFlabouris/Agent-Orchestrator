@@ -517,9 +517,11 @@ launch_dev_container(task, feedback=null):
     agent_command: invocation.agent_command || ''
   }
 
-  # 5. Drop any harness config files into /repo/ (e.g. opencode.json for
-  #    OpenCode + Ollama) and append their paths to .git/info/exclude so
-  #    they don't end up in commits.
+  # 5. Drop any harness config files into /repo/ and append their paths
+  #    to .git/info/exclude so they don't end up in commits. No shipped
+  #    harness uses this today: opencode (openai-compatible) and pi build
+  #    their configs in-container (/tmp/opencode.json,
+  #    ~/.pi/agent/models.json) with `jq -n` inside agent_command.
   for file in invocation.config_files:
     write workdir + file.path with file.content
     append file.path to workdir/.git/info/exclude
@@ -1289,7 +1291,8 @@ function buildEnv(provider: Provider, invocation: HarnessInvocation): string[] {
   for (const [k, v] of Object.entries(buildProviderEnv(provider))) {
     env.push(`${k}=${v}`);
   }
-  // Harness-specific extras (e.g. CLAUDE_CODE_USE_BEDROCK=0). Typically empty.
+  // Harness-specific extras (e.g. CLAUDE_CODE_USE_BEDROCK=0). Empty for
+  // every shipped harness.
   for (const [k, v] of Object.entries(invocation.extra_env)) {
     env.push(`${k}=${v}`);
   }

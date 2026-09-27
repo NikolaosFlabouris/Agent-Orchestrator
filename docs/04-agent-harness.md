@@ -164,7 +164,9 @@ A `HarnessSpec` declares:
   `(profile, model, provider, promptFilePath)` tuple and returns a
   `HarnessInvocation` `{ agent_command, config_files, extra_env,
   resolved_model }`. The scheduler stitches that into meta.json,
-  writes any config files into `/repo/`, and exports the env vars.
+  writes any config files into `/repo/`, and exports the env vars. No
+  shipped harness uses `config_files` or `extra_env` — files needed at
+  runtime are generated in-container by `agent_command`.
 - `validateConfig?(config_json)` — optional save-time well-formedness
   check on the operator-authored `agent_profiles.config_json`.
 
@@ -186,9 +188,53 @@ since the harness/provider mismatch is the categorical error.
 | Id | Runtime | Supported provider kinds | Notes |
 |---|---|---|---|
 | `claude-sdk` | sdk | `anthropic` | `query()` from `@anthropic-ai/claude-agent-sdk`. Reads `meta.model` and runs the SDK call directly. The simplest, most-tested harness; the v21 bootstrap profile uses this. |
-| `claude-code` | cli | `anthropic`, `claude-subscription` | Wraps the `claude` CLI with `--bare --dangerously-skip-permissions --print --verbose --output-format stream-json`. The `--bare` flag is important: it skips OAuth, keychain reads, CLAUDE.md loading, and MCP server discovery. |
-| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | Wraps `opencode run "$(cat /task/prompt.md)"`. For `openai-compatible`, the harness emits an `opencode.json` config file dropped into `/repo/` (orchestrator side) and adds it to `.git/info/exclude` so it never lands in a commit. For cloud providers, OpenCode reads provider/model from env vars the harness exports via `extra_env`. |
-| `pi` | cli | every kind pi supports | `@earendil-works/pi-coding-agent`. Uses `pi -p --mode json --no-session --model <provider-prefixed-id> @/task/prompt.md`. For `openai-compatible`, pi requires a `~/.pi/agent/models.json` file outside `/repo/`; since the orchestrator can't write into the container's home from outside, the pi harness inlines a `mkdir -p ~/.pi/agent && printf ... > ~/.pi/agent/models.json && pi ...` sequence into `agent_command`. See `harnesses/pi.ts` for the worked example. |
+| `claude-code` | cli | `anthropic`, `claude-subscription` | Wraps the `claude` CLI with `--print --verbose --dangerously-skip-permissions --output-format stream-json --max-turns N`. `--bare` (skips OAuth/keychain reads, CLAUDE.md loading and MCP discovery) is added **only for `anthropic` (API key) providers**; it would also disable the OAuth path that reads `CLAUDE_CODE_OAUTH_TOKEN`, so `claude-subscription` runs omit it — see the header comment in `harnesses/claude-code.ts`. |
+| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | Wraps `opencode run "$(cat /task/prompt.md)" --format json --dangerously-skip-permissions --print-logs`. For `openai-compatible`, `agent_command` first builds `/tmp/opencode.json` in-container with `jq -n` and passes it via `--config`; the orchestrator writes no `opencode.json` anywhere (nothing lands in `/repo/`, so the token never touches a persisted path). For cloud kinds there is no config file and `extra_env` is empty — OpenCode uses its built-in provider definitions and the standard credential env var the scheduler exports. |
+| `pi` | cli | every kind pi supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | `@earendil-works/pi-coding-agent`. Uses `pi -p --mode json --no-session --model <provider-prefixed-id> @/task/prompt.md`. pi reads `~/.pi/agent/models.json`, outside `/repo/`, which the orchestrator can't write from outside the container, so `agent_command` starts with `mkdir -p ~/.pi/agent && jq -n ... > ~/.pi/agent/models.json && pi ...`. The file is written for **every** kind: a custom provider stanza (URL, `openai-completions` API, token) for `openai-compatible`, and a minimal provider + model stanza with no credential for cloud kinds. See `harnesses/pi.ts`. |
+
+### Harness configuration capabilities
+
+What an operator can control through the orchestrator differs per harness.
+Orchestrator behaviour below is traced to `packages/server/src/harnesses/*.ts`,
+`harness/harness-cli.sh` and `harness/harness-sdk.ts`. Native agent facts in
+the effort row were observed in the agent image built 2026-08-16 (Claude
+Code 2.1.232, opencode 1.18.18, pi 0.84.2, `@anthropic-ai/claude-agent-sdk`
+`sdk.d.ts`) and re-checked on Claude Code 2.1.283, opencode 1.18.32, pi
+0.84.4 and agent SDK 0.3.283. `images/agent/Dockerfile` leaves claude-code,
+opencode and the agent SDK unpinned (pi is `^0.84.0`), so re-check these
+when the image is rebuilt.
+
+| | `claude-code` | `claude-sdk` | `opencode` | `pi` |
+|---|---|---|---|---|
+| **Runtime / entrypoint** | `cli` (`harness-cli`) | `sdk` (`harness-sdk.ts`) | `cli` (`harness-cli`) | `cli` (`harness-cli`) |
+| **Supported provider kinds** | `anthropic`, `claude-subscription` | `anthropic` | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` | `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, `openai-compatible` |
+| **`config_json` keys** | `max_turns` (integer, default 100, range 1–10000) → `--max-turns N` | none — any key is rejected | none — any key is rejected | none — any key is rejected |
+| **Model-level fields honoured** | `context_window` not applied | `context_window` not applied | `context_window` → `limit.context` (with `output: 0`) in `/tmp/opencode.json`; `openai-compatible` only | `context_window` → `contextWindow` in `~/.pi/agent/models.json` (every kind) |
+| **Turn cap** | `--max-turns` (from `max_turns`) | none; wall-clock timeout only | none | none |
+| **Auth and conditional flags** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`). `--bare` only for `anthropic`; omitted for `claude-subscription`, so **subscription runs load the repo's `CLAUDE.md` and `.claude/settings.json`** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY`) | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into the generated config as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into `models.json` as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` |
+| **Generated config** | none | none | `/tmp/opencode.json`, `openai-compatible` only | `~/.pi/agent/models.json`, every kind |
+| **Usage (turns/tokens) reporting** | yes — stream-json `result` events summed by `harness-cli.sh` | yes — SDK `result` message | no — usage columns NULL (no Claude-style `result` events) | no — usage columns NULL (no Claude-style `result` events) |
+| **Effort / reasoning level** | Not controlled; agent default. Native: `--effort low\|medium\|high\|xhigh\|max` (also `CLAUDE_CODE_EFFORT_LEVEL` env / `effortLevel` setting) | Not controlled; agent default. Native: `query()` option `effort?: 'low'\|'medium'\|'high'\|'xhigh'\|'max'` (`EffortLevel`) | Not controlled; agent default. Native: `--variant <name>`; see note | Not controlled; agent default. Native: `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`; see note |
+
+Both generated configs are built in-container by a `jq -n` step at the
+start of `agent_command`; the orchestrator writes no config file for any
+shipped harness (`config_files` and `extra_env` are always empty).
+
+**Why effort doesn't map uniformly.** claude-code and claude-sdk share
+one level vocabulary but no orchestrator field sets it yet. pi's
+`--thinking` levels are only sent when the model entry allows it: for
+`openai-compatible` providers the generated `models.json` sets
+`compat.supportsReasoningEffort: false`, so no level reaches the server.
+On self-hosted endpoints reasoning is fixed by the inference server (for
+example a model entry started with `--reasoning off`), so it is chosen by
+registering a different model, not by a flag. opencode's `--variant`
+names are provider-specific with no fixed level vocabulary, and custom
+`openai-compatible` providers have no variants unless the generated
+config defines them (it doesn't).
+
+**Principle.** The orchestrator exposes a control only where it maps
+cleanly onto the provider kinds a harness supports. Otherwise the
+agent's own default applies, and this matrix records why.
 
 ### Adding a new harness
 
@@ -200,9 +246,13 @@ This is a code change, not a settings change:
    `HarnessSpec`. Implement `buildInvocation` (and optionally
    `validateConfig`).
 3. Register it in `harnesses/index.ts`.
-4. Add a matching React form component on the client (one per harness id
-   under `packages/ui/src/components/harness-forms/`) so operators can
-   author `config_json` for the new harness.
+4. If the harness accepts `config_json` keys, add its fields to the
+   `HarnessConfigForm` switch in
+   `packages/ui/src/views/Settings/AgentProfileSettings.tsx` so operators
+   can author them (harnesses with no knobs fall through to the "no
+   configuration" branch).
+5. Add a column to the [capability matrix](#harness-configuration-capabilities)
+   and update the "Shipped harnesses" table.
 
 The orchestrator never reads operator-authored shell — every binary
 invocation is constructed in `buildInvocation`, which means adding a
