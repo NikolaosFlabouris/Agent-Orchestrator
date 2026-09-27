@@ -188,6 +188,78 @@ Or use the wrapper script (also creates the `agent-network` bridge):
 
 The image ships Node, Python, and Go toolchains together so a repo doesn't have to pick a language. Earlier orchestrator versions built a four-image hierarchy (`base`, `node`, `python`, `go`); a single image is simpler to maintain and supports polyglot repos. Images can be pushed to Forgejo's built-in container registry for versioning.
 
+## Harness update automation
+
+Two Forgejo Actions workflows keep the agent CLIs in `orchestrator-agent:latest` current: Claude Code, the Claude Agent SDK, OpenCode and pi. Both run on the virgil runner (label `docker`). Their steps are deterministic code with no LLM or agent CLI invoked by the workflow. The logic lives in `scripts/harness-update.mjs` (unit tests: `npm run test:scripts`) and `scripts/ci/*.sh`. The only live model calls happen inside the [harness smoke test](./04-agent-harness.md#harness-smoke-test), which classifies its own results.
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `.forgejo/workflows/harness-update.yml` | Monday 17:00 UTC (`0 17 * * 1`) = Tuesday 02:30 ACST / 03:30 ACDT; manual dispatch | Detect → build if needed → smoke → decide |
+| `.forgejo/workflows/agent-image-rebuild.yml` | push to `main` touching `images/agent/**`, `harness/**`, `packages/server/src/harnesses/**`, `packages/server/src/scripts/**` or `packages/shared/**`; manual dispatch | Redeploy the orchestrator if needed → build → smoke → decide |
+
+Both share the concurrency group `agent-image` (`cancel-in-progress: false`), so only one of them builds or promotes at a time and the other waits in the queue. Timeouts: 120 min for the weekly check, 180 min for the rebuild (it includes the orchestrator's 35 min `stop_grace_period` drain).
+
+**Weekly check.**
+1. *Detect.* Reads `claude --version`, `opencode --version`, `pi --version` and the claude-agent-sdk `package.json` version inside `orchestrator-agent:latest`. Compares them with npm: `npm view <pkg> version` for the unpinned packages, and the newest version inside the Dockerfile range for pi (`@earendil-works/pi-coding-agent@^0.87.1`). It also checks separately whether a release outside the range exists (a "pin bump").
+2. *Build.* Only if an in-range version changed: `docker build --no-cache --pull -f images/agent/Dockerfile -t orchestrator-agent:candidate .` from `main`.
+3. *Smoke.* `docker exec orchestrator node packages/server/dist/scripts/harness-smoke.js --image <candidate|latest> --json …`, then the report is copied out of the container. This runs **every week**, even with no version change, so new profiles and models get tested against the current image.
+4. *Decide*, then promote or open issues (rules below). The job summary shows the versions table, per-case outcomes and the decision.
+
+**Rebuild after merge.** If anything under `packages/**` changed, the orchestrator is redeployed first, because the harness modules and the smoke runner run inside it. "Changed" means this push's diff plus everything between the deploy directory's current commit and this one. The redeploy happens in the deploy directory (below):
+- the working tree must be clean and on `main`, otherwise the job fails and says which;
+- then `git pull --ff-only`;
+- then `docker compose -p agent-orchestrator up -d --build --no-deps orchestrator`.
+
+`--no-deps` stops compose from also rebuilding the `agent-image` service, which would retag `latest` with an untested image. The recreate can take up to the 35 min `stop_grace_period` while running agents drain. The job then always builds a candidate with `--no-cache --pull`, smoke-tests it and applies the same rules and issue template as the weekly check. A manual dispatch has a `redeploy` input: `auto` (the default, as above), `always` or `never`.
+
+### Promotion rules
+
+| Smoke result | Action |
+|---|---|
+| Candidate built and `promotable` | `docker tag orchestrator-agent:candidate orchestrator-agent:latest`, then the candidate tag is removed |
+| Any `fail` (case or static check) | Not promoted; issue opened |
+| `fail` against `latest` (nothing was rebuilt) | Issue opened; nothing to promote |
+| Pin bump available for pi | Issue asking to assess and bump the range, even if the smoke test passed |
+| Not `promotable` only because of `skipped` cases | No promotion, no issue; warning in the job summary |
+| No version change and all green | Nothing to do |
+
+`latest` is only ever replaced by a candidate that passed. A candidate that was not promoted keeps its `orchestrator-agent:candidate` tag, so you can inspect it. The next build overwrites it.
+
+**`skipped`** means the smoke test couldn't reach a verdict on a case. Examples: the provider was unreachable, the provider hit a usage or rate limit, a local model timed out (usually a cold load), the run hit its overall timeout, or type-check tooling couldn't be fetched (see [Outcomes](./04-agent-harness.md#outcomes)). A skip is not a failure, so no issue is opened. But a harness whose free routes were *all* skipped hasn't been shown to work, so the image isn't promotable. The candidate is left unpromoted and the check runs again next Monday. To retry sooner, dispatch the workflow manually once the provider is back.
+
+A smoke *runner error* (exit 2: bad config, a harness with no case, missing image) fails the job. Nothing is promoted and no issue is opened. Check the job log.
+
+### Issues
+
+Issues are opened on this repository through the Forgejo API with the labels `status/queued` and `harness-update`. Either label is created if missing. The orchestrator picks them up as ordinary tasks. Titles are templated, for example `Harness update: adapt orchestrator to @anthropic-ai/claude-code 2.1.300`, `Harness update: fix failing smoke cases for pi` (failures with no version change) or `Harness update: assess pi 0.88.0 pin bump`. The body contains:
+- an old → new versions table;
+- the failing cases (harness, profile/model, outcome, reason, error excerpt);
+- npm and changelog links;
+- the files likely involved;
+- acceptance criteria stating that the listed cases must pass, verified by `agent-image-rebuild.yml` after merge.
+
+**Dedup:** no issue is created while an open `harness-update` issue already has the same title, so a failure that persists for several weeks produces one issue. Once the fix merges, the rebuild workflow promotes the image and that completes the loop.
+
+### Running manually
+
+In Forgejo: **Actions → select the workflow → Run workflow** (branch `main`). For *Agent image rebuild*, pick the `redeploy` mode. Either workflow waits for the other if one is already running.
+
+### One-time setup
+
+**Runner volume.** The rebuild job mounts the live deployment's checkout at the same path. Add it to the runner's `config.yml`:
+
+```yaml
+container:
+  valid_volumes:
+    - /home/nik/src/git.internal/nik/agent-orchestrator
+```
+
+This directory is where compose project `agent-orchestrator` runs from, and it holds the untracked `.env`. The workflows only run `docker compose` inside it, never in the job's own checkout, so they never create a second stack. Its `origin` must be pullable without interaction from the job container (for example over HTTPS without credentials, or with a credential helper configured in the repo). The job runs git as the directory's owner so the pull doesn't leave root-owned files behind.
+
+**Issue token.** The `Open issues` step uses the repo secret `ORCHESTRATOR_ISSUE_TOKEN` if it is set, and otherwise the job's automatic token. The automatic token has issue write access on its own repository, so no secret is needed as long as it can create issues and labels there. If the step fails with HTTP 401/403, add `ORCHESTRATOR_ISSUE_TOKEN` (Settings → Actions → Secrets). Use a Forgejo access token with `write:issue` scope, from an account with write access to this repo. Issues opened with the automatic token are authored by the Actions bot. The orchestrator's 60 s poll picks them up even if no webhook fires. The token is only passed to `scripts/harness-update.mjs` via the environment, it is masked in the log, and it is never printed.
+
+No Claude or provider credential is needed in the workflows. The smoke runner resolves credentials inside the orchestrator container.
+
 ## Backup Strategy
 
 ### Forgejo (Machine A)
@@ -352,7 +424,7 @@ Throughout the orchestrator, Forgejo API calls for posting comments (`forgejo.co
 
 ### Image versioning (Issue 16)
 
-Agent images are always tagged `:latest`. There is no version history or rollback mechanism. If a rebuilt image introduces a problem, the fix is to correct the Dockerfile and rebuild. For production stability, avoid frequent image rebuilds — only rebuild when adding new system-level dependencies or updating agent tools.
+Agent images are always tagged `:latest`. There is no version history or rollback mechanism. The [harness update automation](#harness-update-automation) only replaces `latest` with a candidate that passed the harness smoke test. If a rebuilt image introduces a problem, the fix is to correct the Dockerfile and rebuild. For production stability, avoid frequent image rebuilds — only rebuild when adding new system-level dependencies or updating agent tools.
 
 ## Monitoring
 

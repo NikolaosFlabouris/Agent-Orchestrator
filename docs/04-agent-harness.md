@@ -449,6 +449,17 @@ Every credential any case could export is scrubbed from stdout, stderr
 and the report, along with common token shapes. Error excerpts are short
 and redacted.
 
+### Weekly harness update check
+
+The smoke test also gates automated image updates. Every Monday at 17:00 UTC,
+`.forgejo/workflows/harness-update.yml` checks npm for newer agent CLI
+versions (and for a pi release outside the Dockerfile's pinned range),
+rebuilds the image if any are available and runs this smoke test. It promotes the rebuilt image only if it
+is `promotable`. Failures and pin bumps become `status/queued` +
+`harness-update` issues for the orchestrator to work on. After such a fix
+merges, `.forgejo/workflows/agent-image-rebuild.yml` rebuilds, re-tests and
+promotes. See [07 - Deployment & Operations](./07-deployment-operations.md#harness-update-automation).
+
 ## Providers and models
 
 A **provider** captures the connection identity of an LLM endpoint:

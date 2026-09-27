@@ -1,0 +1,127 @@
+# Rebuild, smoke-test and promote the agent image after a merge that touches
+# it or the harness code: typically the fix for an issue opened by
+# harness-update.yml. Redeploys the orchestrator first when packages/**
+# changed, since the harness modules and the smoke runner run inside it.
+# No LLM runs here: the logic is scripts/harness-update.mjs and
+# scripts/ci/*.sh. See docs/07-deployment-operations.md
+# ("Harness update automation").
+name: Agent image rebuild
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/agent/**'
+      - 'harness/**'
+      - 'packages/server/src/harnesses/**'
+      - 'packages/server/src/scripts/**'
+      - 'packages/shared/**'
+  workflow_dispatch:
+    inputs:
+      redeploy:
+        description: 'Redeploy the orchestrator first: auto = only if packages/** changed since the deployed commit'
+        type: choice
+        options: [auto, always, never]
+        default: auto
+
+concurrency:
+  group: agent-image
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+      # The live deployment's checkout (compose project agent-orchestrator,
+      # holds the untracked .env), at the same path. Must be listed in the
+      # runner's valid_volumes.
+      volumes:
+        - /home/nik/src/git.internal/nik/agent-orchestrator:/home/nik/src/git.internal/nik/agent-orchestrator
+    # Orchestrator redeploy (up to 35 min stop_grace_period drain + image
+    # build) + no-cache agent image build (~30 min) + smoke run (60 min cap).
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: write
+    env:
+      DEPLOY_DIR: /home/nik/src/git.internal/nik/agent-orchestrator
+      LATEST: orchestrator-agent:latest
+      CANDIDATE: orchestrator-agent:candidate
+      WORK: /tmp/agent-image-rebuild
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure Docker CLI
+        run: bash scripts/ci/ensure-docker-cli.sh
+
+      # Changed files = this push's diff, plus everything between the
+      # commit the deploy directory is on and this one (covers manual
+      # dispatch and pushes that landed while the deployment lagged).
+      - name: Check whether the orchestrator needs redeploying
+        id: gate
+        env:
+          MODE: ${{ github.event.inputs.redeploy || 'auto' }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$MODE" in
+            always) echo "redeploy=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            never) echo "redeploy=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          mkdir -p "$WORK"
+          deployed=$(git -c safe.directory="$DEPLOY_DIR" -C "$DEPLOY_DIR" rev-parse HEAD 2>/dev/null || true)
+          if [ -z "$deployed" ]; then
+            echo "::warning::$DEPLOY_DIR is not mounted or not a git checkout; deciding from this push's diff only"
+          fi
+          echo "deployed commit: ${deployed:-unknown}, this commit: $GITHUB_SHA"
+          {
+            if [ -n "$BEFORE" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              git diff --name-only "$BEFORE" "$GITHUB_SHA"
+            fi
+            if [ -n "$deployed" ] && git merge-base --is-ancestor "$deployed" "$GITHUB_SHA" 2>/dev/null; then
+              git diff --name-only "$deployed" "$GITHUB_SHA"
+            fi
+          } | sort -u | tee "$WORK/changed.txt"
+          node scripts/harness-update.mjs needs-redeploy < "$WORK/changed.txt"
+
+      - name: Redeploy orchestrator
+        if: steps.gate.outputs.redeploy == 'true'
+        run: bash scripts/ci/redeploy-orchestrator.sh "$DEPLOY_DIR"
+
+      - name: Detect versions
+        run: |
+          mkdir -p "$WORK"
+          node scripts/harness-update.mjs detect \
+            --image "$LATEST" --dockerfile images/agent/Dockerfile --out "$WORK/versions.json"
+
+      - name: Build candidate image
+        run: docker build --no-cache --pull -f images/agent/Dockerfile -t "$CANDIDATE" .
+
+      - name: Smoke test
+        run: bash scripts/ci/run-smoke.sh "$CANDIDATE" "$WORK/smoke.json"
+
+      - name: Decide
+        id: decide
+        run: |
+          node scripts/harness-update.mjs decide \
+            --versions "$WORK/versions.json" --report "$WORK/smoke.json" \
+            --candidate-built true --workflow rebuild \
+            --context "Commit: ${GITHUB_SHA} · Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}" \
+            --out "$WORK/decision.json"
+
+      - name: Promote candidate to latest
+        if: steps.decide.outputs.promote == 'true'
+        run: |
+          docker tag "$CANDIDATE" "$LATEST"
+          docker rmi "$CANDIDATE"
+          echo "Promoted to $LATEST" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issues
+        if: steps.decide.outputs.issues != '0'
+        env:
+          ISSUE_TOKEN: ${{ secrets.ORCHESTRATOR_ISSUE_TOKEN || github.token }}
+        run: |
+          echo "::add-mask::$ISSUE_TOKEN"
+          node scripts/harness-update.mjs issues --decision "$WORK/decision.json"
