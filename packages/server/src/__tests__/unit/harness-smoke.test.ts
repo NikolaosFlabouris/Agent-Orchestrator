@@ -36,6 +36,7 @@ import {
 } from '../../smoke/static-checks.js';
 import {
   VERIFY_SCRIPT,
+  preflightUrl,
   runSmoke,
   type AgentLaunchOptions,
   type RunInImageOptions,
@@ -517,6 +518,19 @@ describe('computePromotable', () => {
   });
 });
 
+describe('preflightUrl', () => {
+  it('probes the models endpoint without doubling /v1', () => {
+    expect(preflightUrl({ kind: 'openai-compatible', base_url: 'http://llama-swap:8080' })).toBe(
+      'http://llama-swap:8080/v1/models'
+    );
+    expect(preflightUrl({ kind: 'openai-compatible', base_url: 'http://llama-swap:8080/v1/' })).toBe(
+      'http://llama-swap:8080/v1/models'
+    );
+    expect(preflightUrl({ kind: 'claude-subscription', base_url: null })).toBe('https://api.anthropic.com/');
+    expect(preflightUrl({ kind: 'anthropic', base_url: null })).toBeNull();
+  });
+});
+
 describe('makeRedactor', () => {
   it('strips known secrets and token shapes', () => {
     const r = makeRedactor(['my-secret-value']);
@@ -739,6 +753,26 @@ describe('runSmoke / runCli', () => {
     ]);
     expect(launches.every((l) => !l.env.some((e) => e.startsWith('OPENAI_COMPAT_AUTH_TOKEN')))).toBe(true);
     expect(report.promotable).toBe(false);
+  });
+
+  it('blocks promotion when a built-in case cannot be resolved', async () => {
+    const { driver, launches } = fakeDriver();
+    const base = productionLikeSource();
+    // The built-in provider was renamed/deleted: its model no longer resolves.
+    const source: SmokeConfigSource = {
+      ...base,
+      getModelByProviderAndId: (pid, mid) =>
+        pid === 'llama-swap-local' ? undefined : base.getModelByProviderAndId(pid, mid),
+    };
+    const jsonPath = path.join(tmp, 'report.json');
+    const code = await runCli(['--image', 'img', '--json', jsonPath], deps(driver, source));
+    expect(code).toBe(EXIT_OK);
+    const report = JSON.parse(await fsp.readFile(jsonPath, 'utf-8'));
+    const opencode = report.cases.find((c: CaseResult) => c.harness_id === 'opencode');
+    expect(opencode).toMatchObject({ outcome: 'skipped', reason: 'not_configured', live_eligible: true });
+    expect(launches.some((l) => l.env.some((e) => e.startsWith('OPENAI_COMPAT')))).toBe(true); // pi profile still runs
+    expect(report.promotable).toBe(false);
+    expect(report.promotable_blockers).toContain('harness opencode has a free route but no passing live case');
   });
 
   it('fails a static check when a flag disappears from --help', async () => {

@@ -384,7 +384,7 @@ asked to fix it and run it. A case passes on structural signals only:
 
 A failing case is retried once. Before any launch, a connectivity
 preflight runs inside the image on the agent network (`curl` to
-`base_url/v1/models`, or `api.anthropic.com` for the subscription).
+the provider's `/v1/models` endpoint under `base_url`, or `api.anthropic.com` for the subscription).
 The runner never writes task or attempt rows (the DB is opened read-only),
 never calls Forgejo, and never uses a real task workspace.
 

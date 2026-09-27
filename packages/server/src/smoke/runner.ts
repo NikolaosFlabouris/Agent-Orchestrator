@@ -226,7 +226,10 @@ export async function runSmoke(opts: SmokeRunOptions): Promise<SmokeReport> {
     });
 
     if (!c.provider || !c.model || !c.profile) {
-      cases.push(finish(false, { outcome: 'skipped', reason: 'not_configured', detail: c.resolution_error }, 0));
+      // The built-in config declares its entries as free live routes, so an
+      // unresolved one must still count as one — otherwise a renamed local
+      // provider would silently drop the harness from the promotable rule.
+      cases.push(finish(c.sources.includes('builtin'), { outcome: 'skipped', reason: 'not_configured', detail: c.resolution_error }, 0));
       say(`[case] ${c.key}: skipped (not_configured)`);
       continue;
     }
@@ -302,7 +305,10 @@ export async function runSmoke(opts: SmokeRunOptions): Promise<SmokeReport> {
  *  as reachable — this only rules out "the server isn't there". */
 export function preflightUrl(provider: Pick<Provider, 'kind' | 'base_url'>): string | null {
   if (provider.kind === 'claude-subscription') return 'https://api.anthropic.com/';
-  if (provider.base_url) return `${provider.base_url.replace(/\/+$/, '')}/v1/models`;
+  if (provider.base_url) {
+    const base = provider.base_url.replace(/\/+$/, '');
+    return /\/v1$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+  }
   return null;
 }
 
