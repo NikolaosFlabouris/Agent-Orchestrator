@@ -125,7 +125,7 @@ If the UI later wants to extract structured data (e.g., highlight which file the
 
 The harness always exits with code 0. The `result.json` file carries the real status. This ensures the orchestrator has exactly one code path for reading results.
 
-The `error_message` field is null on success and populated on failure/timeout with a diagnostic string. The SDK harness captures the caught exception message. The CLI harness captures the last 5 lines of stderr. This gives the orchestrator a meaningful error message for issue comments and log entries.
+The `error_message` field is null on success and populated on failure/timeout with a diagnostic string. The SDK harness captures the caught exception message. The CLI harness uses the structured error from the agent's event stream when there is one (Claude Code's `is_error` result, pi's terminal `errorMessage`; see [Failure Detection](#failure-detection-cli-harness)), otherwise the last 5 lines of output. This gives the orchestrator a meaningful error message for issue comments and log entries.
 
 For review agents, the additional `/output/review.json`:
 
@@ -254,6 +254,7 @@ when the image is rebuilt.
 | **Auth and conditional flags** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`). `--bare` only for `anthropic`; omitted for `claude-subscription`, so **subscription runs load the repo's `CLAUDE.md` and `.claude/settings.json`** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY`) | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into the generated config as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into `models.json` as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` |
 | **Generated config** | none | none | `/tmp/opencode.json`, `openai-compatible` only | `~/.pi/agent/models.json`, every kind |
 | **Usage (turns/tokens) reporting** | yes — stream-json `result` events summed by `harness-cli.sh` | yes — SDK `result` message | no — usage columns NULL (no Claude-style `result` events) | no — usage columns NULL (no Claude-style `result` events) |
+| **Failure detection** | Exit code; error text from the final `result` event when `is_error` is set (`[API <status>] <result>`), else the log tail | Caught SDK exception | Exit code; log tail as the error text | Exit code **plus** pi's terminal event: pi exits 0 even when every model request failed, so `harness-cli.sh` marks the run `failure` when the last top-level `agent_end` event (`willRetry` false/absent) ends with an assistant message whose `stopReason` is `"error"`, using its `errorMessage` as the error text. Never classified as a usage limit |
 | **Effort / reasoning level** | `effort_level` → `--effort <level>` (every kind); unset → no flag, agent default | `effort_level` → `meta.effort_level` → `query()` option `effort` (`EffortLevel`); unset → option omitted, agent default | Unsupported — rejected at save and launch. Native `--variant <name>` not wired; see note | Unsupported — rejected at save and launch. Native `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` not wired; see note |
 
 Both generated configs are built in-container by a `jq -n` step at the
@@ -472,10 +473,31 @@ while :; do
   # fixed poll when that time can't be parsed), budget permitting, relaunch
 done
 
-# Status from exit code + review.json check (review role only) →
-# /output/result.json, always with exit_code 0 from the harness itself.
+# Status from exit code, pi's terminal agent_end event (see below) and the
+# review.json check (review role only) → /output/result.json, always with
+# exit_code 0 from the harness itself.
 # Usage counts are summed across every run this container performed.
 ```
+
+### Failure Detection (CLI Harness)
+
+Status is derived from the agent's exit code: 124 is `timeout`, any other
+non-zero code is `failure` (with the error text taken from Claude Code's final
+`{"type":"result"}` event when `is_error` is set, else the last 5 log lines),
+and 0 is `success` — with one exception. pi (observed on 0.84.4 and 0.87.1)
+exits 0 even when every model request failed (unreachable `baseUrl`, unknown
+model id, invalid API key), so the harness also inspects pi's JSON-mode event
+stream when the exit code is 0. pi retries failed requests itself; each
+attempt ends with a top-level `{"type":"agent_end","messages":[...],"willRetry":bool}`
+event. When the **last** `agent_end` in the log has `willRetry` false or
+absent and the last element of its `messages` is an assistant message with
+`stopReason: "error"`, the run is recorded as `failure` and that message's
+`errorMessage` becomes `error_message` (e.g. `Connection error.`). A run whose
+intermediate retries failed but whose final attempt ended with
+`stopReason: "stop"` stays `success`. Lines are parsed as JSON and matched on
+their top-level `type` (unparseable lines are skipped), so Claude Code and
+OpenCode logs, which never emit `agent_end`, are classified exactly as before.
+These pi errors are never treated as usage limits.
 
 ### Usage-Limit Retries (CLI Harness)
 
