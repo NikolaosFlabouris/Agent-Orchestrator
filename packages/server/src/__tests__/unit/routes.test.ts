@@ -445,6 +445,146 @@ describe('Agent profile routes', () => {
     expect(res.statusCode).toBe(409);
   });
 
+  describe('effort_level', () => {
+    const modelPk = (provider: string, model: string): number =>
+      (
+        getDb()
+          .prepare('SELECT id FROM models WHERE provider_id = ? AND model_id = ?')
+          .get(provider, model) as { id: number }
+      ).id;
+    const post = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/api/agent-profiles', payload });
+
+    it('POST stores a level on a supported harness and GET returns it', async () => {
+      const res = await post({
+        id: 'cc-high',
+        display_name: 'CC high',
+        harness_id: 'claude-code',
+        model_pk: modelPk('anthropic', 'claude-sonnet-4-6'),
+        timeout_minutes: 120,
+        effort_level: 'high',
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().effort_level).toBe('high');
+
+      const list = await app.inject({ method: 'GET', url: '/api/agent-profiles' });
+      const profiles = list.json().profiles as Array<Record<string, unknown>>;
+      expect(profiles.find((p) => p.id === 'cc-high')!.effort_level).toBe('high');
+      // Seeded profiles predate the column and read as unset.
+      expect(profiles.find((p) => p.id === 'default-claude-sdk')!.effort_level).toBeNull();
+    });
+
+    it('POST defaults an omitted effort_level to null', async () => {
+      const res = await post({
+        id: 'sdk-default',
+        display_name: 'SDK default',
+        harness_id: 'claude-sdk',
+        model_pk: modelPk('anthropic', 'claude-sonnet-4-6'),
+        timeout_minutes: 120,
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().effort_level).toBeNull();
+    });
+
+    it('POST rejects a value outside EFFORT_LEVELS', async () => {
+      const res = await post({
+        id: 'bad-effort',
+        display_name: 'Bad',
+        harness_id: 'claude-sdk',
+        model_pk: modelPk('anthropic', 'claude-sonnet-4-6'),
+        timeout_minutes: 120,
+        effort_level: 'extreme',
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/effort_level must be null or one of/);
+    });
+
+    it('POST rejects a level on opencode and pi with the documented reason', async () => {
+      for (const [harness_id, reason] of [
+        ['opencode', /--variant names are provider-specific/],
+        ['pi', /supportsReasoningEffort: false/],
+      ] as const) {
+        const res = await post({
+          id: `${harness_id}-effort`,
+          display_name: 'x',
+          harness_id,
+          model_pk: modelPk('openai', 'gpt-4o'),
+          timeout_minutes: 120,
+          effort_level: 'low',
+        });
+        expect(res.statusCode, harness_id).toBe(400);
+        expect(res.json().error).toMatch(reason);
+      }
+    });
+
+    it('POST reports provider incompatibility ahead of effort-level support', async () => {
+      const res = await post({
+        id: 'sdk-openai-effort',
+        display_name: 'x',
+        harness_id: 'claude-sdk',
+        model_pk: modelPk('openai', 'gpt-4o'),
+        timeout_minutes: 120,
+        effort_level: 'low',
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/does not support provider kind/);
+    });
+
+    it('PATCH sets, preserves and clears the level', async () => {
+      const url = '/api/agent-profiles/default-claude-sdk';
+      let res = await app.inject({ method: 'PATCH', url, payload: { effort_level: 'max' } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().effort_level).toBe('max');
+
+      // An unrelated edit keeps the stored level.
+      res = await app.inject({ method: 'PATCH', url, payload: { display_name: 'Renamed' } });
+      expect(res.json().effort_level).toBe('max');
+
+      res = await app.inject({ method: 'PATCH', url, payload: { effort_level: null } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().effort_level).toBeNull();
+    });
+
+    it('PATCH rejects switching a levelled profile to an unsupported harness', async () => {
+      const url = '/api/agent-profiles/default-claude-sdk';
+      await app.inject({ method: 'PATCH', url, payload: { effort_level: 'low' } });
+      const res = await app.inject({
+        method: 'PATCH',
+        url,
+        payload: { harness_id: 'opencode' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/does not support an effort level/);
+    });
+
+    it('GET /api/harnesses exposes support per provider kind with reasons', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/harnesses' });
+      const harnesses = res.json().harnesses as Array<{
+        id: string;
+        supported_provider_kinds: string[];
+        effort_level_support: Record<string, { supported: boolean; reason?: string }>;
+      }>;
+      const byId = new Map(harnesses.map((h) => [h.id, h]));
+      for (const h of harnesses) {
+        expect(Object.keys(h.effort_level_support).sort()).toEqual(
+          [...h.supported_provider_kinds].sort()
+        );
+      }
+      expect(byId.get('claude-code')!.effort_level_support['claude-subscription']).toEqual({
+        supported: true,
+      });
+      expect(byId.get('claude-sdk')!.effort_level_support.anthropic).toEqual({
+        supported: true,
+      });
+      const oc = byId.get('opencode')!.effort_level_support['openai-compatible'];
+      expect(oc.supported).toBe(false);
+      expect(oc.reason).toMatch(/--variant/);
+      const pi = byId.get('pi')!.effort_level_support.anthropic;
+      expect(pi.supported).toBe(false);
+      expect(pi.reason).toMatch(/--thinking/);
+    });
+  });
+
   it('DELETE /api/agent-profiles/:id refuses to delete the global default (M4)', async () => {
     const res = await app.inject({
       method: 'DELETE',

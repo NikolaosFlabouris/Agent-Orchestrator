@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   checkHarnessProviderCompatibility,
+  checkHarnessEffortLevelSupport,
   getHarness,
   listHarnesses,
 } from '../../harnesses/index.js';
@@ -123,4 +124,58 @@ describe('harness compatibility lists', () => {
       });
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Effort level support (#196). Only the Claude harnesses translate it;
+// opencode and pi decline by design (see the reasons in their modules).
+// ---------------------------------------------------------------------------
+
+const EXPECTED_EFFORT_LEVEL_SUPPORT: Record<HarnessId, boolean> = {
+  'claude-sdk': true,
+  'claude-code': true,
+  'opencode': false,
+  'pi': false,
+};
+
+describe('checkHarnessEffortLevelSupport', () => {
+  for (const id of HARNESS_IDS) {
+    it(`${id}: declares the expected effort-level support for every kind`, () => {
+      const spec = getHarness(id);
+      for (const kind of EXPECTED_COMPAT[id]) {
+        const s = spec.effortLevelSupport(kind);
+        expect(s.supported, `${id} on ${kind}`).toBe(
+          EXPECTED_EFFORT_LEVEL_SUPPORT[id]
+        );
+        if (!s.supported) expect(s.reason.length).toBeGreaterThan(0);
+      }
+    });
+
+    it(`${id}: always accepts a null (unset) effort level`, () => {
+      const spec = getHarness(id);
+      for (const kind of EXPECTED_COMPAT[id]) {
+        expect(checkHarnessEffortLevelSupport(spec, kind, null)).toEqual({
+          ok: true,
+        });
+      }
+    });
+  }
+
+  it('rejects a set level on an unsupported pair with the harness reason', () => {
+    const spec = getHarness('opencode');
+    const result = checkHarnessEffortLevelSupport(spec, 'openai-compatible', 'low');
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const reason = (
+      spec.effortLevelSupport('openai-compatible') as { reason: string }
+    ).reason;
+    expect(result.error).toContain("Harness 'opencode'");
+    expect(result.error).toContain(reason);
+  });
+
+  it('accepts a set level on a supported pair', () => {
+    expect(
+      checkHarnessEffortLevelSupport(getHarness('claude-code'), 'claude-subscription', 'max')
+    ).toEqual({ ok: true });
+  });
 });

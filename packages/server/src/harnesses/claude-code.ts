@@ -1,6 +1,6 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys } from './config.js';
+import { assertOnlyKnownKeys, resolveEffortLevel } from './config.js';
 
 const CLAUDE_CODE_CONFIG_KEYS = ['max_turns'] as const;
 
@@ -33,13 +33,18 @@ const CLAUDE_CODE_CONFIG_KEYS = ['max_turns'] as const;
  *           active so CLAUDE_CODE_OAUTH_TOKEN is honored)
  *    - `--print --verbose --output-format stream-json` produces the
  *      machine-readable event stream the harness's progress.log
- *      consumer expects. */
+ *      consumer expects.
+ *    - `profile.effort_level` maps 1:1 onto `--effort <level>` (the CLI
+ *      accepts exactly EFFORT_LEVELS) on both provider kinds. Unset →
+ *      no flag, and the command is byte-identical to before. */
 export const claudeCodeHarness: HarnessSpec = {
   id: 'claude-code',
   display_name: 'Claude Code CLI',
   runtime: 'cli',
   supported_provider_kinds: ['anthropic', 'claude-subscription'] as const,
-  buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
+  effortLevelSupport: () => ({ supported: true }),
+  buildInvocation(inputs: HarnessInputs): HarnessInvocation {
+    const { profile, model, provider, promptFilePath } = inputs;
     if (!claudeCodeHarness.supported_provider_kinds.includes(provider.kind)) {
       throw new Error(
         `Claude Code harness does not support provider kind '${provider.kind}'. ` +
@@ -48,6 +53,9 @@ export const claudeCodeHarness: HarnessSpec = {
       );
     }
     const maxTurns = readPositiveInt(profile.config_json, 'max_turns', 100);
+    // Validated against EFFORT_LEVELS by the resolver, so safe to inline.
+    const effortLevel = resolveEffortLevel(claudeCodeHarness, inputs);
+    const effortFlag = effortLevel === null ? '' : `--effort ${effortLevel} `;
     // See header comment: --bare is the sealed-container default but
     // it disables OAuth-token reads, so subscription auth needs it
     // off. Anthropic-API-key runs keep it on for determinism.
@@ -61,10 +69,12 @@ export const claudeCodeHarness: HarnessSpec = {
         `--dangerously-skip-permissions ` +
         `--output-format stream-json ` +
         `--max-turns ${maxTurns} ` +
+        effortFlag +
         `--model ${sq(model.model_id)} < ${sq(promptFilePath)}`,
       config_files: [],
       extra_env: {},
       resolved_model: model.model_id,
+      ...(effortLevel === null ? {} : { effort_level: effortLevel }),
     };
   },
   validateConfig(config_json: Record<string, unknown>): void {

@@ -332,7 +332,11 @@ CREATE TABLE attempts (
   -- schema v22). Lets the stuck-task alert and the orchestrator-side
   -- timeout kill use the threshold in effect at launch rather than a live
   -- profile read; consumers fall back to a live read when this is NULL.
-  timeout_minutes_snapshot INTEGER
+  timeout_minutes_snapshot INTEGER,
+  -- Snapshot of the profile's resolved effort_level at attempt-launch time
+  -- (schema v35). NULL = the harness default ran, or a pre-v35 row. Not the
+  -- same thing as the per-run effort metrics (turns / tokens).
+  effort_level TEXT
   -- Historical note: schema v14 dropped cost / token tracking
   -- (input_tokens, output_tokens, cost_usd columns plus the model_pricing
   -- setting and dashboard daily-cost tile). The harness layer recorded the
@@ -436,7 +440,12 @@ CREATE TABLE agent_profiles (
   -- HarnessSpec.validateConfig.
   config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
   -- Wall-clock timeout (minutes) for any agent run using this profile.
-  timeout_minutes INTEGER NOT NULL DEFAULT 2880
+  timeout_minutes INTEGER NOT NULL DEFAULT 2880,
+  -- Reasoning effort level (schema v35): low | medium | high | xhigh | max,
+  -- or NULL for the harness default (launch identical to pre-v35). Each
+  -- harness translates it or declares it unsupported (opencode, pi); see
+  -- 04-agent-harness.md#effort-level.
+  effort_level TEXT
 );
 
 CREATE INDEX idx_agent_profiles_model_pk ON agent_profiles(model_pk);

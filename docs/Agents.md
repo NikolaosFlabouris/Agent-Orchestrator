@@ -24,7 +24,8 @@ code-defined.
   can exist under multiple providers as separate rows.
 - **Agent profile** — the operator-composed pairing tasks reference. A
   profile names a `harness_id`, a `model_pk`, a `config_json` blob the
-  harness understands, and a wall-clock `timeout_minutes`.
+  harness understands, a wall-clock `timeout_minutes`, and an optional
+  `effort_level`.
 - **Harness** — the in-container program that runs the agent. Harnesses
   are **code-defined** (`packages/server/src/harnesses/*.ts`); operators
   pick from the four shipped harnesses but can't author their own
@@ -145,10 +146,22 @@ has a knob today:
   the profile's `timeout_minutes` still applies.
 
 `claude-sdk`, `opencode` and `pi` accept no `config_json` keys — saving a
-profile with any key fails with an "unknown config key" error. None of
-the harnesses expose an effort / reasoning level; see the
+profile with any key fails with an "unknown config key" error.
+
+The **Effort level** select (every harness) sets the profile's
+`effort_level`: **Default** (NULL — the agent's own default, and the
+launch is identical to a profile saved before the field existed) or one
+of `low`, `medium`, `high`, `xhigh`, `max`. `claude-code` passes it as
+`--effort <level>`; `claude-sdk` passes it to the SDK as `effort`.
+`opencode` and `pi` don't support it: the select is disabled and the
+harness's reason is shown underneath, and the API rejects a level on
+those harnesses at save time (and at launch, if one gets into the DB
+another way). See the
 [capability matrix](./04-agent-harness.md#harness-configuration-capabilities)
-for why.
+for the reasons. There is no per-task override — to compare effort
+levels (e.g. a lower-effort review profile against a higher-effort
+implementation profile), create one profile per level. The level each
+attempt ran with is recorded on `attempts.effort_level`.
 
 `timeout_minutes` defaults to 2880 (48h) for new profiles and 120 (2h)
 for the bootstrap profile. Typical values: 120 for paid APIs to cap

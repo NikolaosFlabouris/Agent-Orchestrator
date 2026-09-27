@@ -10,6 +10,7 @@ import type {
   Model,
   AgentProfile,
   HarnessId,
+  EffortLevel,
   TaskEvent,
   TaskDependency,
   DependencyState,
@@ -43,7 +44,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 34;
+const CURRENT_SCHEMA_VERSION = 35;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -231,6 +232,11 @@ function createTables(db: Database.Database): void {
       -- on pre-v22 rows; consumers fall back to a live profile read
       -- when the snapshot is absent.
       timeout_minutes_snapshot INTEGER,
+      -- Snapshot of the profile's resolved effort_level (v35) captured at
+      -- attempt-launch time, alongside model_id / harness_id. NULL when the
+      -- profile left it unset (harness default) and on pre-v35 rows. Not
+      -- to be confused with the per-run effort metrics below.
+      effort_level TEXT,
       -- Per-run effort metrics (v29), read from the harness's result.json
       -- usage block at completion. Immutable per-run facts (the run
       -- already happened — no snapshot-vs-live concern). All nullable:
@@ -322,7 +328,12 @@ function createTables(db: Database.Database): void {
       -- Stored as JSON; the harness module owns its schema.
       config_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(config_json)),
       -- Wall-clock timeout (minutes) for an agent run using this profile.
-      timeout_minutes INTEGER NOT NULL DEFAULT 2880
+      timeout_minutes INTEGER NOT NULL DEFAULT 2880,
+      -- Reasoning effort level (v35): one of EFFORT_LEVELS, or NULL to
+      -- launch with the harness default. Each harness translates it (or
+      -- declares it unsupported); NULL must reproduce the pre-v35
+      -- invocation exactly.
+      effort_level TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_agent_profiles_model_pk ON agent_profiles(model_pk);
@@ -816,6 +827,27 @@ function runMigrations(db: Database.Database): void {
           ).n > 0;
         if (!hasColumn('models', 'context_window')) {
           db.exec('ALTER TABLE models ADD COLUMN context_window INTEGER');
+        }
+      }
+      if (version < 35) {
+        // v35: orchestrator-managed effort level on agent profiles, plus
+        // its per-attempt launch snapshot. Both nullable — existing rows
+        // get NULL, which every harness reads as "unset" and keeps
+        // emitting the invocation it emitted before the column existed.
+        // Same idempotent pragma_table_info guard as v34.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        if (!hasColumn('agent_profiles', 'effort_level')) {
+          db.exec('ALTER TABLE agent_profiles ADD COLUMN effort_level TEXT');
+        }
+        if (!hasColumn('attempts', 'effort_level')) {
+          db.exec('ALTER TABLE attempts ADD COLUMN effort_level TEXT');
         }
       }
       db.prepare(
@@ -1352,13 +1384,16 @@ export function insertAttempt(attempt: {
    *  later profile edit can't move the stuck-task threshold under an
    *  already-running attempt. */
   timeout_minutes_snapshot?: number | null;
+  /** Snapshot of the profile's resolved effort level at launch. NULL =
+   *  the harness default ran. */
+  effort_level?: EffortLevel | null;
 }): Attempt {
   const result = getDb()
     .prepare(
       `INSERT INTO attempts
          (task_id, attempt_number, role, status, started_at,
-          model_id, harness_id, timeout_minutes_snapshot)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          model_id, harness_id, timeout_minutes_snapshot, effort_level)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       attempt.task_id,
@@ -1368,7 +1403,8 @@ export function insertAttempt(attempt: {
       attempt.started_at ?? new Date().toISOString(),
       attempt.model_id ?? null,
       attempt.harness_id ?? null,
-      attempt.timeout_minutes_snapshot ?? null
+      attempt.timeout_minutes_snapshot ?? null,
+      attempt.effort_level ?? null
     );
 
   return getDb()
@@ -1735,6 +1771,10 @@ function hydrateAgentProfile(
       unknown
     >,
     timeout_minutes: row.timeout_minutes as number,
+    // Hydrated as stored; `resolveEffortLevel` re-validates against
+    // EFFORT_LEVELS at launch, so a hand-edited bad value fails loudly
+    // there rather than being silently dropped here.
+    effort_level: (row.effort_level as EffortLevel | null | undefined) ?? null,
   };
 }
 
@@ -1918,8 +1958,9 @@ export function insertAgentProfile(p: AgentProfile): void {
   getDb()
     .prepare(
       `INSERT INTO agent_profiles
-         (id, display_name, harness_id, model_pk, config_json, timeout_minutes)
-       VALUES (?, ?, ?, ?, ?, ?)`
+         (id, display_name, harness_id, model_pk, config_json, timeout_minutes,
+          effort_level)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       p.id,
@@ -1927,7 +1968,8 @@ export function insertAgentProfile(p: AgentProfile): void {
       p.harness_id,
       p.model_pk,
       JSON.stringify(p.config_json ?? {}),
-      p.timeout_minutes
+      p.timeout_minutes,
+      p.effort_level ?? null
     );
 }
 
@@ -1956,6 +1998,12 @@ export function updateAgentProfile(
   if (updates.timeout_minutes !== undefined) {
     sets.push('timeout_minutes = ?');
     params.push(updates.timeout_minutes);
+  }
+  // `null` is a real value here (clear back to the harness default), so
+  // only `undefined` means "leave unchanged".
+  if (updates.effort_level !== undefined) {
+    sets.push('effort_level = ?');
+    params.push(updates.effort_level);
   }
   if (sets.length === 0) return;
   params.push(id);

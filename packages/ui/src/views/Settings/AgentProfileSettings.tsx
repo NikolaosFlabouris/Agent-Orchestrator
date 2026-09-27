@@ -10,6 +10,8 @@ import type {
 } from '../../api.js';
 import { Button } from '../../components/Button.js';
 import { Input, Select } from '../../components/Input.js';
+import { EFFORT_LEVELS, type EffortLevel } from '@orchestrator/shared';
+import { effortLevelDisabledReason } from './effortLevel.js';
 
 /** Hit-area padding for the inline text buttons in a profile row. The
  *  negative margin cancels the padding's effect on layout, so only the
@@ -40,6 +42,8 @@ export function AgentProfileSettings() {
   const harnessSelectId = `${uid}-harness`;
   const timeoutId = `${uid}-timeout`;
   const modelSelectId = `${uid}-model`;
+  const effortLevelId = `${uid}-effort-level`;
+  const effortLevelHelpId = `${uid}-effort-level-help`;
 
   // Harness registry is code-defined and never mutates at runtime, so
   // we fetch it once.
@@ -93,6 +97,7 @@ export function AgentProfileSettings() {
       // — comfortably long for autonomous runs without masking a stuck
       // agent indefinitely.
       timeout_minutes: 2880,
+      effort_level: null,
     });
     setIsNew(true);
     setError(null);
@@ -107,9 +112,13 @@ export function AgentProfileSettings() {
   async function handleSave(): Promise<void> {
     if (!editing) return;
     setError(null);
+    // A level can't be kept on a harness/provider that doesn't support
+    // it (the server would reject the save), and the disabled select
+    // already shows "Default" — so send what the operator sees.
+    const effort_level = effortDisabledReason ? null : (editing.effort_level ?? null);
     try {
       if (isNew) {
-        await api.createAgentProfile(editing);
+        await api.createAgentProfile({ ...editing, effort_level });
       } else {
         await api.updateAgentProfile(editing.id!, {
           display_name: editing.display_name,
@@ -117,6 +126,7 @@ export function AgentProfileSettings() {
           model_pk: editing.model_pk,
           config_json: editing.config_json,
           timeout_minutes: editing.timeout_minutes,
+          effort_level,
         });
       }
       setEditing(null);
@@ -174,6 +184,13 @@ export function AgentProfileSettings() {
       return models.map((m) => ({ provider: p, model: m }));
     });
 
+  const selectedProviderKind =
+    modelOptions.find(({ model }) => model.id === editing?.model_pk)?.provider.kind ??
+    null;
+  const effortDisabledReason = editingHarness
+    ? effortLevelDisabledReason(editingHarness, selectedProviderKind)
+    : null;
+
   return (
     <div className="space-y-4">
       <div className="text-sm text-gray-400">
@@ -218,7 +235,9 @@ export function AgentProfileSettings() {
                   <span className="font-mono">
                     {p.provider_id}/{p.model_id}
                   </span>{' '}
-                  · timeout {p.timeout_minutes}m · {p.repos_using} repo
+                  · timeout {p.timeout_minutes}m ·{' '}
+                  {p.effort_level && <>effort {p.effort_level} · </>}
+                  {p.repos_using} repo
                   {p.repos_using === 1 ? '' : 's'}, {p.tasks_using} task
                   {p.tasks_using === 1 ? '' : 's'}
                 </div>
@@ -399,6 +418,35 @@ export function AgentProfileSettings() {
                     )}
                 </>
               )}
+            </div>
+            <div className="min-w-0">
+              <label htmlFor={effortLevelId} className="block text-sm mb-1">
+                Effort level
+              </label>
+              <Select
+                id={effortLevelId}
+                value={effortDisabledReason ? '' : (editing.effort_level ?? '')}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    effort_level: (e.target.value || null) as EffortLevel | null,
+                  })
+                }
+                disabled={effortDisabledReason !== null}
+                aria-describedby={effortLevelHelpId}
+                className="w-full disabled:text-gray-500 disabled:cursor-not-allowed"
+              >
+                <option value="">Default</option>
+                {EFFORT_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </Select>
+              <p id={effortLevelHelpId} className="text-xs text-gray-500 mt-1">
+                {effortDisabledReason ??
+                  "Reasoning effort for runs with this profile. Default uses the harness's own default."}
+              </p>
             </div>
           </div>
 

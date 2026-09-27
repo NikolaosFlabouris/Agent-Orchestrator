@@ -607,3 +607,79 @@ describe('deferred-review transition under overlapping ticks', () => {
     expect(store[0].container_id).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Effort level (#196): the harness-resolved level is snapshotted onto the
+//    attempt row at launch and handed to the container via meta.json — and
+//    an unset level leaves meta.json without the key.
+// ---------------------------------------------------------------------------
+
+describe('effort level launch snapshot', () => {
+  function harnessWith(effort_level?: string) {
+    return {
+      id: 'h',
+      runtime: 'sdk',
+      buildInvocation: () => ({
+        resolved_model: 'model-x',
+        extra_env: {},
+        config_files: [],
+        agent_command: null,
+        ...(effort_level ? { effort_level } : {}),
+      }),
+    };
+  }
+  const readMeta = (): Record<string, unknown> =>
+    JSON.parse(fs.readFileSync(path.join(tmpDir, 'meta.json'), 'utf-8'));
+
+  for (const role of ['develop', 'review'] as const) {
+    it(`${role}: records the resolved level on the attempt and in meta.json`, async () => {
+      const task = mkTask({
+        id: 1,
+        status: role === 'develop' ? 'queued' : 'in-review',
+        container_id: null,
+      });
+      store = [task];
+      mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+      mocks.createAgentContainer.mockResolvedValue({ id: 'x1' });
+      mocks.getHarness.mockReturnValue(harnessWith('high'));
+
+      const scheduler = new Scheduler(fakeForgejo, silentLog);
+      if (role === 'develop') await scheduler.launchDevContainer(task);
+      else await scheduler.launchReviewContainer(task);
+
+      expect(mocks.insertAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ role, effort_level: 'high' })
+      );
+      expect(readMeta().effort_level).toBe('high');
+    });
+  }
+
+  it('unset: snapshots NULL and omits the meta.json key', async () => {
+    const task = mkTask({ id: 1, status: 'queued', container_id: null });
+    store = [task];
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'x1' });
+    mocks.getHarness.mockReturnValue(harnessWith());
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+    await scheduler.launchDevContainer(task);
+
+    expect(mocks.insertAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'develop', effort_level: null })
+    );
+    expect(Object.keys(readMeta())).toEqual([
+      'issue_id',
+      'branch_name',
+      'base_branch',
+      'max_runtime_minutes',
+      'attempt',
+      'role',
+      'pr_number',
+      'model',
+      'harness_id',
+      'agent_profile_id',
+      'install_commands',
+      'agent_command',
+    ]);
+  });
+});

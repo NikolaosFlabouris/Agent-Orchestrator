@@ -29,7 +29,7 @@ The server registers eight tools: three that manage work, five that read the orc
 | Tool | Inputs | Returns |
 |---|---|---|
 | `list_repos` | *(none)* | Every registered repo with its effective implementation and review agent profile, and which tier each was resolved from. |
-| `list_agent_profiles` | *(none)* | Every agent profile with its joined model / provider / usage stats. |
+| `list_agent_profiles` | *(none)* | Every agent profile with its joined model / provider / usage stats, including `effort_level` (`null` = harness default). |
 | `create_task` | `repo_id`, `title`, `description`, `dependencies?`, `agent_profile_id?`, `review_agent_profile_id?`, `max_attempts?`, `human_merge?`, `human_review?` | The created task + Forgejo issue. The only non-read-only tool. |
 | `list_tasks` | `repo_id?`, `status?` (a `TaskStatus`), `limit?` (default 50, max 200), `offset?` | Tasks newest first: id, issue id/title, repo tuple, status, attempt/max_attempts, PR number, per-task profile overrides, created/started/completed timestamps. Plus `count`, `total`, `limit`, `offset`. No date window — covers all history. |
 | `get_task` | `task_id` | `{ task, attempts, events, forgejo_links }` — the same data `GET /api/tasks/:id` returns, assembled by the same code (`services/task-detail.ts`), just with the three collections under their own keys. |

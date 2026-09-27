@@ -2,7 +2,7 @@
 
 ## Overview
 
-An **agent profile** is the operator-composed pairing that a task references. It names a code-defined **harness** (one of `claude-sdk`, `claude-code`, `opencode`, `pi`), a **model** scoped to a **provider** (anthropic / openai / openai-compatible / …), a `config_json` blob the harness understands, and a wall-clock `timeout_minutes`. The orchestrator resolves `task → profile → model → provider` at launch time, asks the harness module to build a launch invocation from that tuple, and writes a meta.json into the agent container.
+An **agent profile** is the operator-composed pairing that a task references. It names a code-defined **harness** (one of `claude-sdk`, `claude-code`, `opencode`, `pi`), a **model** scoped to a **provider** (anthropic / openai / openai-compatible / …), a `config_json` blob the harness understands, a wall-clock `timeout_minutes`, and an optional `effort_level` (see [effort level](#effort-level)). The orchestrator resolves `task → profile → model → provider` at launch time, asks the harness module to build a launch invocation from that tuple, and writes a meta.json into the agent container.
 
 The **harness** itself is the container entrypoint. It manages dependency install, agent invocation, and result capture; the orchestrator manages everything else (git operations, Forgejo interaction, state transitions). The harness is deliberately simple — it runs the agent and reports what happened.
 
@@ -41,6 +41,12 @@ The **harness** itself is the container entrypoint. It manages dependency instal
 attempt-launch time so audit trails survive subsequent edits to the
 profile or its model row. The same values are stored on the `attempts`
 row (`attempts.harness_id`, `attempts.model_id`).
+
+`effort_level` (not shown above) is present **only** when the profile
+sets one; an unset profile writes exactly the keys shown. The SDK
+harness passes it to `query()` as `effort`; for CLI harnesses it is
+audit-only (claude-code already has `--effort` in `agent_command`). The
+resolved value is also snapshotted onto `attempts.effort_level`.
 
 `model` is the harness's `resolved_model` — typically `model.model_id`
 verbatim, or `<provider.kind>/<model.model_id>` for harnesses (pi,
@@ -163,10 +169,13 @@ A `HarnessSpec` declares:
 - `buildInvocation(inputs)` — pure function that takes the resolved
   `(profile, model, provider, promptFilePath)` tuple and returns a
   `HarnessInvocation` `{ agent_command, config_files, extra_env,
-  resolved_model }`. The scheduler stitches that into meta.json,
+  resolved_model, effort_level? }`. The scheduler stitches that into meta.json,
   writes any config files into `/repo/`, and exports the env vars. No
   shipped harness uses `config_files` or `extra_env` — files needed at
   runtime are generated in-container by `agent_command`.
+- `effortLevelSupport(providerKind)` — `{ supported: true }` or
+  `{ supported: false, reason }`: whether `profile.effort_level` can be
+  honoured on that provider kind. See [effort level](#effort-level).
 - `validateConfig?(config_json)` — optional save-time well-formedness
   check on the operator-authored `agent_profiles.config_json`.
 
@@ -181,7 +190,38 @@ re-pointed a model row's provider via direct DB edit), it throws with
 a clear "harness X doesn't support kind Y" message and the task
 fails loudly rather than silently routing to an unsupported endpoint.
 Save-time runs the compatibility check **before** `validateConfig`
-since the harness/provider mismatch is the categorical error.
+since the harness/provider mismatch is the categorical error. The
+effort-level support check runs between the two.
+
+### Effort level
+
+`agent_profiles.effort_level` is one harness-agnostic value — `low`,
+`medium`, `high`, `xhigh`, `max` (`EFFORT_LEVELS` in
+`@orchestrator/shared`) or NULL — that each harness translates, following
+the `context_window` pattern:
+
+- **Shared resolver.** Every harness's `buildInvocation` calls
+  `resolveEffortLevel()` (`harnesses/config.ts`). It returns null when the
+  profile leaves it unset, re-validates a set value against
+  `EFFORT_LEVELS` (a hand-edited row fails the launch instead of reaching
+  a command line), and throws — naming the profile, model and provider —
+  if the harness declares the level unsupported for the provider kind.
+- **NULL means "exactly as before".** With no level set, every harness's
+  invocation and the meta.json are byte-identical to the pre-feature
+  output (pinned by `effort-level.test.ts`); the agent's own default
+  applies.
+- **Save time.** `/api/agent-profiles` POST/PATCH rejects a set level on
+  an unsupported harness/provider pair with the harness's reason, after
+  the provider-compatibility check and before `validateConfig`.
+- **Snapshot.** The resolved level is recorded on `attempts.effort_level`
+  at launch, alongside `model_id` / `harness_id`.
+
+The profile is the unit: there is no per-task override. To run review at
+a lower effort than implementation, create two profiles and point the
+review and develop chains at them.
+
+Not to be confused with the per-attempt **effort metrics**
+(`num_turns`, tokens), which measure a run rather than configure one.
 
 ### Shipped harnesses
 
@@ -214,20 +254,25 @@ when the image is rebuilt.
 | **Auth and conditional flags** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`). `--bare` only for `anthropic`; omitted for `claude-subscription`, so **subscription runs load the repo's `CLAUDE.md` and `.claude/settings.json`** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY`) | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into the generated config as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into `models.json` as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` |
 | **Generated config** | none | none | `/tmp/opencode.json`, `openai-compatible` only | `~/.pi/agent/models.json`, every kind |
 | **Usage (turns/tokens) reporting** | yes — stream-json `result` events summed by `harness-cli.sh` | yes — SDK `result` message | no — usage columns NULL (no Claude-style `result` events) | no — usage columns NULL (no Claude-style `result` events) |
-| **Effort / reasoning level** | Not controlled; agent default. Native: `--effort low\|medium\|high\|xhigh\|max` (also `CLAUDE_CODE_EFFORT_LEVEL` env / `effortLevel` setting) | Not controlled; agent default. Native: `query()` option `effort?: 'low'\|'medium'\|'high'\|'xhigh'\|'max'` (`EffortLevel`) | Not controlled; agent default. Native: `--variant <name>`; see note | Not controlled; agent default. Native: `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max`; see note |
+| **Effort / reasoning level** | `effort_level` → `--effort <level>` (every kind); unset → no flag, agent default | `effort_level` → `meta.effort_level` → `query()` option `effort` (`EffortLevel`); unset → option omitted, agent default | Unsupported — rejected at save and launch. Native `--variant <name>` not wired; see note | Unsupported — rejected at save and launch. Native `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` not wired; see note |
 
 Both generated configs are built in-container by a `jq -n` step at the
 start of `agent_command`; the orchestrator writes no config file for any
 shipped harness (`config_files` and `extra_env` are always empty).
 
 **Why effort doesn't map uniformly.** claude-code and claude-sdk share
-one level vocabulary but no orchestrator field sets it yet. pi's
+the `EFFORT_LEVELS` vocabulary, so the profile's
+[`effort_level`](#effort-level) maps onto them 1:1. opencode and pi
+declare it unsupported via `effortLevelSupport`, and the reason is shown
+in the Settings UI and in save/launch errors. pi's
 `--thinking` levels are only sent when the model entry allows it: for
 `openai-compatible` providers the generated `models.json` sets
 `compat.supportsReasoningEffort: false`, so no level reaches the server.
 On self-hosted endpoints reasoning is fixed by the inference server (for
 example a model entry started with `--reasoning off`), so it is chosen by
-registering a different model, not by a flag. opencode's `--variant`
+registering a different model, not by a flag. The cloud-kind
+`--thinking` path is left unwired until there is real usage to validate
+it. opencode's `--variant`
 names are provider-specific with no fixed level vocabulary, and custom
 `openai-compatible` providers have no variants unless the generated
 config defines them (it doesn't).
@@ -243,8 +288,9 @@ This is a code change, not a settings change:
 1. Add the new id to the `HarnessId` union and `HARNESS_IDS` array in
    `packages/shared/src/types.ts`.
 2. Create `packages/server/src/harnesses/<id>.ts` exporting a
-   `HarnessSpec`. Implement `buildInvocation` (and optionally
-   `validateConfig`).
+   `HarnessSpec`. Implement `buildInvocation` (calling
+   `resolveEffortLevel`), `effortLevelSupport`, and optionally
+   `validateConfig`.
 3. Register it in `harnesses/index.ts`.
 4. If the harness accepts `config_json` keys, add its fields to the
    `HarnessConfigForm` switch in
@@ -371,6 +417,8 @@ for await (const message of query({
     // and friends. No maxTurns cap — the wall-clock timeout above is the
     // lifetime safety net.
     model: meta.model,
+    // Only present when the agent profile sets an effort level.
+    ...(meta.effort_level ? { effort: meta.effort_level } : {}),
   },
 })) {
   writeFileSync('/output/progress.log', JSON.stringify(message) + '\n', { flag: 'a' });

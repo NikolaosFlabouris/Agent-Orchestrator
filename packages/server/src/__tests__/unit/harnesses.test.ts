@@ -33,6 +33,7 @@ function mkProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
     model_pk: 1,
     config_json: {},
     timeout_minutes: 120,
+    effort_level: null,
     ...overrides,
   };
 }

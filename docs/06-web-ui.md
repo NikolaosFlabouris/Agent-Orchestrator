@@ -434,6 +434,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
       "model_pk": 1,
       "config_json": {},
       "timeout_minutes": 120,
+      "effort_level": null,
       "repos_using": 0,
       "tasks_using": 3,
       "provider_id": "anthropic",
@@ -443,19 +444,44 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 }
 ```
 
-`POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h). The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is checked first, on save (400 with "harness X doesn't support kind Y"), and again at task launch as the authoritative gate.
+`POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h); `effort_level` defaults to `null` (harness default) and otherwise must be one of `low`, `medium`, `high`, `xhigh`, `max`. The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is checked first, on save (400 with "harness X doesn't support kind Y"), and again at task launch as the authoritative gate. A non-null `effort_level` on a harness/provider pair that doesn't support it (`opencode`, `pi`) is then rejected with a 400 carrying the harness's reason — also re-checked at launch. `PATCH` accepts `effort_level: null` to clear it; omitting the field leaves it unchanged.
 
 `DELETE /api/agent-profiles/:id` returns 409 when the profile is either global default (`settings.default_agent_profile_id` or `settings.default_review_agent_profile_id`) or when any repo or task references it in either profile column (implementation or review).
 
-`GET /api/harnesses` returns the code-defined harness registry — read-only, used by the Agent Profiles form to populate the harness dropdown and scope the model picker:
+`GET /api/harnesses` returns the code-defined harness registry — read-only, used by the Agent Profiles form to populate the harness dropdown, scope the model picker, and enable or disable the Effort level select. `effort_level_support` has one entry per supported provider kind; unsupported entries carry the `reason` shown under the disabled select (abridged below):
 
 ```json
 {
   "harnesses": [
-    { "id": "claude-sdk",  "display_name": "Claude SDK",       "runtime": "sdk", "supported_provider_kinds": ["anthropic"] },
-    { "id": "claude-code", "display_name": "Claude Code CLI",  "runtime": "cli", "supported_provider_kinds": ["anthropic", "claude-subscription"] },
-    { "id": "opencode",    "display_name": "OpenCode CLI",     "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] },
-    { "id": "pi",          "display_name": "Pi CLI",           "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] }
+    {
+      "id": "claude-sdk", "display_name": "Claude SDK", "runtime": "sdk",
+      "supported_provider_kinds": ["anthropic"],
+      "effort_level_support": { "anthropic": { "supported": true } }
+    },
+    {
+      "id": "claude-code", "display_name": "Claude Code CLI", "runtime": "cli",
+      "supported_provider_kinds": ["anthropic", "claude-subscription"],
+      "effort_level_support": {
+        "anthropic": { "supported": true },
+        "claude-subscription": { "supported": true }
+      }
+    },
+    {
+      "id": "opencode", "display_name": "OpenCode CLI", "runtime": "cli",
+      "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"],
+      "effort_level_support": {
+        "anthropic": { "supported": false, "reason": "OpenCode's --variant names are provider-specific with no fixed level vocabulary, and custom openai-compatible providers have none." },
+        "…": "same entry for every other kind"
+      }
+    },
+    {
+      "id": "pi", "display_name": "Pi CLI", "runtime": "cli",
+      "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"],
+      "effort_level_support": {
+        "anthropic": { "supported": false, "reason": "Pi configures openai-compatible providers with supportsReasoningEffort: false, and reasoning on a self-hosted server is fixed server-side (select a different model entry instead). The cloud-kind --thinking path is not wired yet." },
+        "…": "same entry for every other kind"
+      }
+    }
   ]
 }
 ```

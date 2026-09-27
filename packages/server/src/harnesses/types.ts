@@ -4,6 +4,7 @@ import type {
   ProviderKind,
   Model,
   AgentProfile,
+  EffortLevel,
 } from '@orchestrator/shared';
 
 /** Inputs handed to a harness when building the launch invocation. The
@@ -66,7 +67,26 @@ export interface HarnessInvocation {
    *      meta.json for human inspection, but the runtime command doesn't
    *      reference `meta.model` for CLI. */
   resolved_model: string;
+  /** Effort level the harness applied, as resolved by
+   *  `resolveEffortLevel`. The key is ABSENT (not null) when the profile
+   *  left it unset, so an unset invocation is identical to the one built
+   *  before the field existed.
+   *
+   *  Use mirrors `resolved_model`:
+   *    - SDK harnesses: scheduler stamps this into `meta.effort_level` and
+   *      the in-container SDK script passes it to the SDK call.
+   *    - CLI harnesses: already baked into `agent_command`; audit-only.
+   *  Either way the scheduler snapshots it onto the attempts row. */
+  effort_level?: EffortLevel;
 }
+
+/** Whether a harness can honour an orchestrator-managed effort level for
+ *  a given provider kind. Unsupported pairs carry an operator-facing
+ *  reason, surfaced verbatim by the save-time validator, the launch-time
+ *  error, and the Settings UI. */
+export type EffortLevelSupport =
+  | { supported: true }
+  | { supported: false; reason: string };
 
 /** A harness module. One per supported (binary, invocation-shape) pair.
  *  Add a harness by:
@@ -99,6 +119,15 @@ export interface HarnessSpec {
    *  / provider.id so on-call operators can find the offending profile
    *  without DB lookups. */
   buildInvocation(inputs: HarnessInputs): HarnessInvocation;
+  /** Whether `profile.effort_level` can be honoured when this harness
+   *  targets `providerKind`. Enforced the same two ways as
+   *  `supported_provider_kinds`:
+   *    - Save time: `/api/agent-profiles` POST/PATCH rejects a non-null
+   *      effort level on an unsupported pair, with `reason`.
+   *    - Launch time: `buildInvocation` calls `resolveEffortLevel`, which
+   *      re-checks this and throws with the profile/model/provider ids.
+   *  Only meaningful for kinds in `supported_provider_kinds`. */
+  effortLevelSupport(providerKind: ProviderKind): EffortLevelSupport;
   /** Validate operator-submitted `config_json` for this harness. Called
    *  by the agent_profile API route on save. Throw with a human-readable
    *  message if a knob is malformed (e.g. `max_turns` not a positive

@@ -13,9 +13,10 @@ import {
   listHarnesses,
   getHarness,
   checkHarnessProviderCompatibility,
+  checkHarnessEffortLevelSupport,
 } from '../harnesses/index.js';
-import type { AgentProfile, HarnessId } from '@orchestrator/shared';
-import { HARNESS_IDS } from '@orchestrator/shared';
+import type { AgentProfile, EffortLevel, HarnessId } from '@orchestrator/shared';
+import { EFFORT_LEVELS, HARNESS_IDS } from '@orchestrator/shared';
 import { broadcastResourceChanged } from '../ws/dashboard.js';
 import { isUniqueViolation } from '../db-errors.js';
 
@@ -25,6 +26,7 @@ interface ProfileBody {
   model_pk?: number;
   config_json?: Record<string, unknown>;
   timeout_minutes?: number;
+  effort_level?: string | null;
 }
 
 function validateBody(
@@ -37,6 +39,8 @@ function validateBody(
   const model_pk = Number(body.model_pk);
   const timeout_minutes = Number(body.timeout_minutes ?? 2880);
   const config_json = body.config_json ?? {};
+  // Absent and null both mean "harness default".
+  const effort_level = body.effort_level ?? null;
 
   if (!display_name) return { error: 'display_name is required' };
   if (!HARNESS_IDS.includes(harness_id as HarnessId)) {
@@ -62,6 +66,14 @@ function validateBody(
   }
   if (typeof config_json !== 'object' || config_json === null || Array.isArray(config_json)) {
     return { error: 'config_json must be an object' };
+  }
+  if (
+    effort_level !== null &&
+    !(EFFORT_LEVELS as readonly string[]).includes(effort_level)
+  ) {
+    return {
+      error: `effort_level must be null or one of: ${EFFORT_LEVELS.join(', ')}`,
+    };
   }
 
   // Resolve the harness module. Unknown harness ids surface as a
@@ -89,6 +101,19 @@ function validateBody(
     return { error: compat.error };
   }
 
+  // Effort level support is the next categorical check: it depends on the
+  // (harness, provider kind) pair just validated, and no config_json edit
+  // can make an unsupported pair honour it. `resolveEffortLevel` repeats
+  // this at launch as the authoritative gate.
+  const effortCheck = checkHarnessEffortLevelSupport(
+    spec,
+    provider.kind,
+    effort_level as EffortLevel | null
+  );
+  if (!effortCheck.ok) {
+    return { error: effortCheck.error };
+  }
+
   // Per-harness config validation. The harness module owns its config
   // schema; we just call its validateConfig hook (if present) and let
   // it throw with a human-readable message.
@@ -107,6 +132,7 @@ function validateBody(
       model_pk,
       config_json,
       timeout_minutes,
+      effort_level: effort_level as EffortLevel | null,
     },
   };
 }
@@ -121,6 +147,15 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         display_name: h.display_name,
         runtime: h.runtime,
         supported_provider_kinds: h.supported_provider_kinds,
+        // Keyed by each supported provider kind, since support (and the
+        // reason when unsupported) can vary by kind. The Settings UI
+        // disables its effort-level select from this.
+        effort_level_support: Object.fromEntries(
+          h.supported_provider_kinds.map((kind) => [
+            kind,
+            h.effortLevelSupport(kind),
+          ])
+        ),
       })),
     };
   });
@@ -177,6 +212,7 @@ export async function agentProfileRoutes(app: FastifyInstance): Promise<void> {
         model_pk: existing.model_pk,
         config_json: existing.config_json,
         timeout_minutes: existing.timeout_minutes,
+        effort_level: existing.effort_level,
         ...(body as ProfileBody),
       };
       const v = validateBody(merged);

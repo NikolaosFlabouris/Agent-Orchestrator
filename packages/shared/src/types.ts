@@ -109,6 +109,10 @@ export interface Attempt {
    *  Null for pre-v22 attempts; consumers fall back to a live profile
    *  read in that case. */
   timeout_minutes_snapshot: number | null;
+  /** Snapshot of the profile's resolved effort level at attempt-launch
+   *  time. NULL when the profile left it unset (the harness default ran)
+   *  and on pre-v35 rows. */
+  effort_level: EffortLevel | null;
   /** Number of agent turns the run took, read from the harness's
    *  result.json `usage` block at completion. Immutable per-run effort
    *  fact (the run already happened — no snapshot-vs-live concern). NULL
@@ -356,6 +360,15 @@ export const HARNESS_IDS: readonly HarnessId[] = [
   'pi',
 ] as const;
 
+/** Orchestrator-managed reasoning effort an agent run is launched with.
+ *  Harness-agnostic: each harness translates the stored level into its own
+ *  flag/option (see `effortLevelSupport` on the server's HarnessSpec), or
+ *  declares it unsupported. Not to be confused with the per-attempt "effort
+ *  metrics" (turns/tokens) — those measure a run, this configures one. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
 export interface AgentProfile {
   /** Operator-authored stable id. */
   id: string;
@@ -372,6 +385,12 @@ export interface AgentProfile {
    *  Form pre-fill for new profiles is 2880 (48h); paid-API typical is
    *  120 (2h). */
   timeout_minutes: number;
+  /** Reasoning effort level runs with this profile are launched at, or
+   *  NULL to launch with the harness's own default. NULL is the "unset"
+   *  signal — harnesses must emit exactly the invocation they emitted
+   *  before this field existed. Only some (harness, provider kind) pairs
+   *  support it; see `effortLevelSupport` on the server's HarnessSpec. */
+  effort_level: EffortLevel | null;
 }
 
 export interface Settings {

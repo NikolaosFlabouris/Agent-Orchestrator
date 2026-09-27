@@ -1,5 +1,5 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
-import { assertOnlyKnownKeys } from './config.js';
+import { assertOnlyKnownKeys, resolveEffortLevel } from './config.js';
 
 /** Claude Agent SDK harness. Programmatic streaming via the TypeScript
  *  SDK; the in-container `harness-sdk.ts` script reads the model from
@@ -9,13 +9,19 @@ import { assertOnlyKnownKeys } from './config.js';
  *  Operator-tunable knobs (config_json schema): none for v1. The form
  *  component is a no-op placeholder. If we add knobs later (e.g.
  *  `permission_mode`), they go here, in the matching React form, and in
- *  `validateConfig`. */
+ *  `validateConfig`.
+ *
+ *  `profile.effort_level` is handed to the in-container script through
+ *  `meta.effort_level`, which passes it as the SDK's `effort` query
+ *  option. Unset → no meta key and no option, exactly as before. */
 export const claudeSdkHarness: HarnessSpec = {
   id: 'claude-sdk',
   display_name: 'Claude SDK',
   runtime: 'sdk',
   supported_provider_kinds: ['anthropic'] as const,
-  buildInvocation({ profile, model, provider }: HarnessInputs): HarnessInvocation {
+  effortLevelSupport: () => ({ supported: true }),
+  buildInvocation(inputs: HarnessInputs): HarnessInvocation {
+    const { profile, model, provider } = inputs;
     if (!claudeSdkHarness.supported_provider_kinds.includes(provider.kind)) {
       throw new Error(
         `Claude SDK harness does not support provider kind '${provider.kind}'. ` +
@@ -24,12 +30,14 @@ export const claudeSdkHarness: HarnessSpec = {
         `Reconfigure the profile to use a compatible provider.`
       );
     }
+    const effortLevel = resolveEffortLevel(claudeSdkHarness, inputs);
     return {
       agent_command: null,
       config_files: [],
       extra_env: {},
       // Claude SDK accepts the bare model id (no `<provider>/...` prefix).
       resolved_model: model.model_id,
+      ...(effortLevel === null ? {} : { effort_level: effortLevel }),
     };
   },
   validateConfig(config_json: Record<string, unknown>): void {

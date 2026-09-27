@@ -48,6 +48,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { EFFORT_LEVELS } from '@orchestrator/shared';
 
 import { getAgentProfilesWithStats } from '../db.js';
 import type { ForgejoClient } from '../forgejo.js';
@@ -180,7 +181,8 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
     {
       title: 'List configured agent profiles',
       description:
-        'Returns every agent profile (harness + model + provider + timeout) ' +
+        'Returns every agent profile (harness + model + provider + timeout + ' +
+        'effort level; effort_level null = harness default) ' +
         'configured in the orchestrator. Use this to surface valid values ' +
         'for the `agent_profile_id` and `review_agent_profile_id` ' +
         'overrides on `create_task`.',
@@ -192,6 +194,7 @@ export function createMcpServer(deps: McpServerDeps): McpServer {
             harness_id: z.string(),
             model_pk: z.number().int(),
             timeout_minutes: z.number().int(),
+            effort_level: z.enum(EFFORT_LEVELS).nullable(),
             // The joined model/provider/usage stats from
             // getAgentProfilesWithStats. Typed loosely (string|null) here so
             // the schema doesn't drift from the DB helper's shape — the
@@ -439,13 +442,15 @@ function formatProfileLine(p: {
   display_name: string;
   harness_id: string;
   timeout_minutes: number;
+  effort_level: string | null;
   provider_id: string | null;
   model_id: string | null;
 }): string {
   return (
     `${p.id}: ${p.display_name} ` +
     `(${p.harness_id} / ${p.provider_id ?? '?'}/${p.model_id ?? '?'}, ` +
-    `timeout=${p.timeout_minutes}m)`
+    `timeout=${p.timeout_minutes}m` +
+    `${p.effort_level ? `, effort=${p.effort_level}` : ''})`
   );
 }
 

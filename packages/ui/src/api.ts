@@ -16,6 +16,7 @@ import type {
   TaskStatus,
   TaskView,
   OrchestratorAlert,
+  EffortLevel,
 } from '@orchestrator/shared';
 
 const BASE = '';
@@ -595,6 +596,12 @@ export interface HarnessSpec {
   display_name: string;
   runtime: 'sdk' | 'cli';
   supported_provider_kinds: ProviderKind[];
+  /** Whether the harness honours an agent profile's `effort_level`, per
+   *  supported provider kind. Unsupported entries carry the reason shown
+   *  under the (disabled) Effort level select. */
+  effort_level_support: Partial<
+    Record<ProviderKind, { supported: true } | { supported: false; reason: string }>
+  >;
 }
 
 export interface AgentProfileResponse {
@@ -605,6 +612,8 @@ export interface AgentProfileResponse {
   model_pk: number;
   config_json: Record<string, unknown>;
   timeout_minutes: number;
+  /** Reasoning effort level runs are launched at; null = harness default. */
+  effort_level: EffortLevel | null;
   /** Stat: how many repos default to this profile. */
   repos_using: number;
   /** Stat: how many tasks have this profile as a per-task override. */
