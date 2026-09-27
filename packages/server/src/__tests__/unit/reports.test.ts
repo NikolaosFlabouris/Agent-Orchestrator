@@ -380,6 +380,61 @@ describe('GET /api/reports/leaderboard', () => {
     expect(opus.avg_total_churn).toBeNull();
   });
 
+  it('groups by the (model, effort_level) snapshot pair, NULL as default (repo 1)', async () => {
+    // Mixed levels for one model: sonnet ran T1 at 'high' but T3 with no
+    // level set (agent default). opus ran T2 at 'low'.
+    const db = getDb();
+    db.prepare(`UPDATE attempts SET effort_level = 'high' WHERE task_id = 1`).run();
+    db.prepare(`UPDATE attempts SET effort_level = 'low' WHERE task_id = 2`).run();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/leaderboard?groupBy=effort_level&repos=1&${Q}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as ReportsLeaderboard;
+    expect(body.group_by).toBe('effort_level');
+    expect(body.rows.map((r) => r.key).sort()).toEqual([
+      'claude-opus-4-7 · low',
+      'claude-sonnet-4-6 · default',
+      'claude-sonnet-4-6 · high',
+    ]);
+
+    const high = body.rows.find((r) => r.key === 'claude-sonnet-4-6 · high')!;
+    expect(high.label).toBe('claude-sonnet-4-6 · high');
+    expect(high.task_count).toBe(1); // T1 (merged)
+    expect(high.success_rate).toBeCloseTo(1, 6);
+    expect(high.avg_implementation_seconds).toBeCloseTo(3600, 1);
+    expect(high.verdicts).toEqual({ approved: 1, changes_needed: 0, unclear: 0 });
+
+    const dflt = body.rows.find((r) => r.key === 'claude-sonnet-4-6 · default')!;
+    expect(dflt.label).toBe('claude-sonnet-4-6 · default');
+    expect(dflt.task_count).toBe(1); // T3 (failed)
+    expect(dflt.success_rate).toBeCloseTo(0, 6);
+    expect(dflt.avg_review_seconds).toBeCloseTo(2700, 1);
+    expect(dflt.verdicts).toEqual({ approved: 0, changes_needed: 0, unclear: 1 });
+
+    const low = body.rows.find((r) => r.key === 'claude-opus-4-7 · low')!;
+    expect(low.task_count).toBe(1); // T2 (merged, reworked once)
+    expect(low.avg_rework).toBeCloseTo(2, 6);
+  });
+
+  it('labels every group "· default" when no attempt recorded an effort level', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/reports/leaderboard?groupBy=effort_level&repos=1&${Q}`,
+    });
+    const body = res.json() as ReportsLeaderboard;
+    // Same buckets as groupBy=model, one per model.
+    expect(body.rows.map((r) => r.key).sort()).toEqual([
+      'claude-opus-4-7 · default',
+      'claude-sonnet-4-6 · default',
+    ]);
+    expect(
+      body.rows.find((r) => r.key === 'claude-sonnet-4-6 · default')!.task_count
+    ).toBe(2);
+  });
+
   it('groups by repo across all repos, with owner/name labels', async () => {
     const res = await app.inject({
       method: 'GET',

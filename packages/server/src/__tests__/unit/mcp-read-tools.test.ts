@@ -29,7 +29,12 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyBaseLogger } from 'fastify';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { ExportAttemptRow, Task } from '@orchestrator/shared';
+import type {
+  ExportAttemptRow,
+  ReportsDurations,
+  ReportsLeaderboard,
+  Task,
+} from '@orchestrator/shared';
 import type { ForgejoClient } from '../../forgejo.js';
 import type { Scheduler } from '../../scheduler.js';
 
@@ -607,6 +612,14 @@ describe('MCP tool get_report', () => {
         args: { kind: 'durations', group_by: 'harness', metric: 'review' },
         rest: 'durations?groupBy=harness&metric=review',
       },
+      {
+        args: { kind: 'leaderboard', group_by: 'effort_level' },
+        rest: 'leaderboard?groupBy=effort_level',
+      },
+      {
+        args: { kind: 'durations', group_by: 'effort_level', metric: 'implementation' },
+        rest: 'durations?groupBy=effort_level&metric=implementation',
+      },
       { args: { kind: 'funnel' }, rest: 'funnel' },
       { args: { kind: 'reliability' }, rest: 'reliability' },
       { args: { kind: 'heatmap', metric: 'merged' }, rest: 'heatmap?metric=merged' },
@@ -632,6 +645,47 @@ describe('MCP tool get_report', () => {
     expect(sc.report).toEqual(res.json());
   });
 
+  it('groups leaderboard/durations by (model, effort_level), NULL as default', async () => {
+    // Mixed levels for one model: task 1's sonnet develop ran at 'high', its
+    // review with no level set (agent default).
+    getDb()
+      .prepare(`UPDATE attempts SET effort_level = 'high' WHERE task_id = 1 AND role = 'develop'`)
+      .run();
+
+    const board = await call<ReportResult>(harness, 'get_report', {
+      kind: 'leaderboard',
+      group_by: 'effort_level',
+      ...WINDOW,
+    });
+    const rows = (board.report as unknown as ReportsLeaderboard).rows;
+    expect(rows.map((r) => r.label).sort()).toEqual([
+      'claude-sonnet-4-6 · default',
+      'claude-sonnet-4-6 · high',
+      'gpt-4o · default',
+    ]);
+    const high = rows.find((r) => r.key === 'claude-sonnet-4-6 · high')!;
+    expect(high.avg_implementation_seconds).toBeCloseTo(3600, 1);
+    expect(high.avg_review_seconds).toBeNull();
+    const dflt = rows.find((r) => r.key === 'claude-sonnet-4-6 · default')!;
+    expect(dflt.avg_implementation_seconds).toBeNull();
+    expect(dflt.avg_review_seconds).toBeCloseTo(1800, 1);
+
+    const durations = await call<ReportResult>(harness, 'get_report', {
+      kind: 'durations',
+      group_by: 'effort_level',
+      metric: 'implementation',
+      ...WINDOW,
+    });
+    const groups = (durations.report as unknown as ReportsDurations).groups;
+    expect(groups.map((g) => [g.key, g.count]).sort()).toEqual([
+      ['claude-sonnet-4-6 · high', 1],
+      ['gpt-4o · default', 1],
+    ]);
+    expect(durations.report).toEqual(
+      await restReport('durations?groupBy=effort_level&metric=implementation')
+    );
+  });
+
   it('defaults the window to the last DEFAULT_REPORT_WINDOW_DAYS', async () => {
     const { DEFAULT_REPORT_WINDOW_DAYS } = await import('../../constants.js');
     const sc = await call<ReportResult>(harness, 'get_report', { kind: 'timeseries' });
@@ -649,7 +703,7 @@ describe('MCP tool get_report', () => {
   it('rejects per-kind options that do not apply', async () => {
     expect(
       await callErr(harness, 'get_report', { kind: 'durations', group_by: 'repo', metric: 'review' })
-    ).toMatch(/^Invalid input: group_by must be one of: model, harness for kind=durations/);
+    ).toMatch(/^Invalid input: group_by must be one of: model, harness, effort_level for kind=durations/);
 
     expect(await callErr(harness, 'get_report', { kind: 'leaderboard' })).toMatch(
       /^Invalid input: group_by is required for kind=leaderboard/

@@ -26,7 +26,9 @@ import type {
   ReportsTasksPage,
   ReportTaskRow,
   ReportTasksSort,
+  DurationGroupBy,
   DurationMetric,
+  LeaderboardGroupBy,
   LeaderboardRow,
   TaskStatus,
 } from '@orchestrator/shared';
@@ -165,12 +167,18 @@ const TOOLTIP_STYLE = {
   fontSize: '0.75rem',
 };
 
+/** Leaderboard groupings the model/harness card toggles between (repo has
+ *  its own scorecard). `effort_level` groups by the (model, effort level)
+ *  pair, labelled `<model> · <level>` (`· default` when the level was unset). */
+type BoardGroup = Exclude<LeaderboardGroupBy, 'repo'>;
+
 interface ReportBundle {
   overview: ReportsOverview;
   prevOverview: ReportsOverview | null;
   timeseries: ReportsTimeseries;
   modelBoard: ReportsLeaderboard;
   harnessBoard: ReportsLeaderboard;
+  effortBoard: ReportsLeaderboard;
   repoBoard: ReportsLeaderboard;
   durationsImpl: ReportsDurations;
   durationsReview: ReportsDurations;
@@ -207,8 +215,8 @@ export function Reports() {
   );
 
   const [bucket, setBucket] = useState<'day' | 'week'>('day');
-  const [boardGroup, setBoardGroup] = useState<'model' | 'harness'>('model');
-  const [distGroup, setDistGroup] = useState<'model' | 'harness'>('model');
+  const [boardGroup, setBoardGroup] = useState<BoardGroup>('model');
+  const [distGroup, setDistGroup] = useState<DurationGroupBy>('model');
   const [distMetric, setDistMetric] = useState<DurationMetric>('implementation');
   const [heatmapMetric, setHeatmapMetric] = useState<'created' | 'merged'>(
     'created'
@@ -310,6 +318,7 @@ export function Reports() {
       api.getReportTimeseries(filter, bucket),
       api.getReportLeaderboard('model', filter),
       api.getReportLeaderboard('harness', filter),
+      api.getReportLeaderboard('effort_level', filter),
       api.getReportLeaderboard('repo', filter),
       // Fetch BOTH duration metrics at the current grouping so the
       // metric toggle is client-side; only the grouping toggle refetches.
@@ -326,6 +335,7 @@ export function Reports() {
           timeseries,
           modelBoard,
           harnessBoard,
+          effortBoard,
           repoBoard,
           durationsImpl,
           durationsReview,
@@ -341,6 +351,7 @@ export function Reports() {
             timeseries,
             modelBoard,
             harnessBoard,
+            effortBoard,
             repoBoard,
             durationsImpl,
             durationsReview,
@@ -376,7 +387,12 @@ export function Reports() {
     const exportData: ReportExportData = {
       filter: { repos: selectedRepoIds.length ? selectedRepoIds : null, from, to },
       overview: data.overview,
-      leaderboards: [data.modelBoard, data.harnessBoard, data.repoBoard],
+      leaderboards: [
+        data.modelBoard,
+        data.harnessBoard,
+        data.effortBoard,
+        data.repoBoard,
+      ],
       reliability: data.reliability,
       durations: [data.durationsImpl, data.durationsReview],
     };
@@ -462,7 +478,13 @@ export function Reports() {
             </div>
 
             <LeaderboardSection
-              board={boardGroup === 'model' ? data.modelBoard : data.harnessBoard}
+              board={
+                boardGroup === 'model'
+                  ? data.modelBoard
+                  : boardGroup === 'harness'
+                    ? data.harnessBoard
+                    : data.effortBoard
+              }
               group={boardGroup}
               onGroupChange={setBoardGroup}
             />
@@ -899,8 +921,8 @@ function LeaderboardSection({
   onGroupChange,
 }: {
   board: ReportsLeaderboard;
-  group: 'model' | 'harness';
-  onGroupChange: (g: 'model' | 'harness') => void;
+  group: BoardGroup;
+  onGroupChange: (g: BoardGroup) => void;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>('task_count');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -922,15 +944,16 @@ function LeaderboardSection({
 
   return (
     <ChartCard
-      title="Model & harness leaderboard"
+      title="Model, harness & effort leaderboard"
       actions={
         <Toggle
           options={[
             { value: 'model', label: 'By model' },
             { value: 'harness', label: 'By harness' },
+            { value: 'effort_level', label: 'By effort' },
           ]}
           value={group}
-          onChange={(v) => onGroupChange(v as 'model' | 'harness')}
+          onChange={(v) => onGroupChange(v as BoardGroup)}
         />
       }
       empty={board.rows.length === 0}
@@ -1082,8 +1105,8 @@ function DurationDistributionSection({
   onMetricChange,
 }: {
   durations: ReportsDurations;
-  group: 'model' | 'harness';
-  onGroupChange: (g: 'model' | 'harness') => void;
+  group: DurationGroupBy;
+  onGroupChange: (g: DurationGroupBy) => void;
   metric: DurationMetric;
   onMetricChange: (m: DurationMetric) => void;
 }) {
@@ -1105,9 +1128,10 @@ function DurationDistributionSection({
             options={[
               { value: 'model', label: 'By model' },
               { value: 'harness', label: 'By harness' },
+              { value: 'effort_level', label: 'By effort' },
             ]}
             value={group}
-            onChange={(v) => onGroupChange(v as 'model' | 'harness')}
+            onChange={(v) => onGroupChange(v as DurationGroupBy)}
           />
         </>
       }
