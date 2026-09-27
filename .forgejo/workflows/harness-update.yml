@@ -1,0 +1,89 @@
+# Weekly harness update check: are the agent CLIs in orchestrator-agent:latest
+# (Claude Code, Claude Agent SDK, OpenCode, pi) still current, and do all
+# harnesses still pass the smoke test? Rebuilds and promotes the agent image
+# when a new in-range version is out; opens a `status/queued` issue for the
+# orchestrator when the orchestrator needs changing. No LLM runs here: the
+# logic is scripts/harness-update.mjs (unit-tested), the only live calls are
+# inside the smoke runner. See docs/07-deployment-operations.md
+# ("Harness update automation").
+name: Harness update check
+
+on:
+  schedule:
+    # Monday 17:00 UTC = Tuesday 02:30 ACST / 03:30 ACDT.
+    - cron: '0 17 * * 1'
+  workflow_dispatch:
+
+# Shared with agent-image-rebuild.yml: one agent image build/promotion at a
+# time, queued rather than cancelled.
+concurrency:
+  group: agent-image
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Host networking + the host Docker socket, so the job can build images
+    # and `docker exec` into the orchestrator container.
+    runs-on: docker
+    container:
+      image: node:22-bookworm
+    # No-cache image build (~30 min) + smoke run (60 min overall cap).
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write
+    env:
+      LATEST: orchestrator-agent:latest
+      CANDIDATE: orchestrator-agent:candidate
+      WORK: /tmp/harness-update
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Ensure Docker CLI
+        run: bash scripts/ci/ensure-docker-cli.sh
+
+      - name: Detect versions
+        id: detect
+        run: |
+          mkdir -p "$WORK"
+          node scripts/harness-update.mjs detect \
+            --image "$LATEST" --dockerfile images/agent/Dockerfile --out "$WORK/versions.json"
+
+      - name: Build candidate image
+        if: steps.detect.outputs.changed == 'true'
+        run: docker build --no-cache --pull -f images/agent/Dockerfile -t "$CANDIDATE" .
+
+      # Runs every week, even with no version change, so new profiles and
+      # models get tested against the current image.
+      - name: Smoke test
+        run: |
+          if [ "${{ steps.detect.outputs.changed }}" = true ]; then target=$CANDIDATE; else target=$LATEST; fi
+          bash scripts/ci/run-smoke.sh "$target" "$WORK/smoke.json"
+
+      - name: Decide
+        id: decide
+        run: |
+          node scripts/harness-update.mjs decide \
+            --versions "$WORK/versions.json" --report "$WORK/smoke.json" \
+            --candidate-built "${{ steps.detect.outputs.changed }}" --workflow weekly \
+            --context "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}" \
+            --out "$WORK/decision.json"
+
+      - name: Promote candidate to latest
+        if: steps.decide.outputs.promote == 'true'
+        run: |
+          docker tag "$CANDIDATE" "$LATEST"
+          docker rmi "$CANDIDATE"
+          echo "Promoted to $LATEST" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issues
+        if: steps.decide.outputs.issues != '0'
+        env:
+          # ORCHESTRATOR_ISSUE_TOKEN if set, otherwise the job's automatic
+          # token. Only this script reads it; it is never printed.
+          ISSUE_TOKEN: ${{ secrets.ORCHESTRATOR_ISSUE_TOKEN || github.token }}
+        run: |
+          echo "::add-mask::$ISSUE_TOKEN"
+          node scripts/harness-update.mjs issues --decision "$WORK/decision.json"

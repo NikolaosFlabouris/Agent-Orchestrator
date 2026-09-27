@@ -8,7 +8,8 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "test": "npm test --workspace=packages/server",
+    "test": "npm test --workspace=packages/server && npm run test:scripts",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "test:e2e": "TEST_E2E=1 npm test --workspace=packages/server -- --run src/__tests__/e2e",
     "build:images": "bash scripts/build-agent-images.sh"
   }
