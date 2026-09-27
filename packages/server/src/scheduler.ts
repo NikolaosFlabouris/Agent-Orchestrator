@@ -9,8 +9,9 @@ import type {
   AgentProfile,
   AttemptRole,
   AgentResult,
+  EffortLevel,
 } from '@orchestrator/shared';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { EFFORT_LEVELS, TERMINAL_STATUSES } from '@orchestrator/shared';
 import {
   getTask,
   getRepo,
@@ -129,6 +130,11 @@ interface TaskMeta {
   harness_id: string;
   /** Snapshot of the agent profile id at attempt-launch time. Audit. */
   agent_profile_id: string;
+  /** Effort level the harness resolved from the profile. The SDK script
+   *  passes it to `query()` as `effort`; for CLI harnesses it's audit-only
+   *  (already baked into `agent_command`). Omitted entirely when the
+   *  profile leaves it unset, so meta.json is unchanged in that case. */
+  effort_level?: EffortLevel;
   /** Resolved install commands the harness runs sequentially under flock
    *  before the agent. Each entry is the literal shell command to exec.
    *  The orchestrator builds these from the repo's typed install_steps so
@@ -1443,6 +1449,7 @@ export class Scheduler {
         model_id: ctx.invocation.resolved_model,
         harness_id: ctx.harness.id,
         timeout_minutes_snapshot: ctx.profile.timeout_minutes,
+        effort_level: ctx.invocation.effort_level ?? null,
       });
       activeState.set(task.id, {
         currentAttemptId: attempt.id,
@@ -1549,6 +1556,7 @@ export class Scheduler {
         model_id: ctx.invocation.resolved_model,
         harness_id: ctx.harness.id,
         timeout_minutes_snapshot: ctx.profile.timeout_minutes,
+        effort_level: ctx.invocation.effort_level ?? null,
       });
       const state = activeState.get(task.id) ?? {
         currentAttemptId: 0,
@@ -1854,6 +1862,7 @@ export class Scheduler {
       let modelSnapshot: string | null = null;
       let harnessSnapshot: string | null = null;
       let timeoutSnapshot: number | null = null;
+      let effortLevelSnapshot: EffortLevel | null = null;
       try {
         const raw = await fsp.readFile(metaPath, 'utf-8');
         // Cast to TaskMeta so a typo like `meta.harnes_id` would
@@ -1880,6 +1889,11 @@ export class Scheduler {
           meta.max_runtime_minutes > 0
             ? meta.max_runtime_minutes
             : null;
+        effortLevelSnapshot =
+          typeof meta.effort_level === 'string' &&
+          (EFFORT_LEVELS as readonly string[]).includes(meta.effort_level)
+            ? meta.effort_level
+            : null;
       } catch { /* default to develop, no snapshots */ }
 
       const existing = getRunningAttempt(task.id, task.attempt, role);
@@ -1899,6 +1913,7 @@ export class Scheduler {
           model_id: modelSnapshot,
           harness_id: harnessSnapshot,
           timeout_minutes_snapshot: timeoutSnapshot,
+          effort_level: effortLevelSnapshot,
         });
         attemptId = newAttempt.id;
       }
@@ -2289,6 +2304,11 @@ export class Scheduler {
       install_commands: buildInstallCommands(repo),
       agent_command: ctx.invocation.agent_command ?? '',
     };
+    // Only add the key when set, so an unset profile's meta.json stays
+    // byte-identical to the pre-effort-level shape.
+    if (ctx.invocation.effort_level !== undefined) {
+      meta.effort_level = ctx.invocation.effort_level;
+    }
     await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
 
     // prepareWorkspace() already chowned the task dir tree to the agent user,

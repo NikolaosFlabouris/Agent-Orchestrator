@@ -1,6 +1,15 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
+import {
+  assertOnlyKnownKeys,
+  resolveContextWindow,
+  resolveEffortLevel,
+} from './config.js';
+
+/** Why opencode declines `profile.effort_level` (see the header below). */
+const OPENCODE_EFFORT_LEVEL_REASON =
+  "OpenCode's --variant names are provider-specific with no fixed level " +
+  'vocabulary, and custom openai-compatible providers have none.';
 
 /** OpenCode CLI harness. The in-container `harness-cli.sh` bash-executes
  *  the agent_command.
@@ -34,7 +43,11 @@ import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
  *  touches a persistent location.
  *
  *  Output format: --format json + --print-logs gives the machine-
- *  readable event stream + log capture the harness expects. */
+ *  readable event stream + log capture the harness expects.
+ *
+ *  Effort level: unsupported by design (see OPENCODE_EFFORT_LEVEL_REASON).
+ *  `resolveEffortLevel` still runs so a level that slipped past the
+ *  save-time check fails the launch instead of being silently dropped. */
 export const opencodeHarness: HarnessSpec = {
   id: 'opencode',
   display_name: 'OpenCode CLI',
@@ -48,7 +61,12 @@ export const opencodeHarness: HarnessSpec = {
     'openrouter',
     'openai-compatible',
   ] as const,
-  buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
+  effortLevelSupport: () => ({
+    supported: false,
+    reason: OPENCODE_EFFORT_LEVEL_REASON,
+  }),
+  buildInvocation(inputs: HarnessInputs): HarnessInvocation {
+    const { profile, model, provider, promptFilePath } = inputs;
     if (!opencodeHarness.supported_provider_kinds.includes(provider.kind)) {
       throw new Error(
         `OpenCode harness does not support provider kind '${provider.kind}'. ` +
@@ -56,6 +74,7 @@ export const opencodeHarness: HarnessSpec = {
         `Profile '${profile.id}' uses model '${model.model_id}' on provider '${provider.id}'.`
       );
     }
+    resolveEffortLevel(opencodeHarness, inputs);
     // OpenCode expects `<provider>/<model>` form for the --model arg.
     const resolved_model = `${provider.kind}/${model.model_id}`;
 

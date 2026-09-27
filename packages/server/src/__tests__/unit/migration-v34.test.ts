@@ -44,7 +44,7 @@ describe('v34 models.context_window migration', () => {
     const db = initDatabase(path.join(tmpDir, 'v34-fresh.db'));
 
     expect(modelColumns(db).has('context_window')).toBe(true);
-    expect(schemaVersion(db)).toBe('34');
+    expect(schemaVersion(db)).toBe('35');
     // Seeded models carry no opinion about the context window.
     expect(
       db
@@ -97,7 +97,7 @@ describe('v34 models.context_window migration', () => {
     // Reboot → migration adds the column and bumps the version.
     db = initDatabase(dbFile);
     expect(modelColumns(db).has('context_window')).toBe(true);
-    expect(schemaVersion(db)).toBe('34');
+    expect(schemaVersion(db)).toBe('35');
     // Pre-existing rows survive and read as "unset", not 0.
     expect(
       db.prepare('SELECT COUNT(*) AS n FROM models').get()
@@ -127,7 +127,7 @@ describe('v34 models.context_window migration', () => {
 
     db = initDatabase(dbFile);
     expect(modelColumns(db).has('context_window')).toBe(true);
-    expect(schemaVersion(db)).toBe('34');
+    expect(schemaVersion(db)).toBe('35');
     db.close();
   });
 

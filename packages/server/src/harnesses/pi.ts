@@ -1,6 +1,10 @@
 import type { HarnessSpec, HarnessInputs, HarnessInvocation } from './types.js';
 import { sq } from './shell.js';
-import { assertOnlyKnownKeys, resolveContextWindow } from './config.js';
+import {
+  assertOnlyKnownKeys,
+  resolveContextWindow,
+  resolveEffortLevel,
+} from './config.js';
 import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
 
 /** Pi (pi-coding-agent) CLI harness. Bash-executed in the container.
@@ -51,7 +55,19 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  usage from — so pi attempts leave the usage columns NULL, exactly as
  *  they did before the package rename.
  *
- *  Operator-tunable knobs (config_json): none for v1. */
+ *  Operator-tunable knobs (config_json): none for v1.
+ *
+ *  Effort level: unsupported by design (see PI_EFFORT_LEVEL_REASON). Pi's
+ *  `--thinking` flag would cover the cloud kinds, but it stays unwired
+ *  until there's real usage to validate it against. `resolveEffortLevel`
+ *  still runs so a level that slipped past the save-time check fails the
+ *  launch instead of being silently dropped. */
+
+const PI_EFFORT_LEVEL_REASON =
+  'Pi configures openai-compatible providers with ' +
+  'supportsReasoningEffort: false, and reasoning on a self-hosted server ' +
+  'is fixed server-side (select a different model entry instead). The ' +
+  'cloud-kind --thinking path is not wired yet.';
 
 /** Map orchestrator ProviderKind → pi's internal provider name. Pi
  *  expects the `--model` argument in `<pi-name>/<model_id>` form and
@@ -89,7 +105,12 @@ export const piHarness: HarnessSpec = {
     'openrouter',
     'openai-compatible',
   ] as const,
-  buildInvocation({ profile, model, provider, promptFilePath }: HarnessInputs): HarnessInvocation {
+  effortLevelSupport: () => ({
+    supported: false,
+    reason: PI_EFFORT_LEVEL_REASON,
+  }),
+  buildInvocation(inputs: HarnessInputs): HarnessInvocation {
+    const { profile, model, provider, promptFilePath } = inputs;
     if (!piHarness.supported_provider_kinds.includes(provider.kind)) {
       throw new Error(
         `Pi harness does not support provider kind '${provider.kind}'. ` +
@@ -97,6 +118,7 @@ export const piHarness: HarnessSpec = {
         `Profile '${profile.id}' uses model '${model.model_id}' on provider '${provider.id}'.`
       );
     }
+    resolveEffortLevel(piHarness, inputs);
     const piProviderName = piProviderNameFor(provider.kind);
     const resolved_model = `${piProviderName}/${model.model_id}`;
     const writeConfig = buildPiConfigWriteCommand(provider, model, piProviderName);

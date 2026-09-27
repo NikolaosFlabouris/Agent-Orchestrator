@@ -15,6 +15,10 @@ interface Meta {
   harness_id: string;
   /** Audit snapshot of the agent profile id resolved at attempt-launch time. */
   agent_profile_id: string;
+  /** Orchestrator-managed effort level, passed to `query()` as `effort`.
+   *  Absent when the agent profile leaves it unset — the SDK default then
+   *  applies, exactly as before the field existed. */
+  effort_level?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   install_commands: InstallCommand[];
   /** Empty string for SDK harnesses (this script reads `model` directly
    *  and runs the SDK call). Populated for CLI harnesses, which use
@@ -178,6 +182,7 @@ async function main() {
       options: {
         permissionMode: 'bypassPermissions',
         model: meta.model,
+        ...(meta.effort_level ? { effort: meta.effort_level } : {}),
       },
     })) {
       writeFileSync('/output/progress.log', JSON.stringify(message) + '\n', {

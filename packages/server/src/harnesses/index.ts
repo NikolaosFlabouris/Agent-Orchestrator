@@ -1,4 +1,4 @@
-import type { HarnessId, ProviderKind } from '@orchestrator/shared';
+import type { EffortLevel, HarnessId, ProviderKind } from '@orchestrator/shared';
 import type { HarnessSpec } from './types.js';
 import { claudeSdkHarness } from './claude-sdk.js';
 import { claudeCodeHarness } from './claude-code.js';
@@ -64,7 +64,30 @@ export function checkHarnessProviderCompatibility(
   };
 }
 
+/** Save-time counterpart of the effort-level gate in `resolveEffortLevel`,
+ *  for the agent-profile create/update routes. An unset (null) level is
+ *  always fine; a set one must be supported by the (harness, provider
+ *  kind) pair, otherwise the harness's stated reason is returned. The
+ *  value itself is validated against EFFORT_LEVELS by the caller. */
+export function checkHarnessEffortLevelSupport(
+  harness: HarnessSpec,
+  providerKind: ProviderKind,
+  effortLevel: EffortLevel | null
+): { ok: true } | { ok: false; error: string } {
+  if (effortLevel === null) return { ok: true };
+  const support = harness.effortLevelSupport(providerKind);
+  if (support.supported) return { ok: true };
+  return {
+    ok: false,
+    error:
+      `Harness '${harness.id}' does not support an effort level on ` +
+      `provider kind '${providerKind}': ${support.reason} Set the effort ` +
+      `level to Default, or pick a different harness.`,
+  };
+}
+
 export type {
+  EffortLevelSupport,
   HarnessSpec,
   HarnessInputs,
   HarnessInvocation,

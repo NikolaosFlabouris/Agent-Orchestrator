@@ -112,7 +112,7 @@ describe('v23 seed migration', () => {
     const versionRow = db
       .prepare("SELECT value FROM settings WHERE key = 'schema_version'")
       .get() as { value: string };
-    expect(versionRow.value).toBe('34');
+    expect(versionRow.value).toBe('35');
 
     db.close();
   });

@@ -265,13 +265,47 @@ describe('MCP tool list_agent_profiles', () => {
       });
       expect(result.isError).toBeFalsy();
       const sc = result.structuredContent as {
-        profiles: Array<{ id: string; harness_id: string; model_id: string | null }>;
+        profiles: Array<{
+          id: string;
+          harness_id: string;
+          model_id: string | null;
+          effort_level: string | null;
+        }>;
       };
       // Bootstrap seeds at least default-claude-sdk.
       const def = sc.profiles.find((p) => p.id === 'default-claude-sdk');
       expect(def).toBeDefined();
       expect(def!.harness_id).toBe('claude-sdk');
       expect(def!.model_id).toBe('claude-sonnet-4-6');
+      expect(def).toHaveProperty('effort_level', null);
+    } finally {
+      await pair.close();
+    }
+  });
+});
+
+describe('MCP tool list_agent_profiles effort_level', () => {
+  it('reports a set effort level in structured and text output', async () => {
+    getDb()
+      .prepare(
+        "UPDATE agent_profiles SET effort_level = 'high' WHERE id = 'default-claude-sdk'"
+      )
+      .run();
+    const pair = await connectPair();
+    try {
+      const result = await pair.client.callTool({
+        name: 'list_agent_profiles',
+        arguments: {},
+      });
+      expect(result.isError).toBeFalsy();
+      const sc = result.structuredContent as {
+        profiles: Array<{ id: string; effort_level: string | null }>;
+      };
+      expect(
+        sc.profiles.find((p) => p.id === 'default-claude-sdk')!.effort_level
+      ).toBe('high');
+      const text = (result.content as Array<{ text: string }>)[0].text;
+      expect(text).toMatch(/default-claude-sdk: .*effort=high\)/);
     } finally {
       await pair.close();
     }
