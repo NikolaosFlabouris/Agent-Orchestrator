@@ -67,7 +67,7 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Action: relabel, post comment with failure details
 
 **in-progress → preparing** (dev agent failure retry, same slot)
-- Trigger: dev agent exits with failure or timeout (with no salvageable work) and attempts remain
+- Trigger: dev agent exits with failure or timeout (with no salvageable work) and attempts remain, and the failure is not classified non-retryable (see "Any active state → failed")
 - Action: relabel, post failure details, immediately restart dev container in same slot
 - Attempt counter is incremented. The task does not re-enter the queue.
 
@@ -94,7 +94,7 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Action: relabel, post failure summary, free slot
 
 **in-review → needs-human-review**
-- Trigger: review agent returns verdict "unclear" or review agent fails after retries
+- Trigger: review agent returns verdict "unclear" or review agent fails after retries (a non-retryable review-agent error goes to `failed` instead — see "Any active state → failed")
 - Action: relabel, post comment asking for human intervention
 - Slot is freed
 
@@ -123,8 +123,18 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Action: stop container, delete remote branch, close PR, relabel, post comment
 
 **Any active state → failed**
-- Trigger: max retry attempts exceeded, or unrecoverable error
+- Trigger: max retry attempts exceeded, a non-retryable agent error (below), or unrecoverable error
 - Action: stop container if running, relabel, post failure details as comment
+
+*Non-retryable agent errors.* When a dev or review agent attempt fails, its recorded `error_message` (from `result.json`) and exit code are classified by `packages/server/src/failure-classifier.ts`. Errors that no retry can fix — the environment (agent image, credentials, model configuration) has to change — are `permanent`; the task moves to `failed` right after that single attempt instead of relaunching until `max_attempts` (dev) or the review retry budget runs out. The orchestrator posts an issue comment that names it a non-retryable environment error, quotes the error, and gives a hint for the category followed by "then use Extend to retry". It also records a `permanent_failure` task event and logs `permanent_failure` with the task id and category. The attempt counter moves past the attempt that ran, as it does when attempts are exhausted, so Extend works the same as for any other failed task. The pattern list is deliberately narrow:
+
+| Category | Matches | Hint |
+|---|---|---|
+| `cli_outdated` | `does not support this model`, `version <x> or newer is required` | Update and rebuild the agent image |
+| `auth` | HTTP 401/403 together with `authentication_error`, `API key is invalid`, `invalid x-api-key` or `permission_error` | Check the provider credentials |
+| `unknown_model` | HTTP 404 `not_found_error` that references a model, `model not found`, `no router for requested model` | Check the model id |
+
+Anything unrecognised stays retryable (the existing retry behaviour). So do timeouts and usage/rate limits (HTTP 429, "usage limit", "session limit", "rate limit"), which are never classified `permanent`. Matching uses only the error text, so it works whichever harness produced the message.
 
 **Terminal state (except merged) → (unqueued)**
 - Trigger: user resets task via UI
