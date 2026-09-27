@@ -95,6 +95,11 @@ direct DB edit). Save-time also runs the compatibility check **before**
 per-harness `validateConfig`, since a categorical mismatch is the
 higher-signal error.
 
+What each harness lets the operator control (`config_json` keys,
+honoured model fields, turn cap, auth-dependent flags, usage reporting,
+effort / reasoning level) is in the
+[harness configuration capabilities matrix](./04-agent-harness.md#harness-configuration-capabilities).
+
 Adding a new harness is a code change — see
 [04 - Agent Harness, Profiles, Providers & Models](./04-agent-harness.md#adding-a-new-harness).
 
@@ -132,8 +137,18 @@ actual usage.
 
 Compose a profile by picking a harness, a model (the picker is scoped to
 that harness's `supported_provider_kinds`), and any per-harness config.
-The form's `config_json` editor changes per harness — harnesses with no
-operator-tunable knobs render an empty form.
+The form's `config_json` editor changes per harness. Only `claude-code`
+has a knob today:
+
+- `max_turns` — integer, default 100, allowed range 1–10000, passed to
+  the CLI as `--max-turns N`. The run stops after that many agent turns;
+  the profile's `timeout_minutes` still applies.
+
+`claude-sdk`, `opencode` and `pi` accept no `config_json` keys — saving a
+profile with any key fails with an "unknown config key" error. None of
+the harnesses expose an effort / reasoning level; see the
+[capability matrix](./04-agent-harness.md#harness-configuration-capabilities)
+for why.
 
 `timeout_minutes` defaults to 2880 (48h) for new profiles and 120 (2h)
 for the bootstrap profile. Typical values: 120 for paid APIs to cap

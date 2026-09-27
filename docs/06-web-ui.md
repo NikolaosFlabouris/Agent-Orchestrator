@@ -92,7 +92,7 @@ The Settings page has five tabs. **The active tab is the URL**, not component st
 
 **Providers & Models.** Nested layout: the providers list is the outer view, and selecting a provider expands its model list. Provider fields: `id`, `display_name`, `kind` (anthropic / claude-subscription / openai / gemini / mistral / deepseek / openrouter / openai-compatible), `concurrency_limit`, `base_url` (required for openai-compatible, hidden for cloud kinds), and exactly one of `api_key_env_var` (env-var pointer) or `auth_token` (inline plaintext). The single form renders only the fields the selected kind declares in its `ProviderKindSpec` (served by `GET /api/provider-kinds`) — there are no per-kind form components. Model fields are `model_id`, `display_name` and an optional `context_window` (tokens) under a fixed `provider_id`. Leave `context_window` blank to let the harness use its own default; set it to a self-hosted server's real `--ctx-size` so the harness sizes compaction off the truth instead of overflowing (pi assumes 128,000).
 
-**Agent Profiles.** Operator-composed pairings. Fields: `id`, `display_name`, `harness_id` (one of the four code-defined harnesses), `model_pk` (picker scoped to the chosen harness's `supported_provider_kinds`), `timeout_minutes`, and a per-harness `config_json` form. The UI renders a different form component per `harness_id`; harnesses with no operator-tunable knobs render an empty form.
+**Agent Profiles.** Operator-composed pairings. Fields: `id`, `display_name`, `harness_id` (one of the four code-defined harnesses), `model_pk` (picker scoped to the chosen harness's `supported_provider_kinds`), `timeout_minutes`, and a per-harness `config_json` form. The form fields are chosen per `harness_id`; only `claude-code` has one (`max_turns`), the others show "No harness-specific configuration". See [Harness configuration capabilities](./04-agent-harness.md#harness-configuration-capabilities).
 
 **Credentials (read-only).** Shows which orchestrator-only env vars are set in `.env` (`FORGEJO_*`, `ORCHESTRATOR_URL`). Provider credentials are configured per-provider on the Providers & Models tab — this tab no longer enumerates LLM provider keys.
 
@@ -443,7 +443,7 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 }
 ```
 
-`POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h). The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is intentionally not validated at save — mismatches surface at task launch with a clear "harness X doesn't support kind Y" message.
+`POST /api/agent-profiles` request — required: `id`, `display_name`, `harness_id`, `model_pk`. `config_json` defaults to `{}`; `timeout_minutes` defaults to `2880` (48h). The harness module's `validateConfig` hook runs server-side on save and returns a 400 with a human-readable message if `config_json` is malformed. Harness↔provider compatibility is checked first, on save (400 with "harness X doesn't support kind Y"), and again at task launch as the authoritative gate.
 
 `DELETE /api/agent-profiles/:id` returns 409 when the profile is either global default (`settings.default_agent_profile_id` or `settings.default_review_agent_profile_id`) or when any repo or task references it in either profile column (implementation or review).
 
@@ -452,10 +452,10 @@ Nullable resource fields (`container_memory_mb`, `container_cpu_cores`) mean "us
 ```json
 {
   "harnesses": [
-    { "id": "claude-sdk",  "display_name": "Claude Agent SDK", "runtime": "sdk", "supported_provider_kinds": ["anthropic"] },
+    { "id": "claude-sdk",  "display_name": "Claude SDK",       "runtime": "sdk", "supported_provider_kinds": ["anthropic"] },
     { "id": "claude-code", "display_name": "Claude Code CLI",  "runtime": "cli", "supported_provider_kinds": ["anthropic", "claude-subscription"] },
-    { "id": "opencode",    "display_name": "OpenCode",         "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] },
-    { "id": "pi",          "display_name": "pi",               "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] }
+    { "id": "opencode",    "display_name": "OpenCode CLI",     "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] },
+    { "id": "pi",          "display_name": "Pi CLI",           "runtime": "cli", "supported_provider_kinds": ["anthropic", "openai", "gemini", "mistral", "deepseek", "openrouter", "openai-compatible"] }
   ]
 }
 ```
