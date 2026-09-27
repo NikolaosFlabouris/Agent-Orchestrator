@@ -94,7 +94,10 @@ export type EffortLevelSupport =
  *    2. Creating `packages/server/src/harnesses/<id>.ts` exporting a HarnessSpec
  *    3. Importing+registering it in `harnesses/index.ts`
  *    4. Adding a matching React form component for the UI's "Agent profile"
- *       creation flow, keyed off the harness id. */
+ *       creation flow, keyed off the harness id.
+ *    5. Adding a smoke case: static checks in `smoke/static-checks.ts` and at
+ *       least one profile or `scripts/harness-smoke.config.json` entry
+ *       (see docs/04-agent-harness.md, "Harness smoke test"). */
 export interface HarnessSpec {
   id: HarnessId;
   display_name: string;

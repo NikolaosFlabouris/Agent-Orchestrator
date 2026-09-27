@@ -309,11 +309,145 @@ This is a code change, not a settings change:
    configuration" branch).
 5. Add a column to the [capability matrix](#harness-configuration-capabilities)
    and update the "Shipped harnesses" table.
+6. Add a smoke case (see [Harness smoke test](#harness-smoke-test)):
+   give the harness its static checks in
+   `packages/server/src/smoke/static-checks.ts` (a `Record<HarnessId, …>`,
+   so the build fails until you do), and make sure it has at least one
+   case — an agent profile, or an entry in
+   `packages/server/src/scripts/harness-smoke.config.json` on a free
+   provider so it gets a live test. If it has no case, the runner exits
+   with a runner error naming it. If its event stream exposes tool calls,
+   teach `countToolCalls` in `smoke/outcome.ts` to read them.
 
 The orchestrator never reads operator-authored shell — every binary
 invocation is constructed in `buildInvocation`, which means adding a
 harness is the only way to teach the orchestrator a new way to invoke
 an agent.
+
+## Harness smoke test
+
+`packages/server/src/scripts/harness-smoke.ts` checks that every harness
+still works with the agent CLIs installed in a given agent image. It is
+the gate for promoting a freshly built image to `orchestrator-agent:latest`.
+The decision is plain code with no LLM involved, it is driven by the
+configured profiles, and it never makes a pay-per-use API call.
+
+Run it inside the orchestrator container, so provider credentials are
+resolved by `buildProviderEnv` there and never leave it:
+
+```
+docker exec orchestrator node packages/server/dist/scripts/harness-smoke.js \
+  --image orchestrator-agent:candidate --json /data/harness-smoke.json
+```
+
+| Option | Default | |
+|---|---|---|
+| `--image <tag>` | (required) | Agent image under test |
+| `--json <path>` | none | Also write the JSON report (path inside the orchestrator container) |
+| `--config <path>` | the checked-in `harness-smoke.config.json` | Built-in cases |
+| `--case-timeout <min>` | 10 | Per live attempt |
+| `--overall-timeout <min>` | 60 | Whole run; cases not reached are `skipped` |
+| `--db <path>` | `$DB_PATH` or `/data/orchestrator.db` | Opened **read-only** |
+
+Exit codes: `0` no `fail`, `1` at least one `fail`, `2` runner error (bad
+arguments, missing image, unreadable config, coverage-rule violation).
+An exit code of `0` does not by itself mean the image is promotable. Check
+`promotable` in the report.
+
+### What it tests
+
+**Cases.** One case per distinct `(harness, provider, model)` triple,
+taken from every agent profile in the DB (profile → model → provider) and
+from the built-in cases in `packages/server/src/scripts/harness-smoke.config.json`.
+The built-in cases give harnesses without a free-provider profile a live
+test (currently `opencode` and `pi` on `llama-swap-local`). Identical
+triples are deduplicated, and the report lists every profile that mapped
+to a case. **Coverage rule:** every harness in `harnesses/index.ts` needs
+at least one case, otherwise the runner exits `2` and names the harness.
+
+**Live test** (free routes only, see the cost rule below). Each case
+launches through the same path as a real task: `buildInvocation`, then
+`meta.json`/`prompt.md` in the scheduler's shape, the same container env,
+and `createAgentContainer` with the image under test. The container gets
+the same network, user, mounts and entrypoint as a real task, but carries
+a `managed-by=orchestrator-smoke` label, so the reaper and capacity
+accounting ignore it. The task is a throwaway git repo under
+`/workspaces/smoke-<run>-<case>-a<n>` (removed afterwards, along with its
+`/caches` bucket) in which `calc.py`'s `add()` subtracts. The agent is
+asked to fix it and run it. A case passes on structural signals only:
+- `result.json` has status `success`;
+- the fix holds when checked from the runner side (a separate container
+  of the image imports `calc` and checks `add()` on inputs different from
+  the prompt's);
+- at least one tool call appears in the event stream (claude-code, opencode
+  and pi all expose tool calls).
+
+A failing case is retried once. Before any launch, a connectivity
+preflight runs inside the image on the agent network (`curl` to
+the provider's `/v1/models` endpoint under `base_url`, or `api.anthropic.com` for the subscription).
+The runner never writes task or attempt rows (the DB is opened read-only),
+never calls Forgejo, and never uses a real task workspace.
+
+**Static checks** (no API calls), run inside the image under test for
+every harness:
+- each CLI is present and `--version` is readable;
+- every flag the harness modules emit appears in `--help`: `claude`
+  `--print --verbose --output-format --max-turns --model
+  --dangerously-skip-permissions --bare` (plus `--effort` when a profile
+  sets an effort level); `opencode run` `--model --format --print-logs
+  --config --dangerously-skip-permissions`; `pi` `-p --print --mode
+  --no-session --model`;
+- pi's `dist/core/model-config.d.ts` still declares every `models.json`
+  field `pi.ts` writes (`baseUrl`, `api`, `apiKey`, `compat`,
+  `supportsDeveloperRole`, `supportsReasoningEffort`, `contextWindow`);
+- `harness-sdk.ts` type-checks (`tsc --strict`) against the installed
+  `@anthropic-ai/claude-agent-sdk`. TypeScript is fetched from npm into a
+  temp dir for this check. `claude-sdk` gets no other check, because its
+  only provider kind is pay-per-use.
+
+### Cost rule
+
+| Provider | Live call? |
+|---|---|
+| `claude-subscription` | yes (subscription) |
+| `openai-compatible` whose `base_url` host is loopback, RFC1918, link-local, `host.docker.internal`, or a single-label Docker name (e.g. `llama-swap`) | yes (local, free) |
+| everything else: `anthropic`, `openai`, `gemini`, `mistral`, `deepseek`, `openrouter`, public or unparsable `openai-compatible` | **no**, reported as `not_live_tested` / `paid_provider` |
+
+The invocation for a paid case is still built, so a harness that rejects
+the profile shows up as a `fail` (`invocation_error`).
+
+### Outcomes
+
+| Outcome | Meaning |
+|---|---|
+| `pass` | Live case met every pass criterion, or a static check passed |
+| `fail` | Incompatibility with a reachable provider: rejected model / failed result (`result_failure`), fix not verified, no tool calls, timeout on the subscription, missing flag, missing schema field, type error, invocation error |
+| `skipped` | Not a verdict on the image: provider unreachable, usage/rate limit (the runner stops a container as soon as the harness parks on one), timeout on a local model (usually a cold model load), overall timeout, case not configured (e.g. a built-in case's provider isn't in the DB), type-check tooling unavailable |
+| `not_live_tested` | Paid provider; static checks only |
+
+`skipped` never counts as `fail`. **`promotable`** is true when there are
+no `fail` results (cases or static checks) **and** every harness that has a
+free route (at least one live-eligible case) has at least one passing live
+case. So a dead provider doesn't block when a built-in case for the same
+harness passes, but a harness whose free routes were all skipped does.
+
+### Output
+
+The stdout summary lists versions, static checks, cases and the
+`promotable` verdict with its blockers. Progress lines go to stderr. The
+JSON report has:
+- `versions` (`claude-code`, `opencode`, `pi`, `claude-agent-sdk`);
+- `promotable` and `promotable_blockers`;
+- `counts`;
+- `static_checks[]` (`harness_id`, `check`, `outcome`, `reason`,
+  `error_excerpt`);
+- `cases[]` (`key`, `harness_id`, `profile_ids`, `sources`, `provider_id`,
+  `provider_kind`, `model_id`, `live_eligible`, `outcome`, `reason`,
+  `error_excerpt`, `attempts`, `duration_ms`).
+
+Every credential any case could export is scrubbed from stdout, stderr
+and the report, along with common token shapes. Error excerpts are short
+and redacted.
 
 ## Providers and models
 

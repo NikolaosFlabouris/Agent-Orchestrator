@@ -156,6 +156,11 @@ const LABEL_MANAGED_BY = 'managed-by';
 const LABEL_MANAGED_BY_VALUE = 'orchestrator';
 const LABEL_TASK_ID = 'task-id';
 
+/** Agent image real tasks run in. The smoke-test runner
+ *  (scripts/harness-smoke.ts) overrides it per call to vet a freshly built
+ *  image before it is promoted to this tag. */
+export const DEFAULT_AGENT_IMAGE = 'orchestrator-agent:latest';
+
 // ---------------------------------------------------------------------------
 // Container lifecycle
 // ---------------------------------------------------------------------------
@@ -171,8 +176,10 @@ interface AgentVolumeMount {
 }
 
 export interface CreateContainerOptions {
-  task: Task;
-  repo: Repo;
+  /** Only `id` is read (for the task-id label). */
+  task: Pick<Task, 'id'>;
+  /** Only the per-repo resource-limit overrides are read. */
+  repo: Pick<Repo, 'container_memory_mb' | 'container_cpu_cores'>;
   /** Whether the harness runs the SDK script or the CLI script inside
    *  the container. Determines the entrypoint binary. */
   harnessRuntime: 'sdk' | 'cli';
@@ -181,12 +188,24 @@ export interface CreateContainerOptions {
   outputDir: string;
   cacheDir: string;
   env: string[];
+  /** Agent image tag. Defaults to DEFAULT_AGENT_IMAGE; only the smoke-test
+   *  runner passes another tag. */
+  image?: string;
+  /** Replaces the default `managed-by=orchestrator` + `task-id` labels.
+   *  The smoke-test runner uses its own label set so the container reaper,
+   *  orphan recovery and host-capacity accounting never see its containers. */
+  labels?: Record<string, string>;
 }
 
 export async function createAgentContainer(
   opts: CreateContainerOptions
 ): Promise<Docker.Container> {
   const { task, repo, harnessRuntime, workdir, taskDir, outputDir, cacheDir, env } = opts;
+  const image = opts.image ?? DEFAULT_AGENT_IMAGE;
+  const labels = opts.labels ?? {
+    [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE,
+    [LABEL_TASK_ID]: String(task.id),
+  };
 
   // The orchestrator passes in paths as they appear INSIDE its own container;
   // resolveMountSource translates each one to a daemon-visible source (host
@@ -246,12 +265,9 @@ export async function createAgentContainer(
   const cpuCores = repo.container_cpu_cores ?? DEFAULT_CONTAINER_CPU_CORES;
 
   const container = await getDocker().createContainer({
-    Image: 'orchestrator-agent:latest',
+    Image: image,
     Entrypoint: entrypoint,
-    Labels: {
-      [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE,
-      [LABEL_TASK_ID]: String(task.id),
-    },
+    Labels: labels,
     User: '1000:1000',
     Env: env,
     HostConfig: {
@@ -418,7 +434,7 @@ function ensureAgentDirs(dirs: string[]): void {
 // Network
 // ---------------------------------------------------------------------------
 
-const AGENT_NETWORK = 'agent-network';
+export const AGENT_NETWORK = 'agent-network';
 
 /**
  * Ensure the agent-network Docker network exists.
