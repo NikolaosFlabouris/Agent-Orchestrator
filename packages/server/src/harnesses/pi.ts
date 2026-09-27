@@ -37,23 +37,41 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  built-in Gemini provider "google" while reading GEMINI_API_KEY. All
  *  other cloud kinds use the same name on both sides. PI_PROVIDER_NAMES
  *  below is the canonical mapping; bumping it requires re-verifying
- *  against the provider table in the pi package's own docs
- *  (`docs/providers.md` in @earendil-works/pi-coding-agent — the
- *  "auth.json key" column is the provider name), which superseded the
- *  old pi-mono/packages/ai/src/env-api-keys.ts source reference when
- *  the project moved to github.com/earendil-works/pi.
+ *  against the pi package's own docs (`docs/providers.md` in
+ *  @earendil-works/pi-coding-agent — its environment-variable table maps
+ *  each env var to the provider name, e.g. GEMINI_API_KEY → `google`),
+ *  which superseded the old pi-mono/packages/ai/src/env-api-keys.ts
+ *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  0.84.x, which is what images/agent/Dockerfile installs. Still current
- *  there: `-p/--print` + `--mode json` + `--no-session`, `@<file>` prompt
- *  arguments (rejected only in `--mode rpc`), `<provider>/<model_id>`
- *  resolution for custom models.json providers, and the models.json
- *  fields written below (`baseUrl`, `api`, `apiKey`, `compat`,
- *  `models[].id`, `models[].contextWindow`). Pi's json mode emits an
- *  event stream (`agent_start` / `message_end` / `agent_end`), not the
- *  Claude-Code-style `{"type":"result"}` line that harness-cli.sh sums
- *  usage from — so pi attempts leave the usage columns NULL, exactly as
- *  they did before the package rename.
+ *  0.87.x (0.87.1), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 0.84.x. Verified on 0.87.1:
+ *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
+ *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
+ *      `--model <provider>/<model_id>` resolution for models.json
+ *      providers.
+ *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
+ *      every field written below: `baseUrl`, `api`, `apiKey`,
+ *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
+ *      `models[].id`, `models[].contextWindow`.
+ *    - End-to-end run of the generated agent_command for an
+ *      openai-compatible (llama-swap) profile: same read → edit → bash
+ *      tool sequence as on 0.84.4, exit 0, no thinking output.
+ *    - Minimal cloud stanzas for `anthropic` and `google` still resolve
+ *      (`--model google/<id>` reads GEMINI_API_KEY).
+ *    - Breaking changes in 0.85–0.87 only touch pi's extension/SDK APIs,
+ *      which the orchestrator doesn't use.
+ *  Pi's json mode starts with a `session` header and emits an event
+ *  stream (`agent_start` / `message_end` / `agent_end` /
+ *  `agent_settled`). Since 0.87 the system prompt also appears as a
+ *  `message_end` with `role: "system"`; harmless, since progress.log is
+ *  only stored, not parsed. There is no Claude-Code-style
+ *  `{"type":"result"}` line that harness-cli.sh sums usage from — so pi
+ *  attempts leave the usage columns NULL, exactly as they did before the
+ *  package rename. 0.87 also defaults `cacheWarming: "streaming"`: for
+ *  models that declare a prompt-cache lifetime, pi may send cache-refresh
+ *  requests when it estimates ≥ $0.05 saved. That never applies to
+ *  openai-compatible (local) models; on cloud kinds it can add requests.
  *
  *  Operator-tunable knobs (config_json): none for v1.
  *
@@ -79,9 +97,9 @@ const PI_PROVIDER_NAMES: Partial<Record<ProviderKind, string>> = {
   anthropic: 'anthropic',
   openai: 'openai',
   // Pi's built-in provider for Gemini is named "google" (it reads
-  // GEMINI_API_KEY internally for that provider — see pi-mono's
-  // env-api-keys.ts). Keep this mapping aligned with the upstream
-  // source if a future pi version renames it.
+  // GEMINI_API_KEY for that provider — see the environment-variable
+  // table in pi's docs/providers.md). Keep this mapping aligned with
+  // upstream if a future pi version renames it.
   gemini: 'google',
   mistral: 'mistral',
   deepseek: 'deepseek',
