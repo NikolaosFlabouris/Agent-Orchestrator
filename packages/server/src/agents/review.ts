@@ -12,6 +12,8 @@ import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
 import type { ForgejoClient } from '../forgejo.js';
 import { getOutputDir } from '../workspace.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
+import { classifyFailure } from '../failure-classifier.js';
+import { failTaskPermanently } from './permanent-failure.js';
 import {
   resolveMergeStrategy,
   type ForgejoMergeStrategy,
@@ -765,15 +767,33 @@ export async function processReviewVerdict(
 }
 
 /**
- * Handle review agent failure — retry or escalate.
+ * Handle review agent failure — retry or escalate. When the agent's own
+ * error is supplied and classified as permanent (see failure-classifier.ts),
+ * the task fails immediately instead of retrying.
  */
 export async function handleReviewFailure(
   task: Task,
   reviewRetryCount: number,
   forgejo: ForgejoClient,
   log: FastifyBaseLogger,
-  launchReviewContainer: (task: Task) => Promise<void>
+  launchReviewContainer: (task: Task) => Promise<void>,
+  failure?: { errorMessage?: string | null; exitCode?: number | null }
 ): Promise<{ shouldRetry: boolean; newRetryCount: number }> {
+  if (failure) {
+    const classification = classifyFailure(failure.errorMessage, failure.exitCode);
+    if (classification.kind === 'permanent') {
+      await failTaskPermanently(
+        getTask(task.id) ?? task,
+        'review',
+        classification.category,
+        failure.errorMessage ?? '',
+        forgejo,
+        log
+      );
+      return { shouldRetry: false, newRetryCount: reviewRetryCount };
+    }
+  }
+
   const repo = getRepo(task.repo_id);
   const newRetryCount = reviewRetryCount + 1;
 

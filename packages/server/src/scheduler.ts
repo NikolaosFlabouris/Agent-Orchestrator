@@ -1759,7 +1759,8 @@ export class Scheduler {
         result.error_message || `Agent exited with failure status (exit code ${result.exit_code})`,
         this.forgejo,
         this.log,
-        (t, fb) => this.launchDevContainer(t, fb)
+        (t, fb) => this.launchDevContainer(t, fb),
+        result.exit_code
       );
     }
   }
@@ -1774,13 +1775,15 @@ export class Scheduler {
     const reviewRetryCount = state?.reviewRetryCount ?? 0;
 
     if (result.status !== 'success') {
-      // Review agent itself failed — retry or escalate
+      // Review agent itself failed — retry or escalate (or fail outright
+      // on a non-retryable environment error)
       const { shouldRetry, newRetryCount } = await handleReviewFailure(
         task,
         reviewRetryCount,
         this.forgejo,
         this.log,
-        (t) => this.launchReviewContainer(t)
+        (t) => this.launchReviewContainer(t),
+        { errorMessage: result.error_message, exitCode: result.exit_code }
       );
       if (shouldRetry && state) {
         state.reviewRetryCount = newRetryCount;

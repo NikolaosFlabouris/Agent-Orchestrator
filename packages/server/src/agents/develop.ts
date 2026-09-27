@@ -26,6 +26,8 @@ import {
   formatDelay,
 } from '../git-outage.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
+import { classifyFailure } from '../failure-classifier.js';
+import { failTaskPermanently } from './permanent-failure.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /** Timeout for the salvage force-push. Generous — a large branch over a slow
@@ -791,16 +793,33 @@ export async function postDevAgent(
 }
 
 /**
- * Handle dev agent failure — retry or mark as failed.
+ * Handle dev agent failure — retry or mark as failed. A failure classified as
+ * permanent (see failure-classifier.ts) fails the task immediately instead of
+ * relaunching until attempts run out.
  */
 export async function handleDevFailure(
   task: Task,
   errorDetail: string,
   forgejo: ForgejoClient,
   log: FastifyBaseLogger,
-  launchDevContainer: (task: Task, feedback?: string | null) => Promise<void>
+  launchDevContainer: (task: Task, feedback?: string | null) => Promise<void>,
+  exitCode?: number | null
 ): Promise<void> {
   const freshTask = getTask(task.id)!;
+
+  const classification = classifyFailure(errorDetail, exitCode);
+  if (classification.kind === 'permanent') {
+    await failTaskPermanently(
+      freshTask,
+      'develop',
+      classification.category,
+      errorDetail,
+      forgejo,
+      log
+    );
+    return;
+  }
+
   const repo = getRepo(task.repo_id);
   const newAttempt = freshTask.attempt + 1;
   const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
