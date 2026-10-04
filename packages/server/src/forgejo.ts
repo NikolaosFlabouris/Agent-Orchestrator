@@ -264,11 +264,22 @@ export class ForgejoClient {
 
   // ---- Labels ----
 
+  /** Fetch every label in the repo, paging until a short or empty page.
+   *  Without paging, Forgejo returns only its default first page, and labels
+   *  past it would look missing to callers. */
   async getLabels(repo: Repo): Promise<ForgejoLabel[]> {
-    return this.request<ForgejoLabel[]>(
-      'GET',
-      `${this.repoPath(repo)}/labels`
-    );
+    const limit = 50;
+    const all: ForgejoLabel[] = [];
+    for (let page = 1; ; page++) {
+      const batch =
+        (await this.request<ForgejoLabel[]>(
+          'GET',
+          `${this.repoPath(repo)}/labels?page=${page}&limit=${limit}`
+        )) ?? [];
+      all.push(...batch);
+      if (batch.length < limit) break;
+    }
+    return all;
   }
 
   async createLabel(
@@ -301,10 +312,29 @@ export class ForgejoClient {
     );
   }
 
+  /** Re-fetch the repo's labels and rebuild its name → id cache. When the
+   *  forge has several labels with the same name, the lowest (oldest) id
+   *  wins, so resolution is deterministic. */
+  private async refreshLabelCache(repo: Repo): Promise<Map<string, number>> {
+    const labels = await this.getLabels(repo);
+    const map = new Map<string, number>();
+    for (const label of labels) {
+      const existing = map.get(label.name);
+      if (existing === undefined || label.id < existing) {
+        map.set(label.name, label.id);
+      }
+    }
+    this.labelCache.set(`${repo.owner}/${repo.name}`, map);
+    return map;
+  }
+
   /**
    * Replace labels on an issue using label names instead of IDs.
-   * Resolves names to IDs via the repo's label list, creating missing labels as needed.
-   * Uses a per-repo cache to avoid repeated API calls.
+   * Resolves names to IDs via a per-repo cache. On a miss the cache is
+   * refreshed from the forge (at most once per call) before a label is
+   * created, so labels added by humans or other tools are reused rather
+   * than duplicated. If creation fails, the cache is refreshed once more in
+   * case another writer created the label concurrently.
    */
   async replaceLabelByNames(
     repo: Repo,
@@ -312,30 +342,40 @@ export class ForgejoClient {
     labelNames: string[]
   ): Promise<void> {
     const cacheKey = `${repo.owner}/${repo.name}`;
-    if (!this.labelCache.has(cacheKey)) {
-      const labels = await this.getLabels(repo);
-      const map = new Map<string, number>();
-      for (const label of labels) {
-        map.set(label.name, label.id);
-      }
-      this.labelCache.set(cacheKey, map);
+    let cache = this.labelCache.get(cacheKey);
+    let refreshed = false;
+    if (!cache) {
+      cache = await this.refreshLabelCache(repo);
+      refreshed = true;
     }
 
-    const cache = this.labelCache.get(cacheKey)!;
     const ids: number[] = [];
 
     for (const name of labelNames) {
       let id = cache.get(name);
+      if (id === undefined && !refreshed) {
+        // Cache may be stale — re-fetch before deciding the label is missing
+        cache = await this.refreshLabelCache(repo);
+        refreshed = true;
+        id = cache.get(name);
+      }
       if (id === undefined) {
-        // Label doesn't exist — create it
+        // Label genuinely doesn't exist — create it
         const isExclusive = name.includes('/');
-        const label = await this.createLabel(repo, {
-          name,
-          color: '#0075ca',
-          exclusive: isExclusive,
-        });
-        cache.set(name, label.id);
-        id = label.id;
+        try {
+          const label = await this.createLabel(repo, {
+            name,
+            color: '#0075ca',
+            exclusive: isExclusive,
+          });
+          id = label.id;
+          cache.set(name, id);
+        } catch (err) {
+          // Another writer may have created it in the meantime
+          cache = await this.refreshLabelCache(repo);
+          id = cache.get(name);
+          if (id === undefined) throw err;
+        }
       }
       ids.push(id);
     }
