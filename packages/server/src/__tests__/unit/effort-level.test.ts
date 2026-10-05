@@ -79,13 +79,13 @@ const PRE_FEATURE_INVOCATIONS: Record<string, unknown> = {
     resolved_model: "m-1",
   },
   'opencode/anthropic': {
-    agent_command: "opencode run \"$(cat '/task/prompt.md')\" --model 'anthropic/m-1' --format json --dangerously-skip-permissions --print-logs",
+    agent_command: "opencode run \"$(cat '/task/prompt.md')\" --model 'anthropic/m-1' --format json --auto --print-logs",
     config_files: [],
     extra_env: {},
     resolved_model: "anthropic/m-1",
   },
   'opencode/openai-compatible': {
-    agent_command: "jq -n --arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" --arg provider 'openai-compatible' --arg url 'http://192.168.1.10:11434/v1' --arg name 'P' --arg model_id 'm-1' --arg model_name 'M' '{provider:{($provider):{npm:\"@ai-sdk/openai-compatible\",name:$name,options:{baseURL:$url,apiKey:$token},models:{($model_id):{name:$model_name}}}},permission:{\"*\":\"allow\"}}' > /tmp/opencode.json && opencode run \"$(cat '/task/prompt.md')\" --config /tmp/opencode.json --model 'openai-compatible/m-1' --format json --dangerously-skip-permissions --print-logs",
+    agent_command: "jq -n --arg token \"${OPENAI_COMPAT_AUTH_TOKEN:-ollama}\" --arg provider 'openai-compatible' --arg url 'http://192.168.1.10:11434/v1' --arg name 'P' --arg model_id 'm-1' --arg model_name 'M' '{provider:{($provider):{npm:\"@ai-sdk/openai-compatible\",name:$name,options:{baseURL:$url,apiKey:$token},models:{($model_id):{name:$model_name}}}},permission:{\"*\":\"allow\"}}' > /tmp/opencode.json && OPENCODE_CONFIG=/tmp/opencode.json opencode run \"$(cat '/task/prompt.md')\" --model 'openai-compatible/m-1' --format json --auto --print-logs",
     config_files: [],
     extra_env: {},
     resolved_model: "openai-compatible/m-1",

@@ -206,8 +206,10 @@ describe('opencode harness', () => {
     expect(inv.agent_command).toContain('jq -n');
     expect(inv.agent_command).toContain('/tmp/opencode.json');
     expect(inv.agent_command).not.toContain('/repo/opencode.json');
-    // OpenCode is pointed at the /tmp file via --config.
-    expect(inv.agent_command).toContain('--config /tmp/opencode.json');
+    // OpenCode is pointed at the /tmp file via OPENCODE_CONFIG (`opencode
+    // run` has no --config flag and rejects one).
+    expect(inv.agent_command).toContain('OPENCODE_CONFIG=/tmp/opencode.json opencode run');
+    expect(inv.agent_command).not.toContain('--config');
     // The base_url and model id reach the config via jq --arg, not
     // direct shell interpolation.
     expect(inv.agent_command).toContain('http://192.168.1.10:11434/v1');
@@ -262,10 +264,10 @@ describe('opencode harness', () => {
           "models:{($model_id):{name:$model_name}}}}," +
           "permission:{\"*\":\"allow\"}}' " +
           "> /tmp/opencode.json && " +
+          "OPENCODE_CONFIG=/tmp/opencode.json " +
           "opencode run \"$(cat '/task/prompt.md')\" " +
-          "--config /tmp/opencode.json " +
           "--model 'openai-compatible/qwen2.5-coder:14b' " +
-          "--format json --dangerously-skip-permissions --print-logs"
+          "--format json --auto --print-logs"
       );
       expect(inv.agent_command).not.toContain('limit');
       expect(inv.agent_command).not.toContain('--argjson');

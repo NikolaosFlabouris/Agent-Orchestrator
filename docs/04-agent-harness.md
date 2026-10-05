@@ -229,7 +229,7 @@ Not to be confused with the per-attempt **effort metrics**
 |---|---|---|---|
 | `claude-sdk` | sdk | `anthropic` | `query()` from `@anthropic-ai/claude-agent-sdk`. Reads `meta.model` and runs the SDK call directly. The simplest, most-tested harness; the v21 bootstrap profile uses this. |
 | `claude-code` | cli | `anthropic`, `claude-subscription` | Wraps the `claude` CLI with `--print --verbose --dangerously-skip-permissions --output-format stream-json --max-turns N`. `--bare` (skips OAuth/keychain reads, CLAUDE.md loading and MCP discovery) is added **only for `anthropic` (API key) providers**; it would also disable the OAuth path that reads `CLAUDE_CODE_OAUTH_TOKEN`, so `claude-subscription` runs omit it — see the header comment in `harnesses/claude-code.ts`. |
-| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | Wraps `opencode run "$(cat /task/prompt.md)" --format json --dangerously-skip-permissions --print-logs`. For `openai-compatible`, `agent_command` first builds `/tmp/opencode.json` in-container with `jq -n` and passes it via `--config`; the orchestrator writes no `opencode.json` anywhere (nothing lands in `/repo/`, so the token never touches a persisted path). For cloud kinds there is no config file and `extra_env` is empty — OpenCode uses its built-in provider definitions and the standard credential env var the scheduler exports. |
+| `opencode` | cli | every kind OpenCode supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | Wraps `opencode run "$(cat /task/prompt.md)" --format json --auto --print-logs`. For `openai-compatible`, `agent_command` first builds `/tmp/opencode.json` in-container with `jq -n` and points OpenCode at it with `OPENCODE_CONFIG=/tmp/opencode.json` (`opencode run` has no `--config` flag); the orchestrator writes no `opencode.json` anywhere (nothing lands in `/repo/`, so the token never touches a persisted path). For cloud kinds there is no config file and `extra_env` is empty — OpenCode uses its built-in provider definitions and the standard credential env var the scheduler exports. |
 | `pi` | cli | every kind pi supports (anthropic, openai, gemini, mistral, deepseek, openrouter, openai-compatible) | `@earendil-works/pi-coding-agent`. Uses `pi -p --mode json --no-session --model <provider-prefixed-id> @/task/prompt.md`. pi reads `~/.pi/agent/models.json`, outside `/repo/`, which the orchestrator can't write from outside the container, so `agent_command` starts with `mkdir -p ~/.pi/agent && jq -n ... > ~/.pi/agent/models.json && pi ...`. The file is written for **every** kind: a custom provider stanza (URL, `openai-completions` API, token) for `openai-compatible`, and a minimal provider + model stanza with no credential for cloud kinds. Installed by `images/agent/Dockerfile` as `@earendil-works/pi-coding-agent@^0.87.1` (verified against 0.87.x). See `harnesses/pi.ts`. |
 
 ### Harness configuration capabilities
@@ -392,11 +392,14 @@ never calls Forgejo, and never uses a real task workspace.
 every harness:
 - each CLI is present and `--version` is readable;
 - every flag the harness modules emit appears in `--help`: `claude`
-  `--print --verbose --output-format --max-turns --model
+  `--print --verbose --output-format --model
   --dangerously-skip-permissions --bare` (plus `--effort` when a profile
   sets an effort level); `opencode run` `--model --format --print-logs
-  --config --dangerously-skip-permissions`; `pi` `-p --print --mode
-  --no-session --model`;
+  --auto`; `pi` `-p --print --mode --no-session --model`;
+- flags the CLI accepts but hides from `--help` (`claude --max-turns`)
+  are still accepted (`hidden_flags`): the check runs
+  `claude --max-turns 1 --orchestrator-smoke-unknown-flag` and passes
+  only when the CLI rejects the sentinel flag rather than `--max-turns`;
 - pi's `dist/core/model-config.d.ts` still declares every `models.json`
   field `pi.ts` writes (`baseUrl`, `api`, `apiKey`, `compat`,
   `supportsDeveloperRole`, `supportsReasoningEffort`, `contextWindow`);
