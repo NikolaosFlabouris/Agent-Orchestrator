@@ -31,7 +31,6 @@ export const REQUIRED_FLAGS: Record<'claude-code' | 'opencode' | 'pi', string[]>
     '--print',
     '--verbose',
     '--output-format',
-    '--max-turns',
     '--model',
     '--dangerously-skip-permissions',
     '--bare',
@@ -40,11 +39,24 @@ export const REQUIRED_FLAGS: Record<'claude-code' | 'opencode' | 'pi', string[]>
     '--model',
     '--format',
     '--print-logs',
-    '--config',
-    '--dangerously-skip-permissions',
+    '--auto',
   ],
   pi: ['-p', '--print', '--mode', '--no-session', '--model'],
 };
+
+/** Flags a harness module emits that the CLI accepts but leaves out of
+ *  `--help` (claude hides `--max-turns`), each with a
+ *  sample value when it takes one. They can't be checked against help
+ *  output, so `hidden_flags` passes them to the CLI followed by an
+ *  unknown sentinel flag: the CLI rejects the first option it doesn't
+ *  know, so seeing the sentinel rejected means every flag before it was
+ *  accepted. */
+export const HIDDEN_FLAGS: Record<'claude-code', Array<[flag: string, value?: string]>> = {
+  'claude-code': [['--max-turns', '1']],
+};
+
+/** Deliberately unknown flag ending a `hidden_flags` probe. */
+export const PROBE_SENTINEL_FLAG = '--orchestrator-smoke-unknown-flag';
 
 /** Fields of pi's `models.json` that harnesses/pi.ts writes, checked
  *  against the installed `dist/core/model-config.d.ts`. */
@@ -108,6 +120,43 @@ function helpFlagsCheck(helpCommand: string, flags: string[]): StaticCheckSpec {
   };
 }
 
+function hiddenFlagsCheck(bin: string, flags: Array<[flag: string, value?: string]>): StaticCheckSpec {
+  const argv = flags.flatMap(([f, v]) => (v === undefined ? [f] : [f, v]));
+  const command = `${bin} ${[...argv, PROBE_SENTINEL_FLAG].join(' ')}`;
+  return {
+    name: 'hidden_flags',
+    // stdin from /dev/null so a CLI that somehow accepts the sentinel
+    // can't sit waiting for input.
+    script: `${command} < /dev/null 2>&1`,
+    evaluate({ exitCode, output }) {
+      if (exitCode === 127) return { outcome: 'fail', reason: 'cli_missing', detail: output };
+      if (exitCode === null) return { outcome: 'fail', reason: 'probe_timeout' };
+      const rejected = flags.map(([f]) => f).filter((f) => rejectsFlag(output, f));
+      if (rejected.length > 0) {
+        return {
+          outcome: 'fail',
+          reason: 'flag_rejected',
+          detail: `${bin} rejects: ${rejected.join(', ')}`,
+        };
+      }
+      if (!rejectsFlag(output, PROBE_SENTINEL_FLAG)) {
+        return {
+          outcome: 'fail',
+          reason: 'probe_inconclusive',
+          detail: `${command} did not report ${PROBE_SENTINEL_FLAG} as unknown:\n${output}`,
+        };
+      }
+      return { outcome: 'pass' };
+    },
+  };
+}
+
+/** `true` when CLI output reports `flag` as an unknown option
+ *  (commander's "unknown option '--x'"). */
+function rejectsFlag(output: string, flag: string): boolean {
+  return output.includes(`unknown option '${flag}'`);
+}
+
 /** Exit code the type-check script uses for "couldn't fetch the tooling"
  *  — an environment problem, reported as skipped rather than fail. */
 const TOOLING_UNAVAILABLE_EXIT = 90;
@@ -146,6 +195,7 @@ const STATIC_CHECKS: Record<HarnessId, (extraFlags: string[]) => StaticCheckSpec
   'claude-code': (extra) => [
     versionCheck('claude', 'claude-code'),
     helpFlagsCheck('claude --help', [...REQUIRED_FLAGS['claude-code'], ...extra]),
+    hiddenFlagsCheck('claude', HIDDEN_FLAGS['claude-code']),
   ],
   opencode: (extra) => [
     versionCheck('opencode', 'opencode'),

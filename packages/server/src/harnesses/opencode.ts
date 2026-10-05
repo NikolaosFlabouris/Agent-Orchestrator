@@ -28,7 +28,9 @@ const OPENCODE_EFFORT_LEVEL_REASON =
  *      at OpenCode's generic `@ai-sdk/openai-compatible` npm provider.
  *      The config is built INSIDE the agent container at
  *      runtime by a `jq -n` step in agent_command, written to
- *      `/tmp/opencode.json`, and passed to OpenCode via `--config`.
+ *      `/tmp/opencode.json`, and passed to OpenCode via the
+ *      `OPENCODE_CONFIG` env var (`opencode run` has no `--config` flag;
+ *      its strict arg parser rejects one and prints usage).
  *      The orchestrator never writes any opencode.json — that's the
  *      key property for H3.
  *
@@ -41,6 +43,10 @@ const OPENCODE_EFFORT_LEVEL_REASON =
  *  for the duration of the agent run. /tmp is a container-internal
  *  tmpfs that's torn down with the container, so the token never
  *  touches a persistent location.
+ *
+ *  Permissions: `--auto` auto-approves every permission prompt. It
+ *  replaced `--dangerously-skip-permissions`, which OpenCode keeps only as
+ *  a hidden alias.
  *
  *  Output format: --format json + --print-logs gives the machine-
  *  readable event stream + log capture the harness expects.
@@ -127,10 +133,10 @@ export const opencodeHarness: HarnessSpec = {
       return {
         agent_command:
           `${writeConfig} && ` +
+          `OPENCODE_CONFIG=/tmp/opencode.json ` +
           `opencode run "$(cat ${sq(promptFilePath)})" ` +
-          `--config /tmp/opencode.json ` +
           `--model ${sq(resolved_model)} ` +
-          `--format json --dangerously-skip-permissions --print-logs`,
+          `--format json --auto --print-logs`,
         config_files: [],
         extra_env: {},
         resolved_model,
@@ -148,7 +154,7 @@ export const opencodeHarness: HarnessSpec = {
       agent_command:
         `opencode run "$(cat ${sq(promptFilePath)})" ` +
         `--model ${sq(resolved_model)} ` +
-        `--format json --dangerously-skip-permissions --print-logs`,
+        `--format json --auto --print-logs`,
       config_files: [],
       extra_env: {},
       resolved_model,

@@ -31,8 +31,10 @@ import {
 import {
   REQUIRED_FLAGS,
   PI_MODELS_JSON_FIELDS,
+  PROBE_SENTINEL_FLAG,
   declaresField,
   helpHasFlag,
+  staticChecksFor,
 } from '../../smoke/static-checks.js';
 import {
   VERIFY_SCRIPT,
@@ -429,6 +431,24 @@ describe('static check helpers', () => {
     expect(helpHasFlag(help, '--mode')).toBe(false);
   });
 
+  it('hidden_flags passes only when the sentinel, not a hidden flag, is rejected', () => {
+    const check = staticChecksFor('claude-code').find((c) => c.name === 'hidden_flags')!;
+    expect(check.script).toBe(`claude --max-turns 1 ${PROBE_SENTINEL_FLAG} < /dev/null 2>&1`);
+    expect(
+      check.evaluate({ exitCode: 1, output: `error: unknown option '${PROBE_SENTINEL_FLAG}'\n` })
+    ).toEqual({ outcome: 'pass' });
+    expect(
+      check.evaluate({ exitCode: 1, output: "error: unknown option '--max-turns'\n" })
+    ).toMatchObject({ outcome: 'fail', reason: 'flag_rejected', detail: 'claude rejects: --max-turns' });
+    expect(check.evaluate({ exitCode: 0, output: 'hello' })).toMatchObject({
+      outcome: 'fail',
+      reason: 'probe_inconclusive',
+    });
+    expect(check.evaluate({ exitCode: 127, output: 'not found' })).toMatchObject({
+      reason: 'cli_missing',
+    });
+  });
+
   it('declaresField matches property declarations', () => {
     const dts = 'baseUrl?: string;\n  api: Api;\n  compat?: { supportsDeveloperRole?: boolean }';
     expect(declaresField(dts, 'baseUrl')).toBe(true);
@@ -550,6 +570,8 @@ interface FakeDriverOptions {
   /** Per-harness scripted behaviour for each successive launch. */
   behaviour?: Partial<Record<HarnessId, Array<'fix' | 'no-fix' | 'model-error'>>>;
   missingFlags?: string[];
+  /** Hidden flags the CLI rejects as unknown in the hidden_flags probe. */
+  rejectedFlags?: string[];
 }
 
 function fakeDriver(o: FakeDriverOptions = {}) {
@@ -570,6 +592,10 @@ function fakeDriver(o: FakeDriverOptions = {}) {
         return { exitCode: calc.includes('a + b') ? 0 : 1, output: '' };
       }
       if (s.includes('--version')) return { exitCode: 0, output: `1.2.3 ${DUMMY_OAUTH}\n` };
+      if (s.includes(PROBE_SENTINEL_FLAG)) {
+        const rejected = o.rejectedFlags?.find((f) => s.includes(`${f} `)) ?? PROBE_SENTINEL_FLAG;
+        return { exitCode: 1, output: `error: unknown option '${rejected}'\n` };
+      }
       if (s.includes('--help')) {
         const all = [...Object.values(REQUIRED_FLAGS).flat(), '--effort'].filter(
           (f) => !(o.missingFlags ?? []).includes(f)
@@ -786,6 +812,19 @@ describe('runSmoke / runCli', () => {
     );
     expect(help).toMatchObject({ outcome: 'fail', reason: 'missing_flag' });
     expect(help.error_excerpt).toMatch(/--effort/);
+  });
+
+  it('fails a static check when the CLI rejects a hidden flag', async () => {
+    const { driver } = fakeDriver({ rejectedFlags: ['--max-turns'] });
+    const jsonPath = path.join(tmp, 'report.json');
+    const code = await runCli(['--image', 'img', '--json', jsonPath], deps(driver));
+    expect(code).toBe(EXIT_FAIL);
+    const report = JSON.parse(await fsp.readFile(jsonPath, 'utf-8'));
+    const hidden = report.static_checks.find(
+      (s: StaticCheckResult) => s.harness_id === 'claude-code' && s.check === 'hidden_flags'
+    );
+    expect(hidden).toMatchObject({ outcome: 'fail', reason: 'flag_rejected' });
+    expect(hidden.error_excerpt).toMatch(/--max-turns/);
   });
 
   it('exits 2 naming an uncovered harness', async () => {
