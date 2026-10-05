@@ -240,10 +240,10 @@ Orchestrator behaviour below is traced to `packages/server/src/harnesses/*.ts`,
 the effort row were observed in the agent image built 2026-08-16 (Claude
 Code 2.1.232, opencode 1.18.18, `@anthropic-ai/claude-agent-sdk`
 `sdk.d.ts`) and re-checked on Claude Code 2.1.283, opencode 1.18.32 and
-agent SDK 0.3.283. The pi column reflects pi 0.87.x, re-verified on
-0.87.1 (see the header comment in `harnesses/pi.ts`).
+agent SDK 0.3.283. The pi column reflects pi 1.0.x, re-verified on
+1.0.3 (see the header comment in `harnesses/pi.ts`).
 `images/agent/Dockerfile` leaves claude-code, opencode and the agent SDK
-unpinned (pi is `^0.87.1`), so re-check these when the image is rebuilt.
+unpinned (pi is `~1.0.3`), so re-check these when the image is rebuilt.
 
 | | `claude-code` | `claude-sdk` | `opencode` | `pi` |
 |---|---|---|---|---|
@@ -641,7 +641,7 @@ done
 Status is derived from the agent's exit code: 124 is `timeout`, any other
 non-zero code is `failure` (with the error text taken from Claude Code's final
 `{"type":"result"}` event when `is_error` is set, else the last 5 log lines),
-and 0 is `success` — with one exception. pi (observed on 0.84.4 and 0.87.1)
+and 0 is `success` — with one exception. pi (observed on 0.84.4, 0.87.1 and 1.0.3)
 exits 0 even when every model request failed (unreachable `baseUrl`, unknown
 model id, invalid API key), so the harness also inspects pi's JSON-mode event
 stream when the exit code is 0. pi retries failed requests itself; each

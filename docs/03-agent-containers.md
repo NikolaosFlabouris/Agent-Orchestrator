@@ -64,7 +64,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 # Agent CLIs and SDK (npm-distributed)
 RUN npm install -g @anthropic-ai/claude-code \
     && npm install -g opencode-ai \
-    && npm install -g @earendil-works/pi-coding-agent@^0.87.1 \
+    && npm install -g @earendil-works/pi-coding-agent@~1.0.3 \
     && npm install -g @anthropic-ai/claude-agent-sdk
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts

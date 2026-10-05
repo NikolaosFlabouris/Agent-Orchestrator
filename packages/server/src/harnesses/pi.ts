@@ -44,23 +44,34 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  0.87.x (0.87.1), which is what images/agent/Dockerfile installs. No
- *  harness change was needed coming from 0.84.x. Verified on 0.87.1:
+ *  1.0.x (1.0.3), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 0.87.x (nor from 0.84.x to
+ *  0.87.x before that). Verified on 1.0.3:
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
- *      providers.
+ *      providers. Since 1.0.0 `--provider` without `--model` is an
+ *      error; the harness never passes `--provider`.
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
- *      `models[].id`, `models[].contextWindow`.
- *    - End-to-end run of the generated agent_command for an
- *      openai-compatible (llama-swap) profile: same read → edit → bash
- *      tool sequence as on 0.84.4, exit 0, no thinking output.
+ *      `models[].id`, `models[].contextWindow`. The only schema change
+ *      since 0.87.1 is the additive `samplingParamsByThinkingLevel`.
+ *    - The generated agent_command against a stub openai-compatible
+ *      server produces the same json-mode event sequence as 0.87.1
+ *      (event types listed below), sends the same default tool set
+ *      (read, bash, edit, write — the codemode / tool_search / MCP
+ *      built-in extensions added in 0.99 are not enabled by default),
+ *      and exits 0. An unreachable baseUrl still exits 0 with a final
+ *      `agent_end` whose last message has `stopReason: "error"`, which
+ *      harness-cli.sh's pi_terminal_error relies on.
  *    - Minimal cloud stanzas for `anthropic` and `google` still resolve
  *      (`--model google/<id>` reads GEMINI_API_KEY).
- *    - Breaking changes in 0.85–0.87 only touch pi's extension/SDK APIs,
- *      which the orchestrator doesn't use.
+ *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
+ *      codemode APIs, MCP, and the Azure provider's name
+ *      (`azure-openai-responses` → `azure`) — none of which the
+ *      orchestrator uses. From 1.0.1 the npm package no longer ships
+ *      npm-shrinkwrap.json, so transitive dependencies float on rebuild.
  *  Pi's json mode starts with a `session` header and emits an event
  *  stream (`agent_start` / `message_end` / `agent_end` /
  *  `agent_settled`). Since 0.87 the system prompt also appears as a
