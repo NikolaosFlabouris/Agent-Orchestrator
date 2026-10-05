@@ -70,13 +70,16 @@ RUN npm install -g opencode-ai
 # Invoked non-interactively with `pi -p "<prompt>"` for autonomous dev-env use,
 # same pattern as OpenCode. The package was renamed from
 # @mariozechner/pi-coding-agent when the project moved to
-# github.com/earendil-works/pi. Ranged at ^0.87.1 (0.87.x) because
+# github.com/earendil-works/pi. Ranged at ~1.0.3 (1.0.x) because
 # packages/server/src/harnesses/pi.ts is verified against that line's CLI
 # flags, models.json schema and json-mode event stream (see its header
 # comment) — patches still float on rebuild, but moving to a new minor
-# line (0.88, …) means re-verifying the harness first and recording it
-# there. The other two CLIs above float unpinned.
-RUN npm install -g @earendil-works/pi-coding-agent@^0.87.1
+# line (1.1, …) means re-verifying the harness first and recording it
+# there. Tilde rather than caret: pi ships breaking changes in minor (and
+# even patch) releases despite being 1.x. Since 1.0.1 the package no
+# longer ships npm-shrinkwrap.json, so its transitive dependencies float
+# on rebuild too. The other two CLIs above float unpinned.
+RUN npm install -g @earendil-works/pi-coding-agent@~1.0.3
 
 # Install Claude Agent SDK for TypeScript harness
 RUN npm install -g @anthropic-ai/claude-agent-sdk

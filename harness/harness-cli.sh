@@ -108,10 +108,10 @@ result_events() {
 }
 
 # Detect a pi run that failed but still exited 0, reading its JSON-mode event
-# stream on stdin. pi (observed on 0.84.4 and 0.87.1) exits 0 even when every
-# model request failed — unreachable baseUrl, unknown model id, invalid API
-# key — and never emits Claude Code's {"type":"result"} event, so without this
-# such a run was recorded as `success`. pi retries on its own: every attempt
+# stream on stdin. pi (observed on 0.84.4, 0.87.1 and 1.0.3) exits 0 even when
+# every model request failed — unreachable baseUrl, unknown model id, invalid
+# API key — and never emits Claude Code's {"type":"result"} event, so without
+# this such a run was recorded as `success`. pi retries on its own: every attempt
 # ends with a top-level {"type":"agent_end","messages":[...],"willRetry":bool}
 # event, and only the LAST one (willRetry false or absent) is terminal. When
 # that event's final message is an assistant message with stopReason "error",
