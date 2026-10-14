@@ -44,21 +44,23 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  1.0.x (1.0.3), which is what images/agent/Dockerfile installs. No
- *  harness change was needed coming from 0.87.x (nor from 0.84.x to
- *  0.87.x before that). Verified on 1.0.3:
+ *  1.1.x (1.1.0), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 1.0.x (nor from 0.87.x to 1.0.x
+ *  or 0.84.x to 0.87.x before that). Verified on 1.1.0:
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
  *      providers. Since 1.0.0 `--provider` without `--model` is an
- *      error; the harness never passes `--provider`.
+ *      error; the harness never passes `--provider`. The only `--help`
+ *      change since 1.0.4 is the additive `--tools +name/-name` syntax.
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
- *      `models[].id`, `models[].contextWindow`. The only schema change
- *      since 0.87.1 is the additive `samplingParamsByThinkingLevel`.
+ *      `models[].id`, `models[].contextWindow`. The file is unchanged
+ *      from 1.0.4; the only schema change since 0.87.1 is the additive
+ *      `samplingParamsByThinkingLevel` (1.0.x).
  *    - The generated agent_command against a stub openai-compatible
- *      server produces the same json-mode event sequence as 0.87.1
+ *      server produces the same json-mode event sequence as 1.0.4
  *      (event types listed below), sends the same default tool set
  *      (read, bash, edit, write — the codemode / tool_search / MCP
  *      built-in extensions added in 0.99 are not enabled by default),
@@ -70,12 +72,18 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
  *      codemode APIs, MCP, and the Azure provider's name
  *      (`azure-openai-responses` → `azure`) — none of which the
- *      orchestrator uses. From 1.0.1 the npm package no longer ships
- *      npm-shrinkwrap.json, so transitive dependencies float on rebuild.
+ *      orchestrator uses. 1.1.0 has no breaking changes listed. From
+ *      1.0.1 the npm package no longer ships npm-shrinkwrap.json, so
+ *      transitive dependencies float on rebuild.
+ *    - As on 1.0.4, `pi -p` reads piped stdin until EOF before starting,
+ *      so a run whose stdin is a pipe that never closes hangs. The
+ *      harness smoke runs don't hit this, so agent_command leaves stdin
+ *      alone; add `</dev/null` if a launcher ever pipes stdin in.
  *  Pi's json mode starts with a `session` header and emits an event
  *  stream (`agent_start` / `message_end` / `agent_end` /
- *  `agent_settled`). Since 0.87 the system prompt also appears as a
- *  `message_end` with `role: "system"`; harmless, since progress.log is
+ *  `agent_settled`; 1.1 adds an `aborted` boolean to `agent_settled`).
+ *  Since 0.87 the system prompt also appears as a `message_end` with
+ *  `role: "system"`; harmless, since progress.log is
  *  only stored, not parsed. There is no Claude-Code-style
  *  `{"type":"result"}` line that harness-cli.sh sums usage from — so pi
  *  attempts leave the usage columns NULL, exactly as they did before the
