@@ -4,6 +4,7 @@ import { TERMINAL_STATUSES } from '@orchestrator/shared';
 import { getRepo, getTask, getDb } from './db.js';
 import { updateTaskWithSync, recordTaskEvent } from './state-sync.js';
 import type { ForgejoClient } from './forgejo.js';
+import { replaceStatusLabel } from './status-label.js';
 import {
   getContainer,
   stopContainer,
@@ -67,9 +68,7 @@ export async function cancelTask(
     } catch { /* best effort */ }
 
     try {
-      await forgejo.replaceLabelByNames(repo, task.issue_id, [
-        'status/cancelled',
-      ]);
+      await replaceStatusLabel(forgejo, repo, task.issue_id, 'status/cancelled');
     } catch { /* best effort */ }
   }
 
@@ -155,9 +154,7 @@ export async function closeTask(
     } catch { /* best effort */ }
 
     try {
-      await forgejo.replaceLabelByNames(repo, task.issue_id, [
-        'status/cancelled',
-      ]);
+      await replaceStatusLabel(forgejo, repo, task.issue_id, 'status/cancelled');
     } catch { /* best effort */ }
 
     try {

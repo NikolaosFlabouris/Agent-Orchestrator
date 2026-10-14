@@ -5,6 +5,7 @@ import { buildTaskView } from './task-view.js';
 import { sendStreamComplete } from './ws/output.js';
 import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { ForgejoClient } from './forgejo.js';
+import { replaceStatusLabel } from './status-label.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 let _forgejo: ForgejoClient | null = null;
@@ -171,26 +172,12 @@ async function syncLabel(task: Task, newStatus: string): Promise<void> {
   const statusLabel = `status/${newStatus}`;
 
   // Preserve non-`status/*` labels (e.g. `human-merge`, `human-review`, any
-  // user-authored tags). Forgejo's replaceLabel endpoint is a PUT that replaces
-  // the entire label set, so without this step the `human-merge` signal would
-  // be stripped every time the status transitions — which breaks the flow
-  // where an `awaiting-human-merge` task is auto-rebased and needs to return
-  // to `awaiting-human-merge` after the dev+review cycle.
-  let preserved: string[] = [];
+  // user-authored tags) — without this the `human-merge` signal would be
+  // stripped every time the status transitions, which breaks the flow where
+  // an `awaiting-human-merge` task is auto-rebased and needs to return to
+  // `awaiting-human-merge` after the dev+review cycle.
   try {
-    const issue = await _forgejo.getIssue(repo, task.issue_id);
-    preserved = issue.labels
-      .map((l) => l.name)
-      .filter((name) => !name.startsWith('status/'));
-  } catch {
-    // Best effort — fall back to just setting the status label.
-  }
-
-  try {
-    await _forgejo.replaceLabelByNames(repo, task.issue_id, [
-      statusLabel,
-      ...preserved,
-    ]);
+    await replaceStatusLabel(_forgejo, repo, task.issue_id, statusLabel);
   } catch (err) {
     _log.warn(
       { event: 'label_sync_failed', task_id: task.id, label: statusLabel, err },

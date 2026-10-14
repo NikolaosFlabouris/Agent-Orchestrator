@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     replaceLabelByNames: vi.fn<() => Promise<void>>(),
     commentOnIssue: vi.fn<() => Promise<void>>(),
     closeIssue: vi.fn<() => Promise<void>>(),
+    getIssue: vi.fn(),
     triggerTick: vi.fn(),
     getContainer: vi.fn(),
     stopContainer: vi.fn<() => Promise<void>>(),
@@ -47,8 +48,8 @@ vi.mock('../../workspace.js', () => ({
   getWorkdir: vi.fn().mockReturnValue('/tmp/fake-workdir'),
 }));
 
-// Import closeTask after mocks are registered
-const { closeTask } = await import('../../actions.js');
+// Import closeTask/cancelTask after mocks are registered
+const { closeTask, cancelTask } = await import('../../actions.js');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -100,6 +101,7 @@ function makeForgejo() {
     replaceLabelByNames: mocks.replaceLabelByNames.mockResolvedValue(undefined),
     commentOnIssue: mocks.commentOnIssue.mockResolvedValue(undefined),
     closeIssue: mocks.closeIssue.mockResolvedValue(undefined),
+    getIssue: mocks.getIssue.mockResolvedValue({ labels: [] }),
   } as any;
 }
 
@@ -150,6 +152,43 @@ describe('closeTask', () => {
       task.issue_id,
       ['status/cancelled']
     );
+  });
+
+  it('keeps non-status labels and swaps only the status label', async () => {
+    const task = mkTask({ status: 'failed' });
+    const forgejo = makeForgejo();
+    mocks.getIssue.mockResolvedValue({
+      labels: [
+        { name: 'ci-failure' },
+        { name: 'human-merge' },
+        { name: 'status/failed' },
+      ],
+    });
+
+    await closeTask(task, forgejo, makeScheduler(), silentLog);
+
+    expect(mocks.getIssue).toHaveBeenCalledWith(fakeRepo, task.issue_id);
+    expect(mocks.replaceLabelByNames).toHaveBeenCalledWith(
+      fakeRepo,
+      task.issue_id,
+      ['status/cancelled', 'ci-failure', 'human-merge']
+    );
+  });
+
+  it('falls back to just status/cancelled when the issue fetch fails', async () => {
+    const task = mkTask({ status: 'failed' });
+    const forgejo = makeForgejo();
+    mocks.getIssue.mockRejectedValue(new Error('forge down'));
+
+    await closeTask(task, forgejo, makeScheduler(), silentLog);
+
+    expect(mocks.replaceLabelByNames).toHaveBeenCalledWith(
+      fakeRepo,
+      task.issue_id,
+      ['status/cancelled']
+    );
+    const call = mocks.updateTaskWithSync.mock.calls[0];
+    expect(call[1].status).toBe('cancelled');
   });
 
   it('posts an issue comment noting the human close', async () => {
@@ -224,6 +263,61 @@ describe('closeTask', () => {
 
     await expect(
       closeTask(task, forgejo, makeScheduler(), silentLog)
+    ).resolves.toBeUndefined();
+
+    const call = mocks.updateTaskWithSync.mock.calls[0];
+    expect(call[1].status).toBe('cancelled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cancelTask — label handling
+// ---------------------------------------------------------------------------
+
+describe('cancelTask labels', () => {
+  it('keeps non-status labels and swaps only the status label', async () => {
+    const task = mkTask({ status: 'failed' });
+    const forgejo = makeForgejo();
+    mocks.getIssue.mockResolvedValue({
+      labels: [
+        { name: 'ci-failure' },
+        { name: 'human-merge' },
+        { name: 'status/failed' },
+      ],
+    });
+
+    await cancelTask(task, forgejo, makeScheduler(), silentLog);
+
+    expect(mocks.replaceLabelByNames).toHaveBeenCalledWith(
+      fakeRepo,
+      task.issue_id,
+      ['status/cancelled', 'ci-failure', 'human-merge']
+    );
+  });
+
+  it('falls back to just status/cancelled when the issue fetch fails', async () => {
+    const task = mkTask({ status: 'in-progress' });
+    const forgejo = makeForgejo();
+    mocks.getIssue.mockRejectedValue(new Error('forge down'));
+
+    await cancelTask(task, forgejo, makeScheduler(), silentLog);
+
+    expect(mocks.replaceLabelByNames).toHaveBeenCalledWith(
+      fakeRepo,
+      task.issue_id,
+      ['status/cancelled']
+    );
+    const call = mocks.updateTaskWithSync.mock.calls[0];
+    expect(call[1].status).toBe('cancelled');
+  });
+
+  it('still marks the task cancelled when the label write fails', async () => {
+    const task = mkTask({ status: 'in-progress' });
+    const forgejo = makeForgejo();
+    mocks.replaceLabelByNames.mockRejectedValue(new Error('label api down'));
+
+    await expect(
+      cancelTask(task, forgejo, makeScheduler(), silentLog)
     ).resolves.toBeUndefined();
 
     const call = mocks.updateTaskWithSync.mock.calls[0];
