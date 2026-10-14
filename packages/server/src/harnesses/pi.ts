@@ -44,41 +44,50 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  1.1.x (1.1.0), which is what images/agent/Dockerfile installs. No
- *  harness change was needed coming from 1.0.x (nor from 0.87.x to 1.0.x
- *  or 0.84.x to 0.87.x before that). Verified on 1.1.0:
+ *  1.2.x (1.2.0), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 1.1.x (nor from 1.0.x to 1.1.x,
+ *  0.87.x to 1.0.x or 0.84.x to 0.87.x before that). Verified on 1.2.0:
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
  *      providers. Since 1.0.0 `--provider` without `--model` is an
- *      error; the harness never passes `--provider`. The only `--help`
- *      change since 1.0.4 is the additive `--tools +name/-name` syntax.
+ *      error; the harness never passes `--provider`. `--help` is
+ *      unchanged from 1.1.0 (whose only change since 1.0.4 was the
+ *      additive `--tools +name/-name` syntax).
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
- *      `models[].id`, `models[].contextWindow`. The file is unchanged
- *      from 1.0.4; the only schema change since 0.87.1 is the additive
- *      `samplingParamsByThinkingLevel` (1.0.x).
+ *      `models[].id`, `models[].contextWindow`. 1.2.0 regenerates the
+ *      schema (also published as `schemas/models.schema.json`) with no
+ *      field removed; the generated file still passes its validator. The
+ *      only field added since 0.87.1 is `samplingParamsByThinkingLevel`
+ *      (1.0.x).
  *    - The generated agent_command against a stub openai-compatible
- *      server produces the same json-mode event sequence as 1.0.4
+ *      server produces the same json-mode event sequence as 1.1.0
  *      (event types listed below), sends the same default tool set
  *      (read, bash, edit, write — the codemode / tool_search / MCP
  *      built-in extensions added in 0.99 are not enabled by default),
  *      and exits 0. An unreachable baseUrl still exits 0 with a final
  *      `agent_end` whose last message has `stopReason: "error"`, which
- *      harness-cli.sh's pi_terminal_error relies on.
+ *      harness-cli.sh's pi_terminal_error relies on. 1.2.0's new
+ *      exit 1 for errors and output-token truncation (`stopReason:
+ *      "length"`) applies only to `--mode text`; json mode still exits
+ *      0 for both, and a truncated run is recorded as `success`.
  *    - Minimal cloud stanzas for `anthropic` and `google` still resolve
  *      (`--model google/<id>` reads GEMINI_API_KEY).
  *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
  *      codemode APIs, MCP, and the Azure provider's name
  *      (`azure-openai-responses` → `azure`) — none of which the
- *      orchestrator uses. 1.1.0 has no breaking changes listed. From
- *      1.0.1 the npm package no longer ships npm-shrinkwrap.json, so
- *      transitive dependencies float on rebuild.
- *    - As on 1.0.4, `pi -p` reads piped stdin until EOF before starting,
- *      so a run whose stdin is a pipe that never closes hangs. The
- *      harness smoke runs don't hit this, so agent_command leaves stdin
- *      alone; add `</dev/null` if a launcher ever pipes stdin in.
+ *      orchestrator uses. 1.1.0 has no breaking changes listed; 1.2.0's
+ *      touch theme schemas, the extension `before_agent_start` event and
+ *      `pi mcp list --json` — again none used here. From 1.0.1 the npm
+ *      package no longer ships npm-shrinkwrap.json, so transitive
+ *      dependencies float on rebuild (see images/agent/Dockerfile).
+ *    - As on 1.0.4 and 1.1.0, `pi -p` reads piped stdin until EOF
+ *      before starting, so a run whose stdin is a pipe that never closes
+ *      hangs. The harness smoke runs don't hit this, so agent_command
+ *      leaves stdin alone; add `</dev/null` if a launcher ever pipes
+ *      stdin in.
  *  Pi's json mode starts with a `session` header and emits an event
  *  stream (`agent_start` / `message_end` / `agent_end` /
  *  `agent_settled`; 1.1 adds an `aborted` boolean to `agent_settled`).
