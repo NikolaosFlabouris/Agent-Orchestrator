@@ -132,7 +132,7 @@ For review agents, the additional `/output/review.json`:
 
 ```json
 {
-  "verdict": "approved | changes_needed | unclear",
+  "verdict": "approved | changes_needed | unclear | no_change_superseded",
   "summary": "Brief overall assessment",
   "feedback": [
     {
@@ -140,9 +140,18 @@ For review agents, the additional `/output/review.json`:
       "line": 42,
       "comment": "Description of issue"
     }
+  ],
+  "superseded_by": [
+    {
+      "requirement": "A requirement from the task",
+      "satisfied_by": "Commit SHA and/or PR on the base branch that satisfies it",
+      "files": ["src/auth/login.ts"]
+    }
   ]
 }
 ```
+
+`no_change_superseded` means the base branch has since made the PR redundant: base already meets every requirement and the PR adds nothing necessary. It is not for a PR that is wrong (`changes_needed`). `superseded_by` is required for it and ignored otherwise. Each entry needs a non-empty `requirement` and `satisfied_by`. Together the entries' `files` must name every file the PR's diff against base touches (exact repo-relative paths; directories and globs do not count). If they do, the task ends as `no-change` (PR closed, branch deleted, issue closed). If the evidence is missing or malformed, or any PR file is unaccounted for, the verdict is treated as `unclear` (`needs-human-review`) and nothing is deleted. See [02 - Task State Machine](./02-task-state-machine.md).
 
 In no-change review mode (reviewing a dev agent's `no-change.json`, see below), the same file carries a different set of verdicts. It reuses the `summary`/`feedback` fields:
 
@@ -892,6 +901,8 @@ Set verdict to "approved" only if:
 Set verdict to "changes_needed" if any concrete issues exist.
 Include specific, actionable feedback for every issue found.
 ```
+
+The normal review prompt (`buildReviewPrompt`, `packages/server/src/scheduler.ts`) also describes `no_change_superseded`: when to use it (base already has the work), when not to (the PR is wrong — `changes_needed`), and that `superseded_by` must account for every file in `git diff origin/<base>...HEAD --name-only`.
 
 ### No-change Review Prompt
 

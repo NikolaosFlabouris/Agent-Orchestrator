@@ -650,7 +650,8 @@ describe('no-change outcomes in reports', () => {
     for (const id of [3, 4]) {
       task.run(id, id, 'no-change', '2025-01-05 00:00:00', '2025-01-06T00:00:00.000Z');
       attempt.run(id, 'develop', null);
-      attempt.run(id, 'review', 'no_change_confirmed');
+      // Task 4's review found the PR superseded by the base branch (#224).
+      attempt.run(id, 'review', id === 3 ? 'no_change_confirmed' : 'no_change_superseded');
       event.run(id, 'status_in-progress');
       event.run(id, 'status_in-review');
       event.run(id, 'status_no-change');
@@ -668,6 +669,13 @@ describe('no-change outcomes in reports', () => {
     expect(body.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0, no_change: 2 });
     expect(body.success_rate).toBeCloseTo(0.5, 6);
     expect(body.throughput.tasks_merged).toBe(1);
+  });
+
+  it('overview: no-change review attempts (confirmed or superseded) count as completed reviews', async () => {
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/reports/overview?${Q}` })
+    ).json() as ReportsOverview;
+    expect(body.review_duration.count).toBe(2);
   });
 
   it('leaderboard: no_change does not lower the model success rate', async () => {

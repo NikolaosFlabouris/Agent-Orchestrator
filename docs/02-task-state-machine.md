@@ -108,6 +108,14 @@ in-progress ──► in-review (no-change mode) ──► no-change
 - Action: relabel, post comment asking for human intervention
 - Slot is freed
 
+**in-review → no-change** (PR superseded by base) / **in-review → needs-human-review** (superseded verdict not verified)
+- Trigger: on a normal PR review, the review agent returns verdict `no_change_superseded`: the base branch already meets every requirement of the task (for example the same fix was merged from another PR while this one waited), and the PR adds nothing necessary on top of it. It is not for a PR that is wrong or incomplete — that stays `changes_needed`.
+- The verdict must carry `superseded_by` evidence: one entry per requirement, naming the commit or PR on base that satisfies it and the PR files it accounts for (see [04 - Agent Harness](./04-agent-harness.md)).
+- Careless-verdict check: the orchestrator lists the files the PR's diff against base touches (Forgejo `GET /pulls/{n}/files`, the same diff as `git diff origin/<base>...HEAD --name-only`). Every one of them must be named exactly in some evidence entry's `files` (a renamed file may be named by its old or new path; directories and globs do not count). A PR whose diff against base is already empty (`changed_files == 0`) passes trivially.
+- Passes → post the reason and evidence on the PR, then finalise as `no-change` (below): PR closed, branch deleted, issue closed with `status/no-change`, slot freed. The review agent counts as the review, so there is no human step, **even with `human-merge`**.
+- Fails (no or malformed evidence, unaccounted-for files, the PR files could not be listed, or no PR) → treated as `unclear`: `needs-human-review`, with a comment explaining why the verdict was not accepted. Nothing is closed or deleted, and the attempt counter does not change.
+- Either way the `review_verdict` event is recorded and the review attempt is recorded as completed with verdict `no_change_superseded`.
+
 **in-progress → in-review (no-change mode)** / **in-progress → awaiting-human-review** (no-change claim)
 - Trigger: the dev agent finished successfully and produced no work — its branch matches base, nothing was pushed and nothing is left locally, or the PR has an empty diff (including on a rework attempt whose existing PR is empty) — **and** it left a valid `/output/no-change.json` (see [04 - Agent Harness](./04-agent-harness.md)).
 - Without that file, or with a malformed one, these paths still go to `failed` exactly as before ("No changes produced"). A run that timed out cannot make a claim. A run that produced work *and* a claim is reviewed as a normal implementation; the claim is ignored with a warning.
