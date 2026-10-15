@@ -67,6 +67,8 @@ vi.mock('../../workspace.js', () => ({
   verifyWorkspaceState: mocks.verifyWorkspaceState,
   getWorkdir: mocks.getWorkdir,
   detectChanges: mocks.detectChanges,
+  // No /output/no-change.json exists here, so no-change claims never apply.
+  getOutputDir: () => '/nonexistent/no-change-test/.output',
 }));
 
 vi.mock('../../forgejo-linking.js', () => ({
@@ -123,6 +125,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     started_at: null,
     completed_at: null,
     created_at: '2026-07-23T00:00:00Z',
+    no_change_claim: null,
     ...overrides,
   };
 }

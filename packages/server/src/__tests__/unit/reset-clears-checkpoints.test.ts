@@ -81,6 +81,7 @@ function task(overrides: Partial<Task> = {}): Task {
     started_at: '2026-05-18T11:49:01.387Z',
     completed_at: null,
     created_at: '2026-05-12T12:24:07.062Z',
+    no_change_claim: null,
     ...overrides,
   };
 }

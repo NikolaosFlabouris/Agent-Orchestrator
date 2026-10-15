@@ -78,6 +78,7 @@ function backingOffTask(overrides: Partial<Task> = {}): Task {
     started_at: null,
     completed_at: null,
     created_at: '2126-07-23T09:00:00.000Z',
+    no_change_claim: null,
     ...overrides,
   };
 }

@@ -833,7 +833,9 @@ export function registerReadTools(server: McpServer, deps: McpReadToolDeps): voi
         'renders, computed in SQL over the task/attempt/event history. ' +
         'Pick one with `kind`:\n' +
         '- `overview`: KPI roll-up for the window (task counts by status, ' +
-        'merge rate, attempt/duration averages).\n' +
+        'merge rate, attempt/duration averages). `terminal_counts.no_change` ' +
+        'counts tasks confirmed as needing no code change; they are neither ' +
+        'failures nor merges and are excluded from the success rate.\n' +
         '- `timeseries`: tasks created vs merged per bucket (`bucket`=day ' +
         'or week) — trend over time.\n' +
         '- `leaderboard`: per-group success/effort stats ' +
@@ -849,7 +851,8 @@ export function registerReadTools(server: McpServer, deps: McpReadToolDeps): voi
         'NULL effort_level means "not set, the agent\'s default effort" (not ' +
         '"unknown") and is labelled `<model_id> · default`.\n' +
         '- `funnel`: created → preparing → in-progress → in-review → merged ' +
-        'conversion, i.e. where tasks fall out.\n' +
+        'conversion, i.e. where tasks fall out; `no_change` counts tasks that ' +
+        'exited as a confirmed no-change instead of a merge.\n' +
         '- `reliability`: the ORCHESTRATOR\'s own operational incidents ' +
         '(prep failures, orphan recoveries, git outages) with a per-repo ' +
         'breakdown and a `bucket`=day|week series — this is about the ' +

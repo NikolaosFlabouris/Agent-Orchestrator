@@ -24,6 +24,7 @@ const mockTask: Task = {
   started_at: null,
   completed_at: null,
   created_at: '2025-01-01T00:00:00Z',
+  no_change_claim: null,
 };
 
 const mockRepo: Repo = {

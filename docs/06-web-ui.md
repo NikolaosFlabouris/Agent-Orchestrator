@@ -41,7 +41,7 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Header:** issue number, title, repo, branch name, PR number (linked to Forgejo), current status, elapsed time. Two amber lines appear under the attempt counter when the task is in a git-outage backoff, each with a live "in Xm Ys" countdown: *"Workspace prep failed ×N — retry in …"* while a queued task is waiting out `prep_next_attempt_at`, and *"Completed work is held locally — push retry in …"* while `salvage_next_attempt_at` is set (finished agent work that has not reached the git host yet). Without them a task in either state is indistinguishable from an idle queued one.
 
-**Actions bar:** Cancel, Force Approve, Force Fail, Reset buttons (context-dependent). Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
+**Actions bar:** Cancel, Force Approve, Force Fail, Reset buttons (context-dependent). A task carrying a dev agent's no-change claim shows the claim (category, reason, evidence) in a panel above the timeline, with Accept and Reject (comment required) buttons while a human decision is pending. Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`, `no-change`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
 
 **Timeline:** chronological list of orchestrator events (preparing, container started, agent running, review started, merged, etc.) with timestamps. Each row also states its raw `event_type` in a muted monospace chip beside the timestamp — messages are prose written per call site, so two rows can read alike while being entirely different events, and the type is what you grep the server for. Rows are coloured by `event_type` (`EVENT_COLORS` in `Timeline.tsx`); the dot glyph itself is a uniform `•`.
 
@@ -280,7 +280,9 @@ Two request shapes. **Direct field updates** carry one or more editable fields a
 | `cancel` | Cancel the task | Any active state | Stops container, deletes branch/PR, relabels. Optional `reason` (string). |
 | `force_approve` | Skip review, go straight to merge | `in-review` | Treats review as approved, attempts merge. |
 | `force_fail` | Manually fail the task | Any active state | Stops container, marks as failed. Optional `reason` (string). |
-| `reset` | Reset to clean unqueued state | Any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`) | Deletes branch/PR/workspace, removes labels, resets attempt counter. |
+| `reset` | Reset to clean unqueued state | Any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`, `no-change`) | Deletes branch/PR/workspace, removes labels, resets attempt counter. |
+| `accept_no_change` | Accept the dev agent's no-change claim | `awaiting-human-review` / `needs-human-review` with a pending claim | Finalises as `no-change`: issue closed with `status/no-change`, branch/PR cleaned up. Optional `comment` (string) used as the confirmed reason. |
+| `reject_no_change` | Reject the no-change claim | Same as `accept_no_change` | Starts a rework attempt (counts against `max_attempts`) with the required `comment` (string) as review feedback. |
 
 Response: `200` with updated task object, or `400` if the action is invalid for the current task state.
 

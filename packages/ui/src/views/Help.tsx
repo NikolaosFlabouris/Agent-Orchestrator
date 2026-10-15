@@ -280,7 +280,12 @@ function TaskLifecycle() {
     {
       status: 'awaiting-human-review',
       label: 'human-review',
-      desc: 'Repo or task was flagged for manual review. Review the PR yourself before it can merge.',
+      desc: 'Repo or task was flagged for manual review. Review the PR yourself before it can merge — or, if the agent concluded no code change is needed, Accept or Reject its claim on the task page.',
+    },
+    {
+      status: 'no-change',
+      label: 'status/no-change',
+      desc: 'The agent found nothing to change (already fixed, duplicate, not reproducible or obsolete) and a reviewer confirmed it. Issue closed, branch/PR cleaned up. Counted separately in Reports — neither a failure nor a merge.',
     },
   ];
 

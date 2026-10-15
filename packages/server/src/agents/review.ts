@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Task } from '@orchestrator/shared';
+import type { Task, Repo, NoChangeClaim } from '@orchestrator/shared';
+import { parseNoChangeClaim } from '@orchestrator/shared';
 import {
   getRepo,
   getTask,
@@ -14,6 +15,8 @@ import { getOutputDir } from '../workspace.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import { classifyFailure } from '../failure-classifier.js';
 import { failTaskPermanently } from './permanent-failure.js';
+import { finalizeNoChange } from '../actions.js';
+import { describeNoChangeCategory } from './no-change.js';
 import {
   resolveMergeStrategy,
   type ForgejoMergeStrategy,
@@ -47,8 +50,22 @@ interface FeedbackItem {
   suggestion?: string;
 }
 
+/** Verdicts a review agent writes in no-change review mode. */
+export const NO_CHANGE_VERDICTS = [
+  'no_change_confirmed',
+  'no_change_rejected',
+  'unclear',
+] as const;
+
+export type NoChangeVerdict = (typeof NO_CHANGE_VERDICTS)[number];
+
 interface ReviewVerdict {
-  verdict: 'approved' | 'changes_needed' | 'unclear';
+  verdict:
+    | 'approved'
+    | 'changes_needed'
+    | 'unclear'
+    | 'no_change_confirmed'
+    | 'no_change_rejected';
   summary?: string;
   rubric?: Partial<Record<RubricDimension, RubricEntry>> &
     Record<string, RubricEntry>;
@@ -524,6 +541,215 @@ export async function attemptMerge(
 }
 
 /**
+ * Send a task back to the dev agent with review feedback: post it on the PR
+ * (if any) and the issue, then either start the next attempt in the same
+ * slot or fail the task when the attempt budget is spent. Shared by the
+ * `changes_needed` verdict and both kinds of rejected no-change claim
+ * (review agent and human), so a rejected claim costs an attempt exactly
+ * like a rejected PR. Any pending no-change claim is cleared — the next
+ * attempt starts without one.
+ */
+export async function sendBackForRework(
+  task: Task,
+  review: {
+    /** Comment lead-in, e.g. "Review found issues". */
+    heading: string;
+    summary: string;
+    /** Rendered markdown feedback for this attempt. */
+    feedback: string;
+  },
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger,
+  launchDevContainer: (task: Task, feedback?: string | null) => Promise<void>
+): Promise<void> {
+  const repo = getRepo(task.repo_id);
+  if (!repo) return;
+
+  const freshTask = getTask(task.id)!;
+  const newAttempt = freshTask.attempt + 1;
+  const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
+  const { heading, summary, feedback: feedbackStr } = review;
+  const body = [summary, feedbackStr].filter(Boolean).join('\n\n');
+
+  // Post feedback as PR comment and issue comment, rendered as readable
+  // markdown (rubric summary + grouped feedback) rather than raw JSON.
+  try {
+    if (freshTask.pr_number) {
+      await forgejo.commentOnPr(
+        repo,
+        freshTask.pr_number,
+        `${heading} (attempt ${freshTask.attempt}):\n\n${body}`
+      );
+    }
+    await forgejo.commentOnIssue(
+      repo,
+      task.issue_id,
+      `${heading} (attempt ${freshTask.attempt}). Sending back for rework.\n\n${body}`
+    );
+  } catch { /* best effort */ }
+
+  if (newAttempt > maxAttempts) {
+    updateTaskWithSync(task.id, {
+      status: 'failed',
+      attempt: newAttempt,
+      completed_at: new Date().toISOString(),
+      ...(freshTask.no_change_claim ? { no_change_claim: null } : {}),
+    });
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Failed after ${maxAttempts} attempts.`
+      );
+    } catch { /* best effort */ }
+    log.error(
+      { event: 'review_exhausted', task_id: task.id },
+      'Changes needed but max attempts exhausted'
+    );
+  } else {
+    // Rework in same slot
+    // A rejected claim was reviewed while the task was parked (human
+    // review set completed_at) — it is live again, so clear both.
+    updateTaskWithSync(task.id, {
+      status: 'changes-needed',
+      attempt: newAttempt,
+      ...(freshTask.no_change_claim
+        ? { no_change_claim: null, completed_at: null }
+        : {}),
+    });
+    log.info(
+      { event: 'rework_cycle', task_id: task.id, attempt: newAttempt },
+      'Review rejected — starting rework'
+    );
+
+    // Hand the dev agent the *cumulative* review feedback (every prior
+    // changes_needed attempt plus this one), not just the latest: a weak
+    // implementer fixing attempt N regresses earlier fixes when it can't
+    // see attempts 1..N-1. The history is sourced from the persisted
+    // attempts table so it survives an orchestrator restart mid-rework.
+    // The PR/issue comments above intentionally stay per-attempt (each
+    // attempt already posted its own comment — repeating the whole
+    // history every time would just be noise). Falls back to the
+    // current attempt's feedback if accumulation throws for any reason.
+    let reworkFeedback = feedbackStr;
+    try {
+      reworkFeedback = assembleCumulativeReviewFeedback(
+        getReviewFeedbackHistory(task.id),
+        freshTask.attempt,
+        feedbackStr
+      );
+    } catch (err) {
+      log.warn(
+        { event: 'cumulative_feedback_failed', task_id: task.id, err },
+        'Cumulative feedback assembly failed — using latest attempt only'
+      );
+    }
+
+    const updatedTask = getTask(task.id)!;
+    await launchDevContainer(updatedTask, reworkFeedback);
+  }
+}
+
+/**
+ * Rework feedback for a rejected no-change claim: what the agent claimed,
+ * why the reviewer disagreed, and what to do next.
+ */
+export function formatNoChangeRejection(
+  claim: NoChangeClaim,
+  rejection: string
+): string {
+  return (
+    `### No-change claim rejected\n\n` +
+    `Your previous attempt concluded that no code change was needed ` +
+    `(${describeNoChangeCategory(claim.category)}: ${claim.reason}). ` +
+    `The reviewer did not accept that conclusion:\n\n${rejection.trim()}\n\n` +
+    `Implement the task. Only write /output/no-change.json again if you have new evidence that answers the reviewer's objection.`
+  );
+}
+
+/** Map a review.json verdict written in no-change review mode onto the
+ *  three outcomes. `approved` / `changes_needed` are accepted as aliases
+ *  because review.json is LLM-produced; anything else is unclear. */
+export function normalizeNoChangeVerdict(verdict: unknown): NoChangeVerdict {
+  if (verdict === 'no_change_confirmed' || verdict === 'approved') {
+    return 'no_change_confirmed';
+  }
+  if (verdict === 'no_change_rejected' || verdict === 'changes_needed') {
+    return 'no_change_rejected';
+  }
+  return 'unclear';
+}
+
+/**
+ * Act on a review agent's verdict on a no-change claim. Confirmed →
+ * finalise as `no-change` (no human step, even with `human-merge`: there is
+ * nothing to merge). Rejected → exactly like `changes_needed`. Unclear →
+ * `needs-human-review`, where a human can Accept or Reject the claim.
+ */
+async function processNoChangeVerdict(
+  task: Task,
+  repo: Repo,
+  claim: NoChangeClaim,
+  review: ReviewVerdict,
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger,
+  launchDevContainer: (task: Task, feedback?: string | null) => Promise<void>
+): Promise<void> {
+  const verdict = normalizeNoChangeVerdict(review.verdict);
+  const summary = asString(review.summary) ?? '';
+  recordTaskEvent(
+    task.id,
+    'review_verdict',
+    `Review verdict: ${verdict} (no-change claim)${summary ? ' — ' + summary : ''}`
+  );
+
+  if (verdict === 'no_change_confirmed') {
+    await finalizeNoChange(task, forgejo, log, {
+      confirmedBy: 'review agent',
+      reason: summary || claim.reason,
+    });
+    return;
+  }
+
+  if (verdict === 'no_change_rejected') {
+    const details = formatReviewForRework(review);
+    const rejection = [summary, details].filter((p) => p !== '').join('\n\n');
+    await sendBackForRework(
+      task,
+      {
+        heading: 'Review rejected the no-change claim',
+        // The summary is already part of the rendered rejection below.
+        summary: '',
+        feedback: formatNoChangeRejection(
+          claim,
+          rejection || 'The reviewer gave no further detail.'
+        ),
+      },
+      forgejo,
+      log,
+      launchDevContainer
+    );
+    return;
+  }
+
+  updateTaskWithSync(task.id, {
+    status: 'needs-human-review',
+    completed_at: new Date().toISOString(),
+  });
+  try {
+    await forgejo.commentOnIssue(
+      repo,
+      task.issue_id,
+      `Review agent could not confirm or reject the no-change claim. Human review required — Accept or Reject the claim on the task page.${summary ? `\n\n${summary}` : ''}`
+    );
+  } catch { /* best effort */ }
+  log.info(
+    { event: 'needs_human_review', task_id: task.id },
+    'Unclear verdict on no-change claim — needs human review'
+  );
+}
+
+/**
  * Process the review verdict after a successful review agent run.
  */
 export async function processReviewVerdict(
@@ -540,6 +766,22 @@ export async function processReviewVerdict(
   if (!repo) return;
 
   const freshTask = getTask(task.id)!;
+
+  // No-change review mode: the review judged the dev agent's claim, not a
+  // PR. There may be no branch or PR, so none of the PR checks below apply.
+  const claim = parseNoChangeClaim(freshTask.no_change_claim);
+  if (claim) {
+    await processNoChangeVerdict(
+      task,
+      repo,
+      claim,
+      review,
+      forgejo,
+      log,
+      launchDevContainer
+    );
+    return;
+  }
 
   // Verify the review agent didn't modify the branch
   if (preReviewSha) {
@@ -671,82 +913,17 @@ export async function processReviewVerdict(
       await attemptMerge(task, forgejo, log, launchDevContainer);
     }
   } else if (review.verdict === 'changes_needed') {
-    const newAttempt = freshTask.attempt + 1;
-    const maxAttempts = freshTask.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
-    const feedbackStr = formatReviewForRework(review);
-    const summary = review.summary ?? '';
-
-    // Post feedback as PR comment and issue comment, rendered as readable
-    // markdown (rubric summary + grouped feedback) rather than raw JSON.
-    try {
-      if (freshTask.pr_number) {
-        await forgejo.commentOnPr(
-          repo,
-          freshTask.pr_number,
-          `Review found issues (attempt ${freshTask.attempt}):\n\n${summary}\n\n${feedbackStr}`
-        );
-      }
-      await forgejo.commentOnIssue(
-        repo,
-        task.issue_id,
-        `Review found issues (attempt ${freshTask.attempt}). Sending back for rework.\n\n${summary}\n\n${feedbackStr}`
-      );
-    } catch { /* best effort */ }
-
-    if (newAttempt > maxAttempts) {
-      updateTaskWithSync(task.id, {
-        status: 'failed',
-        attempt: newAttempt,
-        completed_at: new Date().toISOString(),
-      });
-      try {
-        await forgejo.commentOnIssue(
-          repo,
-          task.issue_id,
-          `Failed after ${maxAttempts} attempts.`
-        );
-      } catch { /* best effort */ }
-      log.error(
-        { event: 'review_exhausted', task_id: task.id },
-        'Changes needed but max attempts exhausted'
-      );
-    } else {
-      // Rework in same slot
-      updateTaskWithSync(task.id, {
-        status: 'changes-needed',
-        attempt: newAttempt,
-      });
-      log.info(
-        { event: 'rework_cycle', task_id: task.id, attempt: newAttempt },
-        'Review rejected — starting rework'
-      );
-
-      // Hand the dev agent the *cumulative* review feedback (every prior
-      // changes_needed attempt plus this one), not just the latest: a weak
-      // implementer fixing attempt N regresses earlier fixes when it can't
-      // see attempts 1..N-1. The history is sourced from the persisted
-      // attempts table so it survives an orchestrator restart mid-rework.
-      // The PR/issue comments above intentionally stay per-attempt (each
-      // attempt already posted its own comment — repeating the whole
-      // history every time would just be noise). Falls back to the
-      // current attempt's feedback if accumulation throws for any reason.
-      let reworkFeedback = feedbackStr;
-      try {
-        reworkFeedback = assembleCumulativeReviewFeedback(
-          getReviewFeedbackHistory(task.id),
-          freshTask.attempt,
-          feedbackStr
-        );
-      } catch (err) {
-        log.warn(
-          { event: 'cumulative_feedback_failed', task_id: task.id, err },
-          'Cumulative feedback assembly failed — using latest attempt only'
-        );
-      }
-
-      const updatedTask = getTask(task.id)!;
-      await launchDevContainer(updatedTask, reworkFeedback);
-    }
+    await sendBackForRework(
+      task,
+      {
+        heading: 'Review found issues',
+        summary: review.summary ?? '',
+        feedback: formatReviewForRework(review),
+      },
+      forgejo,
+      log,
+      launchDevContainer
+    );
   } else if (review.verdict === 'unclear') {
     updateTaskWithSync(task.id, {
       status: 'needs-human-review',

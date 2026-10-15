@@ -30,6 +30,9 @@ export const STATUS_BADGE_COLORS: Record<string, string> = {
   'awaiting-human-merge': 'bg-orange-900 text-orange-300',
   'awaiting-human-review': 'bg-orange-900 text-orange-300',
   'needs-human-review': 'bg-orange-900 text-orange-300',
+  // Resolved without a merge — the work was already done (or moot) and a
+  // reviewer confirmed it. Teal: finished like `merged`, but not a merge.
+  'no-change': 'bg-teal-900 text-teal-300',
 };
 
 /** Used for any status the map doesn't know — a status added server-side

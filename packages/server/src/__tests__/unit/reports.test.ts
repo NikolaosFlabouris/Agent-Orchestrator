@@ -133,7 +133,7 @@ describe('GET /api/reports/overview', () => {
 
     // success = merged / (merged+failed+cancelled) = 2 / 4.
     expect(body.success_rate).toBeCloseTo(0.5, 6);
-    expect(body.terminal_counts).toEqual({ merged: 2, failed: 1, cancelled: 1 });
+    expect(body.terminal_counts).toEqual({ merged: 2, failed: 1, cancelled: 1, no_change: 0 });
 
     // throughput.merged counts completed_at-in-window merged tasks (T1, T2).
     expect(body.throughput.tasks_created).toBe(6);
@@ -487,7 +487,7 @@ describe('GET /api/reports/profile-gauge', () => {
     expect(body.task_count).toBe(2);
     expect(body.insufficient_data).toBe(true);
     expect(body.success_rate).toBeCloseTo(0.5, 6);
-    expect(body.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0 });
+    expect(body.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0, no_change: 0 });
     expect(body.avg_implementation_seconds).toBeCloseTo(3600, 1);
   });
 
@@ -505,7 +505,7 @@ describe('GET /api/reports/profile-gauge', () => {
     expect(body.avg_implementation_seconds).toBeNull();
     expect(body.avg_num_turns).toBeNull();
     expect(body.avg_total_tokens).toBeNull();
-    expect(body.terminal_counts).toEqual({ merged: 0, failed: 0, cancelled: 0 });
+    expect(body.terminal_counts).toEqual({ merged: 0, failed: 0, cancelled: 0, no_change: 0 });
   });
 
   it('returns confident stats once the sample clears the threshold', async () => {
@@ -537,7 +537,7 @@ describe('GET /api/reports/profile-gauge', () => {
     expect(body.task_count).toBe(6);
     expect(body.insufficient_data).toBe(false);
     expect(body.success_rate).toBeCloseTo(4 / 6, 6);
-    expect(body.terminal_counts).toEqual({ merged: 4, failed: 1, cancelled: 1 });
+    expect(body.terminal_counts).toEqual({ merged: 4, failed: 1, cancelled: 1, no_change: 0 });
     expect(body.avg_implementation_seconds).toBeCloseTo(1800, 1);
     expect(body.avg_rework).toBeCloseTo(1, 6);
   });
@@ -615,5 +615,76 @@ describe('GET /api/reports/tasks', () => {
     // Issue #8 is repo 2, in window — reachable with no repo filter.
     expect(body.total).toBe(1);
     expect(body.tasks[0].issue_id).toBe(8);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No-change outcomes (#223): counted on their own, never in the success rate.
+// ---------------------------------------------------------------------------
+
+describe('no-change outcomes in reports', () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    initDatabase(':memory:');
+    const db = getDb();
+    db.prepare(`INSERT INTO repos (id, owner, name) VALUES (1, 'o', 'r1')`).run();
+    const task = db.prepare(
+      `INSERT INTO tasks (id, issue_id, repo_id, status, created_at, completed_at)
+       VALUES (?, ?, 1, ?, ?, ?)`
+    );
+    const attempt = db.prepare(
+      `INSERT INTO attempts (task_id, attempt_number, role, status, verdict, started_at, completed_at, model_id, harness_id)
+       VALUES (?, 1, ?, 'completed', ?, '2025-01-05T10:00:00.000Z', '2025-01-05T11:00:00.000Z', 'm', 'h')`
+    );
+    const event = db.prepare(
+      `INSERT INTO task_events (task_id, event_type, message, created_at)
+       VALUES (?, ?, 'x', '2025-01-05T12:00:00.000Z')`
+    );
+    task.run(1, 1, 'merged', '2025-01-05 00:00:00', '2025-01-06T00:00:00.000Z');
+    attempt.run(1, 'develop', null);
+    task.run(2, 2, 'failed', '2025-01-05 00:00:00', '2025-01-06T00:00:00.000Z');
+    attempt.run(2, 'develop', null);
+    // Two confirmed no-change tasks: the dev attempt completed, the review
+    // confirmed the claim.
+    for (const id of [3, 4]) {
+      task.run(id, id, 'no-change', '2025-01-05 00:00:00', '2025-01-06T00:00:00.000Z');
+      attempt.run(id, 'develop', null);
+      attempt.run(id, 'review', 'no_change_confirmed');
+      event.run(id, 'status_in-progress');
+      event.run(id, 'status_in-review');
+      event.run(id, 'status_no-change');
+    }
+    app = Fastify({ logger: false });
+    await app.register(createReportsRoutes({} as unknown as ForgejoClient));
+    await app.ready();
+  });
+
+  it('overview: no_change tallied separately; success rate = merged / (merged + failed + cancelled)', async () => {
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/reports/overview?${Q}` })
+    ).json() as ReportsOverview;
+    expect(body.status_counts['no-change']).toBe(2);
+    expect(body.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0, no_change: 2 });
+    expect(body.success_rate).toBeCloseTo(0.5, 6);
+    expect(body.throughput.tasks_merged).toBe(1);
+  });
+
+  it('leaderboard: no_change does not lower the model success rate', async () => {
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/reports/leaderboard?groupBy=model&${Q}` })
+    ).json() as ReportsLeaderboard;
+    const row = body.rows.find((r) => r.key === 'm')!;
+    expect(row.task_count).toBe(4);
+    expect(row.terminal_counts).toEqual({ merged: 1, failed: 1, cancelled: 0, no_change: 2 });
+    expect(row.success_rate).toBeCloseTo(0.5, 6);
+  });
+
+  it('funnel: no-change exits are counted beside the stages, not as merges', async () => {
+    const body = (
+      await app.inject({ method: 'GET', url: `/api/reports/funnel?${Q}` })
+    ).json() as { stages: Array<{ stage: string; count: number }>; no_change: number };
+    expect(body.no_change).toBe(2);
+    expect(body.stages.find((s) => s.stage === 'merged')!.count).toBe(0);
   });
 });

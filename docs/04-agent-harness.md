@@ -100,6 +100,7 @@ hand the orchestrator a fully-formed `agent_command` string.
 /output/result.json      ← structured outcome (always present after exit)
 /output/progress.log     ← newline-delimited progress events (see below)
 /output/review.json      ← structured review verdict (review role only)
+/output/no-change.json   ← dev agent's evidenced "no code change needed" claim (develop role, optional)
 ```
 
 ### progress.log Format
@@ -142,6 +143,40 @@ For review agents, the additional `/output/review.json`:
   ]
 }
 ```
+
+In no-change review mode (reviewing a dev agent's `no-change.json`, see below), the same file carries a different set of verdicts. It reuses the `summary`/`feedback` fields:
+
+```json
+{
+  "verdict": "no_change_confirmed | no_change_rejected | unclear",
+  "summary": "The confirmed reason, or why the claim is wrong",
+  "feedback": [ { "file": "…", "line": 1, "comment": "…", "suggestion": "…" } ]
+}
+```
+
+`no_change_rejected` is handled exactly like `changes_needed`. `approved` and `changes_needed` are accepted as aliases. Any other value is treated as `unclear`.
+
+### no-change.json Structure
+
+A dev agent that concludes, after investigating, that the task needs **no code change** must not make an empty or cosmetic commit. It writes `/output/no-change.json` instead and exits:
+
+```json
+{
+  "category": "already_fixed | duplicate | not_reproducible | obsolete",
+  "reason": "Short explanation a human can act on",
+  "evidence": ["commit or PR references, file:line pointers, commands run and their result"]
+}
+```
+
+The file is written by the agent, not the harness. The harness still writes `result.json` as usual. The claim is only honoured when:
+
+- the run succeeded (`result.json` status `success`; a timed-out run cannot make a claim);
+- the run left no work: the branch matches base, nothing was pushed and nothing is left locally, or the PR diff is empty;
+- the file is valid: a known `category`, a non-empty `reason` and at least one non-empty `evidence` entry.
+
+A missing or malformed file leaves today's behaviour unchanged: the task fails with "No changes produced". If the agent produced work *and* wrote the file, the work wins. It is reviewed as a normal implementation and the claim is ignored with a warning (`no_change_claim_ignored` event).
+
+The orchestrator deletes any `no-change.json` when each dev attempt starts, so a claim from attempt N can never affect attempt N+1. A valid claim is copied onto the task row (`tasks.no_change_claim`) and reviewed by the task's configured reviewer. That is the review agent in no-change mode, or a human for `human-review` tasks. The file is archived with the other run artifacts. See [02 - Task State Machine](./02-task-state-machine.md) for the review and finalisation flow.
 
 ## Harnesses
 
@@ -789,8 +824,22 @@ This approach keeps quality enforcement close to the code (each repo defines its
 - Follow the existing code style and conventions in the repo
 - Do not modify files unrelated to the task
 - If the task is unclear, make reasonable assumptions and document them
-- Always push your work before exiting
+- Always push your work before exiting (unless you wrote /output/no-change.json — see below)
+- Do not open a pull request — just push your branch; the orchestrator opens the PR
 - If the repo has pre-commit hooks, all hooks must pass before pushing
+
+## If no code change is needed
+
+If, after investigating, you conclude that the task needs no code change —
+the fix is already on {base_branch}, the issue duplicates another, the
+problem cannot be reproduced, or the task is obsolete — do NOT make an empty
+or cosmetic commit and do not push. Instead write /output/no-change.json with
+exactly this structure, then exit:
+{ "category": …, "reason": …, "evidence": [ … ] }
+
+Only use this for a deliberate conclusion you can back with evidence … It is
+not a way to give up: if you could not finish the task, do not write this
+file. (Included on first attempts and rework attempts alike.)
 
 ## Review Feedback (Attempt N)
 (Only included on rework cycles)
@@ -843,6 +892,17 @@ Set verdict to "approved" only if:
 Set verdict to "changes_needed" if any concrete issues exist.
 Include specific, actionable feedback for every issue found.
 ```
+
+### No-change Review Prompt
+
+When the task carries a pending no-change claim, `buildReviewPrompt` hands the review agent `buildNoChangeReviewPrompt` instead (`packages/server/src/scheduler.ts`). The prompt includes the original task description and the agent's claim (category, reason, evidence). The reviewer is told to:
+
+- verify every piece of evidence against the **current** base branch;
+- reject a claim that is only partly true;
+- leave the checkout clean, because a rejected claim is reworked in the same workspace;
+- write `/output/review.json` with `no_change_confirmed`, `no_change_rejected` (with at least one actionable feedback entry) or `unclear`.
+
+There may be no branch or PR, so the prompt does not rely on a diff.
 
 ## Completion Detection
 

@@ -13,6 +13,7 @@ const REQUEUEABLE_FROM_LABEL = new Set<string>([
   'awaiting-human-merge',
   'awaiting-human-review',
   'needs-human-review',
+  'no-change',
 ]);
 import {
   getTaskByIssue,
@@ -195,6 +196,7 @@ async function handleIssueEvent(
             salvage_next_attempt_at: null,
             started_at: null,
             completed_at: null,
+            no_change_claim: null,
           });
           log.info(
             {

@@ -15,8 +15,15 @@
  */
 
 import type { Task, TaskStatus } from '@orchestrator/shared';
-import { DRIVER_LABELS } from '@orchestrator/shared';
+import { DRIVER_LABELS, STATUS_LABELS } from '@orchestrator/shared';
 import type { Snapshot } from './forgejo-snapshot.js';
+
+/** Stored statuses in which a no-change claim is awaiting its reviewer. */
+const CLAIM_REVIEW_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
+  'in-review',
+  'awaiting-human-review',
+  'needs-human-review',
+]);
 
 export interface DerivedStatusResult {
   status: TaskStatus;
@@ -67,11 +74,33 @@ export function deriveStatus(
   if (issue.state === 'closed') {
     // If the orchestrator already recorded the outcome as a final state
     // that matches the Forgejo view, prefer that label ('merged' handled
-    // above; 'cancelled' stays 'cancelled'). Otherwise treat as cancelled.
+    // above; 'cancelled' stays 'cancelled'). A confirmed no-change outcome
+    // closes the issue on purpose — it carries `status/no-change` (or is
+    // stored as such while the label write is in flight) and is NOT a
+    // cancellation. Otherwise treat as cancelled.
+    if (stored === 'no-change' || labels.has(STATUS_LABELS.NO_CHANGE)) {
+      return decide(
+        stored,
+        'no-change',
+        'issue closed on Forgejo as no-change (no code change required)'
+      );
+    }
     if (stored === 'cancelled') {
       return decide(stored, 'cancelled', 'issue closed on Forgejo');
     }
     return decide(stored, 'cancelled', 'issue closed on Forgejo');
+  }
+
+  // A no-change claim under review is not a PR handoff, even when an empty
+  // PR exists on the branch: keep the stored status (in-review /
+  // awaiting-human-review / needs-human-review) so a `human-merge` label
+  // can't relabel it as awaiting a merge that will never happen.
+  if (task.no_change_claim && CLAIM_REVIEW_STATUSES.has(stored)) {
+    return {
+      status: stored,
+      reason: 'no-change claim under review — using stored runtime status',
+      overridden: false,
+    };
   }
 
   // 3. Driver labels take effect only while the PR exists — before that the

@@ -9,7 +9,7 @@ import {
   getAgentProfile,
 } from '../db.js';
 import { isBlocked, syncTaskDependencies } from '../dependencies.js';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { TERMINAL_STATUSES, parseNoChangeClaim } from '@orchestrator/shared';
 import {
   enrichTask,
   enrichTaskWithDerivation,
@@ -18,9 +18,20 @@ import {
 } from '../task-view.js';
 import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
-import { cancelTask, closeTask, resetTask, requeueTask, extendTask } from '../actions.js';
+import {
+  cancelTask,
+  closeTask,
+  resetTask,
+  requeueTask,
+  extendTask,
+  finalizeNoChange,
+} from '../actions.js';
 import { updateTaskWithSync, recordTaskEvent } from '../state-sync.js';
-import { attemptMerge } from '../agents/review.js';
+import {
+  attemptMerge,
+  sendBackForRework,
+  formatNoChangeRejection,
+} from '../agents/review.js';
 import { readTaskLog } from '../archive.js';
 import { warmRepoSnapshots } from '../forgejo-snapshot.js';
 import { loadManagedContainerIds } from '../container-list.js';
@@ -42,6 +53,15 @@ const RESETTABLE_STATUSES = new Set([
   'failed',
   'cancelled',
   'awaiting-human-merge',
+  'awaiting-human-review',
+  'needs-human-review',
+  'no-change',
+]);
+
+/** Statuses in which a human may Accept or Reject a pending no-change
+ *  claim: parked for a `human-review` task, or escalated after the review
+ *  agent returned an unclear verdict. */
+const NO_CHANGE_DECIDABLE_STATUSES = new Set([
   'awaiting-human-review',
   'needs-human-review',
 ]);
@@ -526,6 +546,11 @@ export function createTaskRoutes(
                 error: 'Cannot close a merged task — it represents a completed success.',
               });
             }
+            if (task.status === 'no-change') {
+              return reply.status(400).send({
+                error: 'Cannot close a no-change task — it is already resolved and its issue closed.',
+              });
+            }
             await closeTask(
               task,
               forgejo,
@@ -541,6 +566,11 @@ export function createTaskRoutes(
               return reply
                 .status(400)
                 .send({ error: 'Can only force-approve tasks in review' });
+            }
+            if (task.no_change_claim) {
+              return reply.status(400).send({
+                error: 'This review is of a no-change claim, not a PR — there is nothing to merge.',
+              });
             }
             await attemptMerge(task, forgejo, log, (t, fb) =>
               scheduler.launchDevContainer(t, fb)
@@ -585,6 +615,61 @@ export function createTaskRoutes(
                 // Best effort
               }
             }
+            scheduler.triggerTick();
+            break;
+          }
+
+          case 'accept_no_change':
+          case 'reject_no_change': {
+            // Human decision on a dev agent's no-change claim (task with
+            // `human-review`, or an unclear agent verdict).
+            const claim = parseNoChangeClaim(task.no_change_claim);
+            if (!claim || !NO_CHANGE_DECIDABLE_STATUSES.has(task.status)) {
+              return reply.status(400).send({
+                error: `No no-change claim awaiting a decision (task is '${task.status}'). Valid states: ${[...NO_CHANGE_DECIDABLE_STATUSES].join(', ')} with a pending claim.`,
+              });
+            }
+            const comment =
+              typeof body.comment === 'string' ? body.comment.trim() : '';
+
+            if (action === 'accept_no_change') {
+              await finalizeNoChange(
+                task,
+                forgejo,
+                log,
+                {
+                  confirmedBy: 'human reviewer',
+                  reason: comment || claim.reason,
+                },
+                () => scheduler.triggerTick()
+              );
+              break;
+            }
+
+            // Reject: the comment is the review feedback for the rework
+            // attempt, so it is required. Counts against max_attempts
+            // exactly like a review agent's changes_needed.
+            if (!comment) {
+              return reply.status(400).send({
+                error: 'comment is required to reject a no-change claim — it becomes the feedback for the next attempt.',
+              });
+            }
+            recordTaskEvent(
+              task.id,
+              'no_change_rejected',
+              `No-change claim rejected by human reviewer: ${comment}`
+            );
+            await sendBackForRework(
+              task,
+              {
+                heading: 'Human reviewer rejected the no-change claim',
+                summary: '',
+                feedback: formatNoChangeRejection(claim, comment),
+              },
+              forgejo,
+              log,
+              (t, fb) => scheduler.launchDevContainer(t, fb)
+            );
             scheduler.triggerTick();
             break;
           }

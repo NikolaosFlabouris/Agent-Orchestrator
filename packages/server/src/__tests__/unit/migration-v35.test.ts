@@ -61,7 +61,7 @@ describe('v35 effort_level migration', () => {
 
     expect(columns(db, 'agent_profiles').has('effort_level')).toBe(true);
     expect(columns(db, 'attempts').has('effort_level')).toBe(true);
-    expect(schemaVersion(db)).toBe('35');
+    expect(schemaVersion(db)).toBe('36');
     // Seeded profiles carry no opinion about effort.
     expect(
       db
@@ -105,7 +105,7 @@ describe('v35 effort_level migration', () => {
     db = initDatabase(dbFile);
     expect(columns(db, 'agent_profiles').has('effort_level')).toBe(true);
     expect(columns(db, 'attempts').has('effort_level')).toBe(true);
-    expect(schemaVersion(db)).toBe('35');
+    expect(schemaVersion(db)).toBe('36');
     // Pre-existing rows survive and read as "unset".
     expect(
       db.prepare('SELECT COUNT(*) AS n FROM agent_profiles').get()
@@ -139,7 +139,7 @@ describe('v35 effort_level migration', () => {
     db = initDatabase(dbFile);
     expect(columns(db, 'agent_profiles').has('effort_level')).toBe(true);
     expect(columns(db, 'attempts').has('effort_level')).toBe(true);
-    expect(schemaVersion(db)).toBe('35');
+    expect(schemaVersion(db)).toBe('36');
     db.close();
   });
 

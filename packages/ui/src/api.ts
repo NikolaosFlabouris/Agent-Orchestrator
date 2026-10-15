@@ -454,6 +454,8 @@ export type TaskAction =
   | { action: 'reset' }
   | { action: 'requeue' }
   | { action: 'extend'; additional_attempts: number }
+  | { action: 'accept_no_change'; comment?: string }
+  | { action: 'reject_no_change'; comment: string }
   | { agent_profile_id: string | null }
   | { review_agent_profile_id: string | null }
   | { max_attempts: number };

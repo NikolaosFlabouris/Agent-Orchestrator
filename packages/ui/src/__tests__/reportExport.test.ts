@@ -22,11 +22,12 @@ const overview: ReportsOverview = {
     'awaiting-human-merge': 0,
     'awaiting-human-review': 0,
     'needs-human-review': 0,
+    'no-change': 1,
     reset: 0,
   },
-  total_tasks: 9,
+  total_tasks: 10,
   success_rate: 0.833,
-  terminal_counts: { merged: 5, failed: 1, cancelled: 0 },
+  terminal_counts: { merged: 5, failed: 1, cancelled: 0, no_change: 1 },
   throughput: { tasks_created: 9, tasks_merged: 5 },
   backlog: { queued: 2, blocked: 1 },
   implementation_duration: { count: 6, avg_seconds: 1200, p50_seconds: 1100, p90_seconds: 2000 },
@@ -44,7 +45,7 @@ const modelBoard: ReportsLeaderboard = {
       label: 'claude, opus',
       task_count: 4,
       success_rate: 0.75,
-      terminal_counts: { merged: 3, failed: 1, cancelled: 0 },
+      terminal_counts: { merged: 3, failed: 1, cancelled: 0, no_change: 0 },
       avg_implementation_seconds: 1000,
       avg_review_seconds: 200,
       avg_rework: 1.2,
@@ -119,12 +120,14 @@ describe('toCsv', () => {
   it('includes the overview summary block', () => {
     expect(csv).toContain('Tasks merged,5');
     expect(csv).toContain('Success rate,0.833');
+    expect(csv).toContain('No change,1');
     expect(csv).toContain('Backlog queued,2');
   });
 
   it('includes a leaderboard table with a header and rows', () => {
     expect(csv).toContain('Leaderboard: model');
     expect(csv).toContain('group_by,key,label,task_count');
+    expect(csv).toContain('merged,failed,cancelled,no_change,avg_implementation_s');
   });
 
   it('includes the PR churn columns in the leaderboard export', () => {

@@ -73,6 +73,7 @@ export function toCsv(data: ReportExportData): string {
   lines.push(csvRow(['Tasks created', overview.throughput.tasks_created]));
   lines.push(csvRow(['Tasks merged', overview.throughput.tasks_merged]));
   lines.push(csvRow(['Success rate', overview.success_rate ?? '']));
+  lines.push(csvRow(['No change', overview.terminal_counts.no_change]));
   lines.push(csvRow(['Avg lead time (s)', overview.lead_time.avg_seconds ?? '']));
   lines.push(
     csvRow(['Avg implementation (s)', overview.implementation_duration.avg_seconds ?? ''])
@@ -93,6 +94,7 @@ export function toCsv(data: ReportExportData): string {
     'merged',
     'failed',
     'cancelled',
+    'no_change',
     'avg_implementation_s',
     'avg_review_s',
     'avg_rework',
@@ -122,6 +124,7 @@ export function toCsv(data: ReportExportData): string {
           r.terminal_counts.merged,
           r.terminal_counts.failed,
           r.terminal_counts.cancelled,
+          r.terminal_counts.no_change,
           r.avg_implementation_seconds ?? '',
           r.avg_review_seconds ?? '',
           r.avg_rework ?? '',

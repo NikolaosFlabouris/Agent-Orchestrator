@@ -24,6 +24,7 @@ const STATUS_LABELS: Record<string, string> = {
   'awaiting-human-merge': 'Awaiting human merge',
   'awaiting-human-review': 'Awaiting human review',
   'needs-human-review': 'Human review needed',
+  'no-change': 'No change needed — task complete',
   reset: 'Task reset',
 };
 
