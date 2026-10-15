@@ -85,8 +85,26 @@ RUN npm install -g opencode-ai
 # pi/version case catches that. The other two CLIs above float unpinned.
 RUN npm install -g @earendil-works/pi-coding-agent@~1.2.0
 
-# Install Claude Agent SDK for TypeScript harness
+# Install Claude Agent SDK for TypeScript harness.
+#
+# Do NOT also install tsx globally. The orchestrator launches this harness as
+# `npx tsx /usr/local/bin/harness-sdk.ts` (docker.ts), and when npx resolves a
+# package from the global prefix it puts the global bin dir (/usr/bin) at the
+# FRONT of PATH. That shadows ~/go/bin for everything the harness runs —
+# install steps included — so repo setup scripts that install pinned tools
+# there see the image's /usr/bin copies instead: Imbina's agent-setup.sh found
+# apt's shellcheck 0.9.0 instead of its pinned 0.11.0 and failed every attempt
+# (task 624, 2026-10-16). Without a global tsx, npx fetches it into the
+# per-repo npm cache (/home/agent/.npm, a persistent mount) and prepends only
+# that cache dir.
 RUN npm install -g @anthropic-ai/claude-agent-sdk
+# Node doesn't search the global module directory when resolving imports, so
+# without this harness-sdk.ts dies on its first line with "Cannot find module
+# '@anthropic-ai/claude-agent-sdk'" — before it writes result.json or
+# progress.log, which the orchestrator reports only as "No result.json
+# produced by agent". That failed every claude-sdk attempt (task 614,
+# 2026-10-15) in about a second.
+ENV NODE_PATH=/usr/lib/node_modules
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts
 COPY harness/harness-cli.sh /usr/local/bin/harness-cli

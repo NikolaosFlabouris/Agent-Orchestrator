@@ -33,7 +33,6 @@ export const REQUIRED_FLAGS: Record<'claude-code' | 'opencode' | 'pi', string[]>
     '--output-format',
     '--model',
     '--dangerously-skip-permissions',
-    '--bare',
   ],
   opencode: [
     '--model',
@@ -68,6 +67,7 @@ export const PI_MODELS_JSON_FIELDS = [
   'supportsDeveloperRole',
   'supportsReasoningEffort',
   'contextWindow',
+  'modelOverrides',
 ];
 
 /** `true` when `flag` appears as a whole token in help output. */

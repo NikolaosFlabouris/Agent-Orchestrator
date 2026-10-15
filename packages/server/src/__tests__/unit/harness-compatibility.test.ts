@@ -45,7 +45,7 @@ const EXPECTED_COMPAT: Record<HarnessId, ProviderKind[]> = {
   // non-Anthropic providers.
   'claude-sdk': ['anthropic'],
 
-  // CLI supports API key (--bare path) and OAuth subscription
+  // CLI supports API key (ANTHROPIC_API_KEY) and OAuth subscription
   // (CLAUDE_CODE_OAUTH_TOKEN). No non-Anthropic providers.
   'claude-code': ['anthropic', 'claude-subscription'],
 

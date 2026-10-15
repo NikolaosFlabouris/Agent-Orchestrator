@@ -12,20 +12,30 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  Pi reads provider/model configuration from `~/.pi/agent/models.json`
  *  (in the agent's HOME), NOT from /repo. The orchestrator can only
  *  write files to /repo via the bind mount; it has no way to drop a
- *  file at /home/agent/... before the agent container starts. So Pi's
- *  config file is created at run-time by the agent_command itself —
- *  the command begins with a `jq -n` invocation that constructs the
- *  JSON and writes it to ~/.pi/agent/models.json.
+ *  file at /home/agent/... before the agent container starts. So when
+ *  Pi needs a config file it is created at run-time by the
+ *  agent_command itself — the command begins with a `jq -n` invocation
+ *  that constructs the JSON and writes it to ~/.pi/agent/models.json.
  *
  *  Provider-kind handling:
  *    - Cloud kinds (anthropic, openai, gemini, mistral, deepseek,
- *      openrouter): pi has built-in provider definitions and reads
- *      the standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
- *      GEMINI_API_KEY, …) which the scheduler exports via
- *      buildProviderEnv. The orchestrator writes a minimal models.json
- *      that declares the provider + model so pi recognises the
- *      `--model <pi-provider>/<model_id>` argument; no credential
- *      lives in the file.
+ *      openrouter): pi has built-in provider definitions and a model
+ *      catalogue (context window, max output, thinking, image input),
+ *      and reads the standard env var (ANTHROPIC_API_KEY,
+ *      OPENAI_API_KEY, GEMINI_API_KEY, …) which the scheduler exports
+ *      via buildProviderEnv. By default no models.json is written:
+ *      `--model <pi-provider>/<model_id>` resolves against the
+ *      catalogue, and an id the catalogue lacks still runs ("Using
+ *      custom model id"). A `models` entry must NOT be written for
+ *      these kinds — it REPLACES the catalogue entry with pi's generic
+ *      custom-model defaults (128K context, 16,384 max output, no
+ *      thinking, no images), which is what this harness did before and
+ *      what crippled Claude Sonnet 5.5 (1M / 128K / thinking in the
+ *      catalogue). When the operator sets the model's context_window,
+ *      it goes in `modelOverrides`, which pi merges over the catalogue
+ *      entry and keeps every other field; pi ignores an override for an
+ *      id its catalogue doesn't have, so set context_window only for
+ *      catalogued cloud models. No credential lives in the file.
  *    - For openai-compatible: pi has no built-in definition for a
  *      self-hosted endpoint, so the JSON declares a custom provider
  *      with the OpenAI-completions API, the URL and an apiKey. The
@@ -73,8 +83,14 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      exit 1 for errors and output-token truncation (`stopReason:
  *      "length"`) applies only to `--mode text`; json mode still exits
  *      0 for both, and a truncated run is recorded as `success`.
- *    - Minimal cloud stanzas for `anthropic` and `google` still resolve
- *      (`--model google/<id>` reads GEMINI_API_KEY).
+ *    - Cloud kinds need no models.json: `--model anthropic/<id>` and
+ *      `--model google/<id>` (reads GEMINI_API_KEY) resolve against the
+ *      built-in catalogue, and an uncatalogued id warns and runs as a
+ *      custom id. `modelOverrides.<id>.contextWindow` changes only the
+ *      context window (`pi --list-models` showed claude-sonnet-5-5 at
+ *      200K / 128K output / thinking / images with a 200000 override),
+ *      whereas a `models: [{id}]` entry replaced the catalogue entry
+ *      with 128K / 16.4K / no thinking / no images (verified 2026-10-16).
  *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
  *      codemode APIs, MCP, and the Azure provider's name
  *      (`azure-openai-responses` → `azure`) — none of which the
@@ -169,7 +185,7 @@ export const piHarness: HarnessSpec = {
     const resolved_model = `${piProviderName}/${model.model_id}`;
     const writeConfig = buildPiConfigWriteCommand(provider, model, piProviderName);
     const agent_command =
-      `mkdir -p ~/.pi/agent && ${writeConfig} && ` +
+      (writeConfig === null ? '' : `mkdir -p ~/.pi/agent && ${writeConfig} && `) +
       `pi -p --mode json --no-session --model ${sq(resolved_model)} @${sq(promptFilePath)}`;
     return {
       agent_command,
@@ -204,14 +220,15 @@ function piProviderNameFor(kind: ProviderKind): string {
 }
 
 /** Build the shell snippet that writes `~/.pi/agent/models.json` at
- *  agent-container runtime. Uses `jq -n` to construct the JSON from
- *  jq variables — guarantees correct JSON escaping regardless of
- *  input contents. */
+ *  agent-container runtime, or null when pi needs no config file (a
+ *  cloud kind with no context_window — pi's own catalogue applies).
+ *  Uses `jq -n` to construct the JSON from jq variables — guarantees
+ *  correct JSON escaping regardless of input contents. */
 function buildPiConfigWriteCommand(
   provider: Provider,
   model: Model,
   piProviderName: string
-): string {
+): string | null {
   // Optional per-model `contextWindow`. Pi defaults to 128,000 and sizes
   // compaction off this number, so against a local server started with a
   // smaller --ctx-size the default silently overflows the server, and
@@ -251,18 +268,22 @@ function buildPiConfigWriteCommand(
     );
   }
 
-  // Cloud kinds: minimal stanza declaring the built-in provider name
-  // and the model. Pi reads the standard env var the scheduler exports
-  // (per ProviderKindSpec.container_env_name) for the actual credential.
-  // The provider key is quoted in the jq filter so multi-word pi names
+  // Cloud kinds: pi's built-in catalogue already describes the model
+  // and pi reads the standard env var the scheduler exports (per
+  // ProviderKindSpec.container_env_name) for the credential, so there
+  // is nothing to write unless the operator set a context window. That
+  // goes in `modelOverrides` (merged over the catalogue entry), never in
+  // `models` (which would replace it — see the header comment). The
+  // provider key is quoted in the jq filter so multi-word pi names
   // (none today, but a hedge against future additions like
   // "google-vertex") parse correctly.
+  if (contextWindow === null) return null;
   return (
     `jq -n ` +
     `--arg provider ${sq(piProviderName)} ` +
     `--arg model_id ${sq(model.model_id)} ` +
     ctxArg +
-    `'{providers:{($provider):{models:[{id:$model_id${ctxField}}]}}}' ` +
+    `'{providers:{($provider):{modelOverrides:{($model_id):{contextWindow:$context_window}}}}}' ` +
     `> ~/.pi/agent/models.json`
   );
 }

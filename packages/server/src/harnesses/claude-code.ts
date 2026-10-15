@@ -15,22 +15,25 @@ const CLAUDE_CODE_CONFIG_KEYS = ['max_turns'] as const;
  *      Must be a positive integer.
  *
  *  Notes:
- *    - `--bare` skips OAuth/keychain reads, CLAUDE.md loading, and MCP
- *      discovery. In an ephemeral agent container with no keychain, no
- *      saved login, no project-local CLAUDE.md the orchestrator
- *      controls, and no MCP setup, every one of those lookups is
- *      either a guaranteed miss or a prompt-injection vector via repo
- *      contents. `--bare` makes the run deterministic and depend only
- *      on env vars + flags + stdin.
- *    - But `--bare` ALSO disables the OAuth code path the CLI uses to
- *      read CLAUDE_CODE_OAUTH_TOKEN. For `claude-subscription`
- *      providers the orchestrator authenticates via that token, so
- *      `--bare` must NOT be set in that case. The flag is therefore
- *      conditional on `provider.kind`:
- *         - `anthropic` (API key) → `--bare` ON  (deterministic +
- *           reads ANTHROPIC_API_KEY from env)
- *         - `claude-subscription` (OAuth) → `--bare` OFF (OAuth path
- *           active so CLAUDE_CODE_OAUTH_TOKEN is honored)
+ *    - The command is the same for both provider kinds; only the auth
+ *      env var differs. The CLI reads ANTHROPIC_API_KEY without any
+ *      flag (`apiKeySource: "ANTHROPIC_API_KEY"` in its init event).
+ *    - No `--bare`. It used to be added for `anthropic` (API key) runs,
+ *      for determinism and to skip CLAUDE.md / keychain / MCP lookups
+ *      (it can't be used for `claude-subscription`, because it also
+ *      disables the OAuth path that reads CLAUDE_CODE_OAUTH_TOKEN). On
+ *      Claude Code 2.1.301 it also cuts the toolset to Bash, Edit and
+ *      Read (3 tools vs 24 — no Write, Task, WebFetch/WebSearch or
+ *      Skill), sets CLAUDE_CODE_SIMPLE=1 and skips the repo's CLAUDE.md,
+ *      so API-key runs were far weaker agents than subscription runs of
+ *      the same model. The repos are the operator's own and the agent
+ *      runs their code under --dangerously-skip-permissions anyway, so
+ *      skipping CLAUDE.md bought no real isolation, and the ephemeral
+ *      container has no user settings or keychain to make lookups
+ *      non-deterministic. Without the flag the CLI loads the repo's
+ *      CLAUDE.md and .claude/settings.json, keeps auto-memory in the
+ *      throwaway HOME and adds commit attribution — exactly what the
+ *      subscription runs have always done.
  *    - `--print --verbose --output-format stream-json` produces the
  *      machine-readable event stream the harness's progress.log
  *      consumer expects.
@@ -56,16 +59,12 @@ export const claudeCodeHarness: HarnessSpec = {
     // Validated against EFFORT_LEVELS by the resolver, so safe to inline.
     const effortLevel = resolveEffortLevel(claudeCodeHarness, inputs);
     const effortFlag = effortLevel === null ? '' : `--effort ${effortLevel} `;
-    // See header comment: --bare is the sealed-container default but
-    // it disables OAuth-token reads, so subscription auth needs it
-    // off. Anthropic-API-key runs keep it on for determinism.
-    const bareFlag = provider.kind === 'anthropic' ? '--bare ' : '';
     // `maxTurns` is an integer-validated value so it can be inlined
     // safely. `model.model_id` and `promptFilePath` are quoted via `sq`
     // because both are external/operator-derived inputs.
     return {
       agent_command:
-        `claude --print --verbose ${bareFlag}` +
+        `claude --print --verbose ` +
         `--dangerously-skip-permissions ` +
         `--output-format stream-json ` +
         `--max-turns ${maxTurns} ` +

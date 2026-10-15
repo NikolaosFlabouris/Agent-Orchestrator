@@ -128,20 +128,29 @@ describe('claude-code harness', () => {
     ).not.toThrow();
   });
 
-  // ---- C2 fix: --bare is per-provider-kind, not always-on. ----
-  // For anthropic (API key) we keep --bare for determinism + to skip
-  // doomed keychain/CLAUDE.md/MCP lookups. For claude-subscription
-  // (OAuth) we must drop --bare because it disables the OAuth code
-  // path the CLI uses to read CLAUDE_CODE_OAUTH_TOKEN.
-  describe('C2: --bare is conditional on provider kind', () => {
-    it('includes --bare for the anthropic API-key provider', () => {
-      const inv = h.buildInvocation({
+  // ---- No --bare for either provider kind. It disables the OAuth path
+  // subscription runs need, and on API-key runs it cut the toolset to
+  // Bash/Edit/Read and skipped the repo's CLAUDE.md (see the header
+  // comment in harnesses/claude-code.ts). ----
+  describe('no --bare for either provider kind', () => {
+    it('emits the same command for the anthropic API-key provider as for the subscription', () => {
+      const apiKey = h.buildInvocation({
         profile: mkProfile({ harness_id: 'claude-code' }),
         model: mkModel(),
         provider: mkProvider({ kind: 'anthropic' }),
         promptFilePath: '/task/prompt.md',
       });
-      expect(inv.agent_command).toContain('--bare');
+      const subscription = h.buildInvocation({
+        profile: mkProfile({ harness_id: 'claude-code' }),
+        model: mkModel(),
+        provider: mkProvider({
+          kind: 'claude-subscription',
+          api_key_env_var: 'CLAUDE_CODE_OAUTH_TOKEN',
+        }),
+        promptFilePath: '/task/prompt.md',
+      });
+      expect(apiKey.agent_command).not.toContain('--bare');
+      expect(apiKey.agent_command).toBe(subscription.agent_command);
     });
 
     it('omits --bare for the claude-subscription OAuth provider', () => {
@@ -155,8 +164,7 @@ describe('claude-code harness', () => {
         promptFilePath: '/task/prompt.md',
       });
       expect(inv.agent_command).not.toContain('--bare');
-      // The rest of the headless-mode flags should still be present —
-      // we're only stripping --bare, not turning the CLI interactive.
+      // The headless-mode flags are all present.
       expect(inv.agent_command).toContain('--print');
       expect(inv.agent_command).toContain('--output-format stream-json');
       expect(inv.agent_command).toContain('--dangerously-skip-permissions');
@@ -387,7 +395,7 @@ describe('opencode harness', () => {
 describe('pi harness', () => {
   const h = getHarness('pi');
 
-  it('inlines models.json creation into the agent command', () => {
+  it('writes no models.json for a cloud kind, so pi uses its own catalogue entry', () => {
     const inv = h.buildInvocation({
       profile: mkProfile({ harness_id: 'pi' }),
       model: mkModel(),
@@ -395,10 +403,30 @@ describe('pi harness', () => {
       promptFilePath: '/task/prompt.md',
     });
     expect(inv.config_files).toEqual([]);
+    // A `models` entry would replace pi's catalogue entry (1M context,
+    // 128K output and thinking for Claude Sonnet 5.5) with 128K / 16K /
+    // no thinking, so nothing is written at all.
+    expect(inv.agent_command).toBe(
+      "pi -p --mode json --no-session --model 'anthropic/claude-sonnet-4-6' @'/task/prompt.md'"
+    );
+    expect(inv.resolved_model).toBe('anthropic/claude-sonnet-4-6');
+  });
+
+  it('inlines models.json creation into the agent command for openai-compatible', () => {
+    const inv = h.buildInvocation({
+      profile: mkProfile({ harness_id: 'pi' }),
+      model: mkModel({ model_id: 'qwen2.5:7b' }),
+      provider: mkProvider({
+        kind: 'openai-compatible',
+        base_url: 'http://gpu:11434',
+        api_key_env_var: null,
+      }),
+      promptFilePath: '/task/prompt.md',
+    });
+    expect(inv.config_files).toEqual([]);
     expect(inv.agent_command).toContain('mkdir -p ~/.pi/agent');
     expect(inv.agent_command).toContain('models.json');
     expect(inv.agent_command).toContain('pi -p --mode json');
-    expect(inv.resolved_model).toBe('anthropic/claude-sonnet-4-6');
   });
 
   it('builds an openai-compatible-targeted models.json via jq', () => {
@@ -471,17 +499,25 @@ describe('pi harness', () => {
       );
     });
 
-    it('honours context_window on cloud kinds too', () => {
+    it('honours context_window on cloud kinds as a modelOverrides entry', () => {
       const inv = h.buildInvocation({
         profile: mkProfile({ harness_id: 'pi' }),
         model: mkModel({ model_id: 'some-model-id', context_window: 200000 }),
         provider: mkProvider({ kind: 'anthropic' }),
         promptFilePath: '/task/prompt.md',
       });
-      expect(inv.agent_command).toContain('--argjson context_window 200000');
-      expect(inv.agent_command).toContain(
-        "'{providers:{($provider):{models:[{id:$model_id,contextWindow:$context_window}]}}}'"
+      expect(inv.agent_command).toBe(
+        "mkdir -p ~/.pi/agent && jq -n " +
+          "--arg provider 'anthropic' " +
+          "--arg model_id 'some-model-id' " +
+          "--argjson context_window 200000 " +
+          "'{providers:{($provider):{modelOverrides:{($model_id):{contextWindow:$context_window}}}}}' " +
+          "> ~/.pi/agent/models.json && " +
+          "pi -p --mode json --no-session --model 'anthropic/some-model-id' @'/task/prompt.md'"
       );
+      // Overrides merge over pi's catalogue entry; a `models` entry
+      // would replace it.
+      expect(inv.agent_command).not.toContain('models:[');
     });
 
     it('rejects a non-integer context_window from a hand-edited row', () => {
@@ -502,11 +538,11 @@ describe('pi harness', () => {
     });
   });
 
-  // ---- Cloud-kind support. Pi has built-in provider definitions for
-  // each of these and reads the standard env var the orchestrator
-  // exports (per ProviderKindSpec.container_env_name). The harness
-  // writes a minimal stanza naming the pi-side provider so pi
-  // recognises the --model argument. ----
+  // ---- Cloud-kind support. Pi has built-in provider definitions and a
+  // model catalogue for each of these, and reads the standard env var
+  // the orchestrator exports (per ProviderKindSpec.container_env_name).
+  // The harness only maps the kind to pi's provider name for --model
+  // (and for a modelOverrides key when context_window is set). ----
   describe('cloud kinds', () => {
     // (orchestrator kind, expected pi-side provider name).
     const cases: ReadonlyArray<[
@@ -534,12 +570,8 @@ describe('pi harness', () => {
         expect(inv.resolved_model).toBe(`${piName}/some-model-id`);
         // resolved_model is shell-quoted as the --model arg.
         expect(inv.agent_command).toContain(`--model '${piName}/some-model-id'`);
-        // models.json declaration uses the same pi-side name as the
-        // provider key so the model id is reachable when pi resolves
-        // the --model argument.
-        expect(inv.agent_command).toContain(`--arg provider '${piName}'`);
-        // No self-hosted-only fields leak into cloud-kind config.
-        expect(inv.agent_command).not.toContain('baseUrl');
+        // No models.json at all: pi's catalogue describes the model.
+        expect(inv.agent_command).not.toContain('models.json');
         expect(inv.agent_command).not.toContain('OPENAI_COMPAT_AUTH_TOKEN');
       });
     }

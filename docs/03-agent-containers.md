@@ -66,6 +66,8 @@ RUN npm install -g @anthropic-ai/claude-code \
     && npm install -g opencode-ai \
     && npm install -g @earendil-works/pi-coding-agent@~1.2.0 \
     && npm install -g @anthropic-ai/claude-agent-sdk
+# harness-sdk.ts imports the SDK; Node only finds the global copy via NODE_PATH
+ENV NODE_PATH=/usr/lib/node_modules
 
 COPY harness/harness-sdk.ts /usr/local/bin/harness-sdk.ts
 COPY harness/harness-cli.sh /usr/local/bin/harness-cli

@@ -61,7 +61,9 @@ function mkInputs(
 // flags, no new keys (`effort_level` is absent, not null).
 const PRE_FEATURE_INVOCATIONS: Record<string, unknown> = {
   'claude-code/anthropic': {
-    agent_command: "claude --print --verbose --bare --dangerously-skip-permissions --output-format stream-json --max-turns 100 --model 'm-1' < '/task/prompt.md'",
+    // No --bare since it was dropped for API-key runs: identical to the
+    // claude-subscription command below.
+    agent_command: "claude --print --verbose --dangerously-skip-permissions --output-format stream-json --max-turns 100 --model 'm-1' < '/task/prompt.md'",
     config_files: [],
     extra_env: {},
     resolved_model: "m-1",
@@ -90,8 +92,10 @@ const PRE_FEATURE_INVOCATIONS: Record<string, unknown> = {
     extra_env: {},
     resolved_model: "openai-compatible/m-1",
   },
+  // No models.json for cloud kinds: pi's built-in catalogue describes the
+  // model (a `models` entry would replace it — see harnesses/pi.ts).
   'pi/anthropic': {
-    agent_command: "mkdir -p ~/.pi/agent && jq -n --arg provider 'anthropic' --arg model_id 'm-1' '{providers:{($provider):{models:[{id:$model_id}]}}}' > ~/.pi/agent/models.json && pi -p --mode json --no-session --model 'anthropic/m-1' @'/task/prompt.md'",
+    agent_command: "pi -p --mode json --no-session --model 'anthropic/m-1' @'/task/prompt.md'",
     config_files: [],
     extra_env: {},
     resolved_model: "anthropic/m-1",
@@ -143,7 +147,7 @@ describe('claude-code effort level', () => {
   it('produces exactly the pre-feature command plus --effort high', () => {
     const inv = h.buildInvocation(mkInputs('claude-code', 'anthropic', 'high'));
     expect(inv.agent_command).toBe(
-      "claude --print --verbose --bare --dangerously-skip-permissions " +
+      "claude --print --verbose --dangerously-skip-permissions " +
         "--output-format stream-json --max-turns 100 --effort high " +
         "--model 'm-1' < '/task/prompt.md'"
     );
