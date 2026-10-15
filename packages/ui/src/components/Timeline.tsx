@@ -57,6 +57,12 @@ const EVENT_COLORS: Record<string, string> = {
   'status_awaiting-human-merge': 'bg-orange-500',
   'status_awaiting-human-review': 'bg-orange-500',
   'status_needs-human-review': 'bg-orange-500',
+  // No-change outcome: the agent's claim (amber, awaiting review), its
+  // rejection (amber, back to rework) and its confirmation (teal, done).
+  no_change_claimed: 'bg-amber-500',
+  no_change_rejected: 'bg-amber-500',
+  no_change_confirmed: 'bg-teal-500',
+  'status_no-change': 'bg-teal-500',
 };
 
 export function Timeline({ events }: { events: TaskEventResponse[] }) {

@@ -105,6 +105,7 @@ The following scoped labels must be created (see [02 - Task State Machine](./02-
 - `status/awaiting-human-merge`
 - `status/awaiting-human-review`
 - `status/needs-human-review`
+- `status/no-change`
 
 **Override labels:**
 - `human-merge` — PR left open for manual merge after agent work completes

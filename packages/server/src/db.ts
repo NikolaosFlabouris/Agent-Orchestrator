@@ -44,7 +44,7 @@ import type {
 import { TASK_STATUSES } from '@orchestrator/shared';
 import { DEFAULT_MAX_ATTEMPTS, GAUGE_MIN_SAMPLE } from './constants.js';
 
-const CURRENT_SCHEMA_VERSION = 35;
+const CURRENT_SCHEMA_VERSION = 36;
 /** Oldest schema_version this binary can forward-migrate from. Anything
  *  older predates the migration code that's still in the tree; the
  *  operator must reset the DB. v21 was the post-collapse baseline (see
@@ -201,6 +201,11 @@ function createTables(db: Database.Database): void {
       started_at TEXT,
       completed_at TEXT,
       created_at TEXT DEFAULT (datetime('now')),
+      -- v36. The dev agent's validated no-change claim (JSON NoChangeClaim:
+      -- category, reason, evidence, attempt). Set while the claim awaits
+      -- review, kept once confirmed, cleared on rejection or a new dev
+      -- attempt. NULL = no claim.
+      no_change_claim TEXT,
       -- Forgejo numbers issues per-repo (each repo starts at #1), so the
       -- same issue_id recurs across repos. Uniqueness is therefore scoped
       -- to (repo_id, issue_id), not issue_id alone — see the v27 migration.
@@ -862,6 +867,24 @@ function runMigrations(db: Database.Database): void {
           db.exec('ALTER TABLE attempts ADD COLUMN effort_level TEXT');
         }
       }
+      if (version < 36) {
+        // v36: a dev agent may conclude no code change is required and say
+        // so in /output/no-change.json; the validated claim is persisted on
+        // the task so the review step (agent or human) and the UI can read
+        // it after the output dir has been archived. Nullable — existing
+        // rows carry no claim. Same idempotent pragma_table_info guard.
+        const hasColumn = (table: string, column: string): boolean =>
+          (
+            db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`
+              )
+              .get(table, column) as { n: number }
+          ).n > 0;
+        if (!hasColumn('tasks', 'no_change_claim')) {
+          db.exec('ALTER TABLE tasks ADD COLUMN no_change_claim TEXT');
+        }
+      }
       db.prepare(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)"
       ).run(String(CURRENT_SCHEMA_VERSION));
@@ -1363,6 +1386,7 @@ export function updateTaskRaw(
       | 'container_id'
       | 'started_at'
       | 'completed_at'
+      | 'no_change_claim'
     >
   >
 ): void {
@@ -1557,7 +1581,8 @@ export function getRunningAttempt(
 }
 
 /** Cumulative review-feedback history for a task: every COMPLETED review
- *  attempt that returned `changes_needed` with non-null feedback, oldest
+ *  attempt that returned `changes_needed` (or `no_change_rejected`, which
+ *  is handled exactly like it) with non-null feedback, oldest
  *  → newest by attempt_number. This is the authoritative source for the
  *  rework prompt's feedback section — an implementer fixing attempt N
  *  regresses earlier fixes when it can't see attempts 1..N-1. Reading
@@ -1574,7 +1599,7 @@ export function getReviewFeedbackHistory(taskId: number): Attempt[] {
         WHERE task_id = ?
           AND role = 'review'
           AND status = 'completed'
-          AND verdict = 'changes_needed'
+          AND verdict IN ('changes_needed', 'no_change_rejected')
           AND feedback IS NOT NULL
         ORDER BY attempt_number ASC, id ASC`
     )
@@ -2481,10 +2506,13 @@ export function getReportOverview(filter: ReportFilter): ReportsOverview {
     (sum, s) => sum + status_counts[s],
     0
   );
+  // `no_change` is tallied but kept out of the rate: a confirmed "nothing
+  // to do" is neither a failure nor a merge.
   const terminal_counts = {
     merged: status_counts.merged,
     failed: status_counts.failed,
     cancelled: status_counts.cancelled,
+    no_change: status_counts['no-change'],
   };
   const terminal =
     terminal_counts.merged + terminal_counts.failed + terminal_counts.cancelled;
@@ -2787,7 +2815,8 @@ export function getReportLeaderboard(
                COUNT(*) AS task_count,
                SUM(CASE WHEN status = 'merged' THEN 1 ELSE 0 END) AS merged,
                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-               SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+               SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+               SUM(CASE WHEN status = 'no-change' THEN 1 ELSE 0 END) AS no_change
              FROM (
                SELECT DISTINCT ${keyCol} AS key, a.task_id, t.status
                FROM attempts a JOIN tasks t ON t.id = a.task_id
@@ -2802,7 +2831,8 @@ export function getReportLeaderboard(
                COUNT(*) AS task_count,
                SUM(CASE WHEN t.status = 'merged' THEN 1 ELSE 0 END) AS merged,
                SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-               SUM(CASE WHEN t.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+               SUM(CASE WHEN t.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+               SUM(CASE WHEN t.status = 'no-change' THEN 1 ELSE 0 END) AS no_change
              FROM tasks t
              WHERE ${cohort.clause}
              GROUP BY t.repo_id`
@@ -2814,6 +2844,7 @@ export function getReportLeaderboard(
     merged: number;
     failed: number;
     cancelled: number;
+    no_change: number;
   }>;
 
   // Query C — average develop-attempt count (rework) per group.
@@ -2859,7 +2890,7 @@ export function getReportLeaderboard(
         label: groupBy === 'repo' ? repoLabels.get(key) ?? key : key,
         task_count: 0,
         success_rate: null,
-        terminal_counts: { merged: 0, failed: 0, cancelled: 0 },
+        terminal_counts: { merged: 0, failed: 0, cancelled: 0, no_change: 0 },
         avg_implementation_seconds: null,
         avg_review_seconds: null,
         avg_rework: null,
@@ -2903,7 +2934,9 @@ export function getReportLeaderboard(
       merged: Number(t.merged),
       failed: Number(t.failed),
       cancelled: Number(t.cancelled),
+      no_change: Number(t.no_change ?? 0),
     };
+    // no_change stays out of the rate (neither a failure nor a merge).
     const terminal = row.terminal_counts.merged +
       row.terminal_counts.failed +
       row.terminal_counts.cancelled;
@@ -2952,6 +2985,7 @@ export function getReportProfileGauge(
       merged: 0,
       failed: 0,
       cancelled: 0,
+      no_change: 0,
     },
     avg_rework: row?.avg_rework ?? null,
     avg_implementation_seconds: row?.avg_implementation_seconds ?? null,
@@ -3056,7 +3090,8 @@ export function getReportDurations(
  *  status transition — see state-sync.ts). Counting "ever reached" makes the
  *  funnel a true high-water-mark of progression and drop-off, surviving
  *  rework loops (a task that bounced in-review→changes-needed→in-progress
- *  still counts at every stage it touched). */
+ *  still counts at every stage it touched). Confirmed `no-change` outcomes
+ *  are counted separately (`no_change`) — an exit, not a stage. */
 export function getReportFunnel(filter: ReportFilter): ReportsFunnel {
   const db = getDb();
   const cohort = rangeClause('t.created_at', filter);
@@ -3073,7 +3108,7 @@ export function getReportFunnel(filter: ReportFilter): ReportsFunnel {
     .prepare(
       `SELECT e.event_type AS event_type, COUNT(DISTINCT e.task_id) AS c
        FROM task_events e JOIN tasks t ON t.id = e.task_id
-       WHERE e.event_type IN ('status_preparing', 'status_in-progress', 'status_in-review', 'status_merged')
+       WHERE e.event_type IN ('status_preparing', 'status_in-progress', 'status_in-review', 'status_merged', 'status_no-change')
          AND ${cohort.clause}
        GROUP BY e.event_type`
     )
@@ -3100,7 +3135,12 @@ export function getReportFunnel(filter: ReportFilter): ReportsFunnel {
     };
   });
 
-  return { range: { from: filter.from, to: filter.to }, repos: filter.repos, stages };
+  return {
+    range: { from: filter.from, to: filter.to },
+    repos: filter.repos,
+    stages,
+    no_change: byEvent.get('status_no-change') ?? 0,
+  };
 }
 
 /** The reliability event types surfaced by the ops panel, mapped to the

@@ -11,6 +11,7 @@ const REQUEUEABLE_FROM_LABEL = new Set<string>([
   'awaiting-human-merge',
   'awaiting-human-review',
   'needs-human-review',
+  'no-change',
 ]);
 import {
   getRepos,
@@ -199,6 +200,7 @@ export class Poller {
             salvage_next_attempt_at: null,
             started_at: null,
             completed_at: null,
+            no_change_claim: null,
           });
           this.log.info(
             {
@@ -239,7 +241,7 @@ export class Poller {
    * - Label changed externally → sync state
    *
    * Scope: runs on every task that is not already in a FINAL status (i.e.
-   * not `merged` or `cancelled`). In particular, `failed`, `reset`, and the
+   * not `merged`, `cancelled` or `no-change`). In particular, `failed`, `reset`, and the
    * `awaiting-human-*` states ARE re-checked so that a PR merged manually on
    * Forgejo after the orchestrator gave up will still heal the task to
    * `merged` rather than leaving it stuck. Issue-closed and external-cancel
@@ -255,11 +257,15 @@ export class Poller {
     repo: import('@orchestrator/shared').Repo
   ): Promise<void> {
     // Only skip tasks that are already fully finalised — a merged task can't
-    // be unmerged, a cancelled task has already been cleaned up. Everything
-    // else (including `failed`) is eligible for reconciliation in case the
-    // user took action on Forgejo after the orchestrator stopped tracking.
+    // be unmerged, a cancelled or no-change task has already been cleaned up
+    // (its PR closed, its issue closed). Everything else (including
+    // `failed`) is eligible for reconciliation in case the user took action
+    // on Forgejo after the orchestrator stopped tracking.
     const candidateTasks = getTasks({ repo_id: repo.id }).filter(
-      (t) => t.status !== 'merged' && t.status !== 'cancelled'
+      (t) =>
+        t.status !== 'merged' &&
+        t.status !== 'cancelled' &&
+        t.status !== 'no-change'
     );
 
     for (const task of candidateTasks) {

@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { Task } from '@orchestrator/shared';
 import { initDatabase } from '../../db.js';
 
@@ -23,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   verifyWorkspaceState: vi.fn(),
   getWorkdir: vi.fn().mockReturnValue('/fake/workdir'),
   detectChanges: vi.fn(),
+  // No /output/no-change.json exists here unless a test points this at a
+  // temp dir holding one, so no-change claims never apply by default.
+  getOutputDir: vi.fn().mockReturnValue('/nonexistent/no-change-test/.output'),
   // forgejo-linking helpers
   buildPullRequestBody: vi.fn().mockReturnValue('pr body'),
   hasIssueLink: vi.fn().mockReturnValue(true),
@@ -50,6 +56,7 @@ vi.mock('../../workspace.js', () => ({
   verifyWorkspaceState: mocks.verifyWorkspaceState,
   getWorkdir: mocks.getWorkdir,
   detectChanges: mocks.detectChanges,
+  getOutputDir: mocks.getOutputDir,
 }));
 
 vi.mock('../../forgejo-linking.js', () => ({
@@ -88,6 +95,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     started_at: null,
     completed_at: null,
     created_at: '2026-01-01T00:00:00Z',
+    no_change_claim: null,
     ...overrides,
   };
 }
@@ -414,5 +422,207 @@ describe('postDevAgent — PR reconciliation', () => {
     expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(task.id, { pr_number: 14 });
     expect(eventTypes()).toContain('pr_adopted');
     expect(eventTypes()).not.toContain('pr_creation_failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No-change claims (#223): every no-change path honours a valid
+// /output/no-change.json instead of failing the task.
+// ---------------------------------------------------------------------------
+
+describe('postDevAgent — no-change claims', () => {
+  let outputDir: string;
+  const validClaim = {
+    category: 'already_fixed',
+    reason: 'Fixed on main by abc123 (PR #7)',
+    evidence: ['git show abc123', 'src/x.ts:12 already guards null'],
+  };
+
+  beforeEach(() => {
+    outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'no-change-'));
+    mocks.getOutputDir.mockReturnValue(outputDir);
+  });
+  afterEach(() => {
+    mocks.getOutputDir.mockReturnValue('/nonexistent/no-change-test/.output');
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  });
+
+  function writeClaim(body: unknown): void {
+    fs.writeFileSync(
+      path.join(outputDir, 'no-change.json'),
+      typeof body === 'string' ? body : JSON.stringify(body)
+    );
+  }
+
+  /** Branch exists and equals base — the agent produced nothing. */
+  function sameShaForgejo() {
+    return {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: vi.fn().mockResolvedValue({ name: 'any', commit: { id: 'samesha' } }),
+      createPullRequest: vi.fn(),
+      getPullRequest: vi.fn(),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+  }
+
+  function claimWrites(): unknown[] {
+    return mocks.updateTaskWithSync.mock.calls
+      .map((c: unknown[]) => c[1] as Record<string, unknown>)
+      .filter((u) => 'no_change_claim' in u)
+      .map((u) => JSON.parse(u.no_change_claim as string));
+  }
+
+  function expectNotFailed(): void {
+    expect(mocks.updateTaskWithSync).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: 'failed' })
+    );
+  }
+
+  it('branch matches base + valid claim → ready for claim review, not failed', async () => {
+    writeClaim(validClaim);
+    const forgejo = sameShaForgejo();
+
+    const result = await postDevAgent(mkTask(), forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expectNotFailed();
+    expect(claimWrites()).toEqual([{ ...validClaim, attempt: 1 }]);
+    const events = mocks.recordTaskEvent.mock.calls.map((c: unknown[]) => c[1]);
+    expect(events).toContain('no_change_claimed');
+    expect(events).not.toContain('no_changes');
+    // The claim (category, reason, evidence) is posted on the issue.
+    const comment = forgejo.commentOnIssue.mock.calls[0][2] as string;
+    expect(comment).toContain('already fixed');
+    expect(comment).toContain('Fixed on main by abc123');
+    expect(comment).toContain('src/x.ts:12 already guards null');
+    expect(forgejo.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('branch matches base + malformed claim → fails exactly as before', async () => {
+    writeClaim({ category: 'nope', reason: '', evidence: [] });
+    const result = await postDevAgent(mkTask(), sameShaForgejo(), silentLog);
+
+    expect(result).toBe(false);
+    expect(mocks.updateTaskWithSync).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ status: 'failed' })
+    );
+    expect(claimWrites()).toEqual([]);
+    const events = mocks.recordTaskEvent.mock.calls.map((c: unknown[]) => c[1]);
+    expect(events).toContain('no_changes');
+    expect(events).toContain('no_change_claim_invalid');
+  });
+
+  it('non-JSON claim file → fails as before', async () => {
+    writeClaim('{not json');
+    const result = await postDevAgent(mkTask(), sameShaForgejo(), silentLog);
+    expect(result).toBe(false);
+    expect(claimWrites()).toEqual([]);
+  });
+
+  it('a timed-out run (allowNoChangeClaim: false) ignores the file and fails', async () => {
+    writeClaim(validClaim);
+    const result = await postDevAgent(mkTask(), sameShaForgejo(), silentLog, {
+      allowNoChangeClaim: false,
+    });
+    expect(result).toBe(false);
+    expect(claimWrites()).toEqual([]);
+  });
+
+  it('nothing pushed and no local work + valid claim → ready for claim review', async () => {
+    writeClaim(validClaim);
+    mocks.detectChanges.mockResolvedValue({
+      hasUncommitted: false,
+      hasUntracked: false,
+      hasLocalCommits: false,
+    });
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      // Agent branch 404s; base resolves.
+      getBranch: vi.fn().mockImplementation(async (_r: unknown, b: string) => {
+        if (b === 'main') return { name: b, commit: { id: 'base000' } };
+        throw new Error('404');
+      }),
+      listBranches: vi.fn().mockResolvedValue([]),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(mkTask(), forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expectNotFailed();
+    expect(claimWrites()).toHaveLength(1);
+  });
+
+  it('empty PR diff + valid claim → ready for claim review; PR left open', async () => {
+    writeClaim(validClaim);
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: vi.fn().mockImplementation(async (_r: unknown, b: string) => ({
+        name: b,
+        commit: { id: b === 'main' ? 'base000' : 'revert1' },
+      })),
+      listPullRequests: vi.fn().mockResolvedValue([]),
+      createPullRequest: vi.fn().mockResolvedValue({ number: 42 }),
+      getPullRequest: vi.fn().mockResolvedValue({ number: 42, body: 'Closes #10', changed_files: 0 }),
+      closePullRequest: vi.fn(),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(mkTask(), forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expectNotFailed();
+    expect(claimWrites()).toHaveLength(1);
+    expect(forgejo.closePullRequest).not.toHaveBeenCalled();
+  });
+
+  it('rework attempt whose existing PR is empty + valid claim → ready for claim review', async () => {
+    writeClaim(validClaim);
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: vi.fn().mockImplementation(async (_r: unknown, b: string) => ({
+        name: b,
+        commit: { id: b === 'main' ? 'base000' : 'revert1' },
+      })),
+      getPullRequest: vi.fn().mockResolvedValue({ number: 42, body: 'Closes #10', changed_files: 0 }),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(
+      mkTask({ attempt: 2, pr_number: 42 }),
+      forgejo,
+      silentLog
+    );
+
+    expect(result).toBe(true);
+    expect(claimWrites()).toEqual([{ ...validClaim, attempt: 2 }]);
+    const comments = forgejo.commentOnIssue.mock.calls.map((c: unknown[]) => c[2]);
+    expect(comments.some((c: string) => c.startsWith('Branch updated with rework'))).toBe(false);
+  });
+
+  it('real work + a claim → normal implementation; claim ignored with a warning event', async () => {
+    writeClaim(validClaim);
+    const forgejo = {
+      getIssue: vi.fn().mockResolvedValue({ title: 'Test issue', number: 10 }),
+      getBranch: vi.fn().mockImplementation(async (_r: unknown, b: string) => ({
+        name: b,
+        commit: { id: b === 'main' ? 'base000' : 'abc123' },
+      })),
+      listPullRequests: vi.fn().mockResolvedValue([]),
+      createPullRequest: vi.fn().mockResolvedValue({ number: 42 }),
+      getPullRequest: vi.fn().mockResolvedValue({ number: 42, body: 'Closes #10', changed_files: 3 }),
+      commentOnIssue: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const result = await postDevAgent(mkTask(), forgejo, silentLog);
+
+    expect(result).toBe(true);
+    expect(claimWrites()).toEqual([]);
+    const events = mocks.recordTaskEvent.mock.calls.map((c: unknown[]) => c[1]);
+    expect(events).toContain('pr_created');
+    expect(events).toContain('no_change_claim_ignored');
+    expect(events).not.toContain('no_change_claimed');
   });
 });

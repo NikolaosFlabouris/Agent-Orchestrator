@@ -50,6 +50,85 @@ export interface Task {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  /** The dev agent's no-change claim (v36), as the JSON-serialised
+   *  `NoChangeClaim` the orchestrator validated from `/output/no-change.json`.
+   *  Set while the claim is under review (agent or human), kept once
+   *  confirmed (`no-change`) so the reason stays visible, and cleared when
+   *  the claim is rejected or a new dev attempt starts. NULL = no claim.
+   *  Parse with `parseNoChangeClaim`. */
+  no_change_claim: string | null;
+}
+
+/** Why a dev agent concluded no code change is required. */
+export type NoChangeCategory =
+  | 'already_fixed'
+  | 'duplicate'
+  | 'not_reproducible'
+  | 'obsolete';
+
+export const NO_CHANGE_CATEGORIES: readonly NoChangeCategory[] = [
+  'already_fixed',
+  'duplicate',
+  'not_reproducible',
+  'obsolete',
+];
+
+/** A validated `/output/no-change.json`, plus the attempt that produced it. */
+export interface NoChangeClaim {
+  category: NoChangeCategory;
+  /** Short explanation a human can act on. */
+  reason: string;
+  /** Commit/PR references, file:line pointers, commands run and their result. */
+  evidence: string[];
+  /** Dev attempt number that made the claim (stamped by the orchestrator). */
+  attempt: number;
+}
+
+/**
+ * Validate an agent-written no-change payload. Returns null for anything that
+ * is not a deliberate, evidenced claim — an unknown category, an empty
+ * reason, or no evidence at all — so a malformed file degrades to today's
+ * "no changes produced" failure rather than an unreviewable claim.
+ */
+export function validateNoChangeClaim(
+  raw: unknown,
+  attempt: number
+): NoChangeClaim | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r.category !== 'string' ||
+    !(NO_CHANGE_CATEGORIES as readonly string[]).includes(r.category)
+  ) {
+    return null;
+  }
+  if (typeof r.reason !== 'string' || r.reason.trim() === '') return null;
+  if (!Array.isArray(r.evidence)) return null;
+  const evidence = r.evidence
+    .filter((e): e is string => typeof e === 'string')
+    .map((e) => e.trim())
+    .filter((e) => e !== '');
+  if (evidence.length === 0) return null;
+  return {
+    category: r.category as NoChangeCategory,
+    reason: r.reason.trim(),
+    evidence,
+    attempt,
+  };
+}
+
+/** Parse `Task.no_change_claim`. Null for a missing or unreadable value. */
+export function parseNoChangeClaim(
+  stored: string | null | undefined
+): NoChangeClaim | null {
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    const attempt = typeof parsed.attempt === 'number' ? parsed.attempt : 0;
+    return validateNoChangeClaim(parsed, attempt);
+  } catch {
+    return null;
+  }
 }
 
 export type TaskStatus =
@@ -64,6 +143,7 @@ export type TaskStatus =
   | 'awaiting-human-merge'
   | 'awaiting-human-review'
   | 'needs-human-review'
+  | 'no-change'
   | 'reset';
 
 /** Every TaskStatus as a runtime array (mirrors the union above). Used to
@@ -81,6 +161,7 @@ export const TASK_STATUSES: TaskStatus[] = [
   'awaiting-human-merge',
   'awaiting-human-review',
   'needs-human-review',
+  'no-change',
   'reset',
 ];
 
@@ -514,6 +595,16 @@ export interface DurationStats {
   p90_seconds: number | null;
 }
 
+/** Terminal-outcome tallies used by the reports. `no_change` (a confirmed
+ *  "no code change required") is reported on its own and never feeds the
+ *  success rate. */
+export interface TerminalCounts {
+  merged: number;
+  failed: number;
+  cancelled: number;
+  no_change: number;
+}
+
 export interface ReportsOverview {
   range: { from: string; to: string };
   repos: number[] | null;
@@ -523,10 +614,13 @@ export interface ReportsOverview {
   /** Total tasks created in range (sum of status_counts). */
   total_tasks: number;
   /** merged / (merged + failed + cancelled) over the created-in-range
-   *  cohort, or null when no task in the cohort reached a terminal state. */
+   *  cohort, or null when no task in the cohort reached a terminal state.
+   *  `no-change` outcomes are excluded from both sides: a confirmed "nothing
+   *  to do" is neither a failure nor a merge. */
   success_rate: number | null;
-  /** The terminal-state tallies the success rate is derived from. */
-  terminal_counts: { merged: number; failed: number; cancelled: number };
+  /** The terminal-state tallies the success rate is derived from, plus the
+   *  separately-counted `no_change` outcomes (not part of the rate). */
+  terminal_counts: TerminalCounts;
   /** Throughput within range: tasks whose created_at falls in range, and
    *  tasks whose completed_at falls in range with status = merged. These
    *  use literal range membership (not the created cohort) so they line up
@@ -573,8 +667,9 @@ export interface LeaderboardRow {
   /** Human-readable label (repo "owner/name"; otherwise same as key). */
   label: string;
   task_count: number;
+  /** merged / (merged + failed + cancelled); `no_change` is excluded. */
   success_rate: number | null;
-  terminal_counts: { merged: number; failed: number; cancelled: number };
+  terminal_counts: TerminalCounts;
   avg_implementation_seconds: number | null;
   avg_review_seconds: number | null;
   avg_rework: number | null;
@@ -641,7 +736,7 @@ export interface ProfileGauge {
   insufficient_data: boolean;
   /** merged / (merged + failed + cancelled); NULL when no terminal task. */
   success_rate: number | null;
-  terminal_counts: { merged: number; failed: number; cancelled: number };
+  terminal_counts: TerminalCounts;
   /** Average develop attempts per task (rework factor). NULL when none. */
   avg_rework: number | null;
   /** Average develop-attempt wall-clock seconds. NULL when none timed. */
@@ -708,6 +803,10 @@ export interface ReportsFunnel {
   range: { from: string; to: string };
   repos: number[] | null;
   stages: FunnelStage[];
+  /** Cohort tasks that ended as a confirmed `no-change`. Reported beside
+   *  the stages, not as one: it is an exit from the funnel, not a step
+   *  towards a merge. */
+  no_change: number;
 }
 
 /** Total operational-incidence counts over the range. */

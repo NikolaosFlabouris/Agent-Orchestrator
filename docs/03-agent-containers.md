@@ -97,7 +97,7 @@ The agent user needs write access to the following paths:
 | `/repo` | Git workspace — read code, write changes, run git | Bind mount. Orchestrator creates the workspace as UID 1000, or the mount is chowned at container creation. |
 | `/repo/node_modules` | npm dependencies (cache mount) | Bind mount from shared cache volume. Directory created with UID 1000 by orchestrator. |
 | `/task` | Read task prompt and metadata; append usage-limit interruption note to `prompt.md` | Bind mount (read-write). Orchestrator chowns `prompt.md`/`meta.json` to UID 1000 so the agent can append the interruption note on a usage-limit retry. |
-| `/output` | Write result.json, progress.log, review.json | Bind mount. Directory created with UID 1000 by orchestrator. |
+| `/output` | Write result.json, progress.log, review.json, and (dev agent, optional) no-change.json | Bind mount. Directory created with UID 1000 by orchestrator. |
 | `/cache` | Shared cache root (lock file) | Bind mount. Directory created with UID 1000 by orchestrator. |
 | `/home/agent/.npm` | npm download cache | Bind mount from shared cache volume. Parent `/home/agent` is agent-owned via `useradd -m`. |
 | `/home/agent/.cache/pip` | pip download cache | Bind mount from shared cache volume. Parent `/home/agent/.cache` is pre-created agent-owned in the image. |
@@ -271,6 +271,8 @@ Agent container:
   7. Harness reads /task
   8. Agent fetches latest base, rebases if needed, implements changes
   9. Agent commits and pushes to the task branch
+     (or, if it concludes no code change is needed, writes
+      /output/no-change.json instead of committing)
   10. Harness writes /output/result.json
   11. Container exits
 
@@ -278,8 +280,12 @@ Orchestrator:
   12. Read /workspaces/issue-42/.output/result.json
   13. Verify branch was pushed (salvage local work if not)
   14. Create or update PR via Forgejo API
+      (no work + valid .output/no-change.json → route the claim to review
+       instead of failing; see 02 - Task State Machine)
   15. Clean up or preserve for rework
 ```
+
+`.output/no-change.json` is removed when each dev attempt starts, so a claim left by an earlier attempt is never read as the current attempt's. It is archived to `/data/archive/` with the other run artifacts.
 
 ## Resource Limits
 

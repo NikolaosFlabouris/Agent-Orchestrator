@@ -10,8 +10,13 @@ import type {
   AttemptRole,
   AgentResult,
   EffortLevel,
+  NoChangeClaim,
 } from '@orchestrator/shared';
-import { EFFORT_LEVELS, TERMINAL_STATUSES } from '@orchestrator/shared';
+import {
+  EFFORT_LEVELS,
+  TERMINAL_STATUSES,
+  parseNoChangeClaim,
+} from '@orchestrator/shared';
 import {
   getTask,
   getRepo,
@@ -88,6 +93,11 @@ import {
   formatDelay,
 } from './git-outage.js';
 import { postDevAgent, handleDevFailure } from './agents/develop.js';
+import {
+  clearNoChangeFile,
+  formatNoChangeClaim,
+  NO_CHANGE_FILENAME,
+} from './agents/no-change.js';
 import {
   processReviewVerdict,
   handleReviewFailure,
@@ -1378,6 +1388,23 @@ export class Scheduler {
     // Archive previous output
     await this.archivePreviousOutput(task);
 
+    // A no-change claim belongs to the attempt that made it. Drop any file
+    // an earlier attempt left behind (the archive step only moves output
+    // when a result.json exists) and any claim still on the row, so this
+    // attempt can only ever be judged on its own conclusion.
+    try {
+      await clearNoChangeFile(task);
+    } catch (err) {
+      this.log.warn(
+        { event: 'no_change_clear_failed', task_id: task.id, err },
+        `Failed to clear a previous ${NO_CHANGE_FILENAME}`
+      );
+    }
+    if (task.no_change_claim) {
+      updateTaskWithSync(task.id, { no_change_claim: null });
+      task = getTask(task.id)!;
+    }
+
     // Verify workspace state
     await verifyWorkspaceState(task, this.log);
 
@@ -1488,8 +1515,10 @@ export class Scheduler {
     const outputDir = getOutputDir(task);
     const cacheDir = getCacheDir(repo.owner, repo.name);
 
-    // Archive previous output
-    await this.archivePreviousOutput(task);
+    // Archive previous output — except the no-change claim this review is
+    // about, which stays in place so a confirmed claim reaches the
+    // persistent archive with the task's other artifacts.
+    await this.archivePreviousOutput(task, { keepNoChangeFile: true });
 
     // Record pre-review SHA
     let preReviewSha: string | undefined;
@@ -1598,6 +1627,11 @@ export class Scheduler {
       // Best effort
     }
 
+    // A no-change claim is reviewed by the same reviewer a PR would be:
+    // the human for `human-review` tasks, the review agent (in no-change
+    // mode, see buildReviewPrompt) otherwise.
+    const claim = parseNoChangeClaim(getTask(task.id)?.no_change_claim);
+
     if (hasHumanReview) {
       updateTaskWithSync(task.id, {
         status: 'awaiting-human-review',
@@ -1607,7 +1641,9 @@ export class Scheduler {
         await this.forgejo.commentOnIssue(
           repo,
           task.issue_id,
-          `Implementation complete. PR ready for human review (human-review label detected).`
+          claim
+            ? `No-change claim ready for human review (human-review label detected). Accept it to close the task, or Reject it with a comment to start a rework attempt.`
+            : `Implementation complete. PR ready for human review (human-review label detected).`
         );
       } catch { /* best effort */ }
       activeState.delete(task.id);
@@ -1703,7 +1739,8 @@ export class Scheduler {
       if (ready) {
         try {
           const repo = getRepo(task.repo_id);
-          if (repo) {
+          // A no-change claim already posted its own comment.
+          if (repo && !getTask(task.id)?.no_change_claim) {
             await this.forgejo.commentOnIssue(
               repo,
               task.issue_id,
@@ -1717,8 +1754,12 @@ export class Scheduler {
         activeState.delete(task.id);
       }
     } else if (result.status === 'timeout') {
-      // Check if the agent produced usable work before timing out
-      const ready = await postDevAgent(task, this.forgejo, this.log);
+      // Check if the agent produced usable work before timing out. A run
+      // that timed out cannot have made a deliberate no-change claim, so
+      // any no-change.json is ignored and the no-change paths fail as usual.
+      const ready = await postDevAgent(task, this.forgejo, this.log, {
+        allowNoChangeClaim: false,
+      });
       if (ready) {
         try {
           const repo = getRepo(task.repo_id);
@@ -1836,6 +1877,7 @@ export class Scheduler {
     const freshTask = getTask(task.id);
     if (freshTask && (
       freshTask.status === 'merged' ||
+      freshTask.status === 'no-change' ||
       freshTask.status === 'failed' ||
       freshTask.status === 'awaiting-human-merge' ||
       freshTask.status === 'awaiting-human-review' ||
@@ -2340,7 +2382,10 @@ export class Scheduler {
     }
   }
 
-  private async archivePreviousOutput(task: Task): Promise<void> {
+  private async archivePreviousOutput(
+    task: Task,
+    options: { keepNoChangeFile?: boolean } = {}
+  ): Promise<void> {
     const outputDir = getOutputDir(task);
     const resultPath = path.join(outputDir, 'result.json');
 
@@ -2356,7 +2401,9 @@ export class Scheduler {
       await fsp.mkdir(archiveDir, { recursive: true });
 
       // Move files
-      for (const file of ['result.json', 'progress.log', 'review.json']) {
+      const files = ['result.json', 'progress.log', 'review.json'];
+      if (!options.keepNoChangeFile) files.push(NO_CHANGE_FILENAME);
+      for (const file of files) {
         const src = path.join(outputDir, file);
         try {
           await fsp.rename(src, path.join(archiveDir, file));
@@ -2452,7 +2499,7 @@ ${stripDependencySection(issue.body)}
    If there are conflicts, resolve them before proceeding.
 2. Read and understand the task above
 3. Explore the relevant codebase to understand existing patterns
-4. Implement the changes described in the task
+4. Implement the changes described in the task (or, if no code change is needed, see "If no code change is needed" below)
 5. Run any existing tests to verify your changes don't break anything
 6. Self-review before committing — critique your own work; do not rely solely on the downstream review:
    - Re-read the task requirements and acceptance criteria above.
@@ -2471,9 +2518,30 @@ ${stripDependencySection(issue.body)}
 - Follow the existing code style and conventions in the repo
 - Do not modify files unrelated to the task
 - If the task is unclear, make reasonable assumptions and document them
-- Always push your work before exiting
+- Always push your work before exiting (unless you wrote /output/no-change.json — see below)
 - Do not open a pull request — just push your branch; the orchestrator opens the PR
 - If the repo has pre-commit hooks, all hooks must pass before pushing
+
+## If no code change is needed
+
+If, after investigating, you conclude that the task needs no code change —
+the fix is already on ${repo.base_branch}, the issue duplicates another, the
+problem cannot be reproduced, or the task is obsolete — do NOT make an empty
+or cosmetic commit and do not push. Instead write /output/no-change.json with
+exactly this structure, then exit:
+
+{
+  "category": "already_fixed" | "duplicate" | "not_reproducible" | "obsolete",
+  "reason": "Short explanation a human can act on",
+  "evidence": ["commit or PR references, file:line pointers, commands run and their result"]
+}
+
+Only use this for a deliberate conclusion you can back with evidence, and
+cite that evidence. It is not a way to give up: if you could not finish the
+task, do not write this file — exit as you normally would. A reviewer checks
+the claim against the current ${repo.base_branch}; if it is rejected you will
+be asked to implement the task. If you do commit changes, do not write this
+file.
 `;
 
   if (feedback) {
@@ -2494,6 +2562,8 @@ export function buildReviewPrompt(
   repo: Repo,
   issue: { title: string; body: string }
 ): string {
+  const claim = parseNoChangeClaim(task.no_change_claim);
+  if (claim) return buildNoChangeReviewPrompt(task, repo, issue, claim);
   return `## Review Task
 
 Review the changes on the current branch against the base branch (${repo.base_branch}).
@@ -2581,5 +2651,82 @@ Schema rules:
 Walk the rubric dimension by dimension before writing the file. Do not emit
 vague feedback such as "improve error handling"; say which file and line,
 what is wrong, and exactly what to change.
+`;
+}
+
+/**
+ * Review prompt for a dev agent's no-change claim. There may be no branch
+ * or PR diff to review, so the reviewer checks the claim against the
+ * current base branch and the original task. Verdicts reuse review.json
+ * (see NO_CHANGE_VERDICTS in agents/review.ts).
+ */
+export function buildNoChangeReviewPrompt(
+  task: Task,
+  repo: Repo,
+  issue: { title: string; body: string },
+  claim: NoChangeClaim
+): string {
+  return `## Review Task — No-change claim
+
+The implementation agent investigated the task below and concluded that **no
+code change is required** (attempt ${claim.attempt}). Your job is to decide
+whether that conclusion is correct. There is no change to review: the branch
+may not exist and there may be no pull request.
+
+## Original Task Description
+
+${stripDependencySection(issue.body)}
+
+## The agent's claim
+
+${formatNoChangeClaim(claim)}
+
+## Instructions
+
+1. Fetch the latest base branch and confirm the task branch adds nothing:
+   git fetch origin ${repo.base_branch}
+   git diff origin/${repo.base_branch}...HEAD --stat
+   To run commands against the base, you may \`git checkout --detach origin/${repo.base_branch}\`,
+   but run \`git checkout -\` before you exit and leave the working tree clean —
+   a rejected claim is reworked in this same checkout.
+2. Re-read every requirement and acceptance criterion in the task above.
+3. Verify each piece of evidence yourself: look up the cited commits / PRs
+   (git log, git show), open the cited files and lines, and re-run the cited
+   commands where you can (e.g. the test suite).
+4. Decide whether ${repo.base_branch} as it stands today already satisfies the
+   task — or the task is genuinely a duplicate, not reproducible, or
+   obsolete. A claim that is only partly true (some requirements still
+   unmet) must be rejected.
+5. Do not modify, commit or push anything.
+
+## Output
+
+Create a file at /output/review.json with EXACTLY this structure:
+
+{
+  "verdict": "no_change_confirmed" | "no_change_rejected" | "unclear",
+  "summary": "1-3 sentences: the confirmed reason, or why the claim is wrong",
+  "feedback": [
+    {
+      "file": "path/to/file.ts",
+      "line": 42,
+      "category": "requirements",
+      "severity": "blocker",
+      "comment": "Which requirement is not met on ${repo.base_branch}, and why",
+      "suggestion": "What the implementer must change"
+    }
+  ]
+}
+
+Verdict rules:
+- "no_change_confirmed" — you verified that no code change is required. The
+  task will be closed without a merge, so be certain. "summary" must state
+  the confirmed reason a human can act on (cite the commit / PR / file).
+- "no_change_rejected" — the claim is wrong or incomplete; the task still
+  needs code changes. Requires AT LEAST ONE "feedback" entry with a concrete,
+  actionable "suggestion"; it is handed to the implementer for the next
+  attempt.
+- "unclear" — you cannot determine whether the claim is correct. Use this
+  sparingly; it routes the claim to a human.
 `;
 }

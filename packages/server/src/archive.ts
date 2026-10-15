@@ -2,7 +2,8 @@
  * Persistent archive of per-task agent run artifacts.
  *
  * Attempt rows live in the database forever, but the files the agent
- * produced — `progress.log`, `result.json`, `review.json`, `meta.json` —
+ * produced — `progress.log`, `result.json`, `review.json`,
+ * `no-change.json`, `meta.json` —
  * live inside the task workspace and are deleted by `cleanupOldWorkspaces`
  * once WORKSPACE_RETENTION_DAYS have passed. After that `attempts.log_path`
  * dangles and any log-based post-mortem ("why did model X fail on task Y
@@ -13,7 +14,7 @@
  * task reaches a terminal state (a crash between completion and the sweep
  * would otherwise lose them). Everything else in the workspace — the
  * checkout, node_modules, build output — is deliberately NOT archived:
- * workspaces are large and re-creatable, these four files are neither.
+ * workspaces are large and re-creatable, these few files are neither.
  *
  * Layout: ARCHIVE_ROOT/<repo_id>/issue-<issue_id>/. Repo-scoped for the same
  * reason workspaces are (`<repo_id>-issue-<n>`): Forgejo issue numbers are
@@ -51,12 +52,14 @@ const ARCHIVED_FILES: ReadonlyArray<{ name: string; gzip: boolean }> = [
   { name: LOG_FILENAME, gzip: true },
   { name: 'result.json', gzip: false },
   { name: 'review.json', gzip: false },
+  { name: 'no-change.json', gzip: false },
   { name: 'meta.json', gzip: false },
 ];
 
 /**
- * Where a given file is looked for, in order. `progress.log`, `result.json`
- * and `review.json` are written by the harness into `.output/`; `meta.json`
+ * Where a given file is looked for, in order. `progress.log`, `result.json`,
+ * `review.json` and `no-change.json` are written by the agent/harness into
+ * `.output/`; `meta.json`
  * is written by the orchestrator into `.task/` (see `writeTaskFiles`). Both
  * directories are probed for every file so a harness that puts one somewhere
  * else still gets archived rather than silently skipped.

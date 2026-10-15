@@ -17,14 +17,13 @@ import { DEFAULT_MAX_ATTEMPTS } from './constants.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /**
- * Cancel a task — stop container, delete remote branch, close PR, update labels.
+ * Best-effort teardown shared by cancel, close and no-change finalisation:
+ * stop and remove the task's container, delete its remote branch, close its
+ * PR. Every step swallows errors (already gone / never existed).
  */
-export async function cancelTask(
-  task: Task,
-  forgejo: ForgejoClient,
-  scheduler: Scheduler,
-  log: FastifyBaseLogger,
-  reason: string = 'Cancelled by user'
+async function releaseTaskResources(
+  task: Pick<Task, 'repo_id' | 'container_id' | 'branch_name' | 'pr_number'>,
+  forgejo: ForgejoClient
 ): Promise<void> {
   const repo = getRepo(task.repo_id);
 
@@ -56,6 +55,22 @@ export async function cancelTask(
       // Best effort
     }
   }
+}
+
+/**
+ * Cancel a task — stop container, delete remote branch, close PR, update labels.
+ */
+export async function cancelTask(
+  task: Task,
+  forgejo: ForgejoClient,
+  scheduler: Scheduler,
+  log: FastifyBaseLogger,
+  reason: string = 'Cancelled by user'
+): Promise<void> {
+  const repo = getRepo(task.repo_id);
+
+  // 1–3. Stop container, delete remote branch, close PR
+  await releaseTaskResources(task, forgejo);
 
   // 4. Update issue
   if (repo) {
@@ -111,34 +126,8 @@ export async function closeTask(
 ): Promise<void> {
   const repo = getRepo(task.repo_id);
 
-  // 1. Stop running container
-  if (task.container_id) {
-    try {
-      const container = getContainer(task.container_id);
-      await stopContainer(container);
-      await removeContainer(container);
-    } catch {
-      // Container may already be gone
-    }
-  }
-
-  // 2. Delete remote branch
-  if (task.branch_name && repo) {
-    try {
-      await forgejo.deleteBranch(repo, task.branch_name);
-    } catch {
-      // Branch may not exist on remote
-    }
-  }
-
-  // 3. Close PR if opened
-  if (task.pr_number && repo) {
-    try {
-      await forgejo.closePullRequest(repo, task.pr_number);
-    } catch {
-      // Best effort
-    }
-  }
+  // 1–3. Stop container, delete remote branch, close PR
+  await releaseTaskResources(task, forgejo);
 
   // 4. Update + close the Forgejo issue. Closing the issue is the new
   //    behaviour vs cancelTask — a closed task is fully resolved, not just
@@ -177,6 +166,90 @@ export async function closeTask(
 
   // 6. Trigger fill to use freed slot
   scheduler.triggerTick();
+}
+
+/** Who confirmed a no-change claim and why, for the closing comment. */
+export interface NoChangeConfirmation {
+  /** e.g. `review agent` or `human reviewer`. */
+  confirmedBy: string;
+  /** The confirmed reason, as the reviewer stated it. */
+  reason: string;
+}
+
+/**
+ * Finalise a task as `no-change` — the work it asked for needs no code change
+ * (already fixed, duplicate, …) and a reviewer has confirmed that.
+ *
+ * Steps: set status `no-change` + `completed_at` (frees the slot), record
+ * `no_change_confirmed`, delete the agent branch and close any PR, post the
+ * confirmed reason, swap in `status/no-change` keeping every non-`status/*`
+ * label, and close the issue. Nothing is left for a human — not even on a
+ * `human-merge` task, because there is nothing to merge.
+ *
+ * The status is written FIRST, unlike closeTask: closing the issue fires an
+ * `issues.closed` webhook, and a task still in an active status at that
+ * moment would be cancelled by it. Once `no-change` (terminal) is stored the
+ * webhook and poller leave it alone.
+ *
+ * Reusable by any reviewer that concludes "nothing to do" (e.g. a future
+ * "superseded" verdict on a normal PR). Forgejo steps are best effort.
+ */
+export async function finalizeNoChange(
+  task: Task,
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger,
+  confirmation: NoChangeConfirmation,
+  onSlotFreed?: () => void
+): Promise<void> {
+  const fresh = getTask(task.id) ?? task;
+  const repo = getRepo(fresh.repo_id);
+
+  // 1. Terminal status first (see above). Clearing container_id here is
+  //    safe: the teardown below works from the pre-update row.
+  updateTaskWithSync(fresh.id, {
+    status: 'no-change',
+    container_id: null,
+    completed_at: new Date().toISOString(),
+  });
+  recordTaskEvent(
+    fresh.id,
+    'no_change_confirmed',
+    `No change needed — confirmed by ${confirmation.confirmedBy}: ${confirmation.reason}`
+  );
+
+  // 2. Stop container, delete branch, close PR
+  await releaseTaskResources(fresh, forgejo);
+
+  // 3. Explain, relabel (keeping non-status labels), close the issue
+  if (repo) {
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        fresh.issue_id,
+        `No code change needed — confirmed by ${confirmation.confirmedBy}.\n\n${confirmation.reason}\n\nAgent branch and PR cleaned up; issue closed.`
+      );
+    } catch { /* best effort */ }
+
+    try {
+      await replaceStatusLabel(forgejo, repo, fresh.issue_id, 'status/no-change');
+    } catch { /* best effort */ }
+
+    try {
+      await forgejo.closeIssue(repo, fresh.issue_id);
+    } catch { /* best effort — issue may already be closed */ }
+  }
+
+  log.info(
+    {
+      event: 'no_change_confirmed',
+      task_id: fresh.id,
+      confirmed_by: confirmation.confirmedBy,
+    },
+    'Task finalised as no-change'
+  );
+
+  // 4. Let the scheduler reuse the freed slot
+  onSlotFreed?.();
 }
 
 export interface ResetOptions {
@@ -321,6 +394,7 @@ export async function resetTask(
     started_at: null,
     completed_at: null,
     queue_position: queuePosition,
+    no_change_claim: null,
   });
 
   log.info(

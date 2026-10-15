@@ -98,6 +98,8 @@ The slot is only freed when the task leaves the dev→review→rework loop:
 | `in-review → approved → merged` | Yes — task complete |
 | `→ awaiting-human-merge/review` | Yes — orchestrator's work is done |
 | `→ needs-human-review` | Yes — unclear verdict, needs human |
+| `in-progress → in-review` (no-change claim) | No — review agent starts in no-change mode |
+| `→ no-change` | Yes — claim confirmed, issue closed |
 | `→ failed` or `→ cancelled` | Yes — terminal |
 
 Neither the review nor the rework is separately queued. When the dev container exits, the review starts in the same slot. When the review returns `changes_needed`, the next dev container starts in the same slot. The task holds its slot through the entire cycle until it merges, fails, or requires human intervention.
@@ -261,7 +263,25 @@ This runs before `post_dev_agent` and before rework workspace preparation.
 
 ### Post-Agent Verification (after dev agent)
 
-The agent is expected to commit and push its work. The orchestrator verifies this happened and creates the PR. If the agent didn't push (crash, timeout, or oversight), the orchestrator salvages local work as a fallback. Returns `true` if a PR is ready for review, `false` if the task was marked as failed (caller should not continue).
+The agent is expected to commit and push its work. The orchestrator verifies this happened and creates the PR. If the agent didn't push (crash, timeout, or oversight), the orchestrator salvages local work as a fallback. Returns `true` if something is ready for review: a PR, or a no-change claim (`task.no_change_claim` set). Returns `false` if the task was marked as failed (caller should not continue).
+
+Every no-change path first calls `claim_no_change`. That covers the branch matching base, nothing pushed and nothing local, and an empty PR diff (on first creation, and on a rework attempt whose existing PR is empty). `claim_no_change` reads `/output/no-change.json`. Only a successful run may make a claim, so the timeout path passes `allow_claim = false`.
+
+```
+claim_no_change(task, allow_claim) -> boolean:
+  if not allow_claim: return false
+  file = read /output/no-change.json        # deleted when each dev attempt starts
+  if file missing: return false             # → fail exactly as before
+  if file invalid:                          # unknown category / empty reason / no evidence
+    record_task_event(task, 'no_change_claim_invalid', ...)
+    return false                            # → fail exactly as before
+  db.update_task(task.id, no_change_claim: {category, reason, evidence, attempt})
+  record_task_event(task, 'no_change_claimed', "{category}: {reason}")
+  forgejo.comment_on_issue(task.issue_id, claim)   # category, reason, evidence
+  return true                               # status unchanged; caller routes to review
+```
+
+If the run produced work *and* left a `no-change.json`, the work wins. `post_dev_agent` returns `true` as a normal implementation, and the claim is ignored with a `no_change_claim_ignored` event and a warning.
 
 ```
 post_dev_agent(task) -> boolean:
@@ -281,6 +301,7 @@ post_dev_agent(task) -> boolean:
     # The Forgejo API provides the branch's latest commit SHA.
     base_sha = forgejo.get_branch(repo, repo.base_branch).commit.sha
     if branch_exists.commit.sha == base_sha:
+      if claim_no_change(task, allow_claim): return true
       relabel: status/failed
       forgejo.comment_on_issue(task.issue_id, "No changes produced — branch matches base.")
       db.update_task(task.id, status: 'failed')
@@ -309,6 +330,7 @@ post_dev_agent(task) -> boolean:
     has_commits = git -C workdir log origin/{repo.base_branch}..HEAD --oneline is non-empty
 
     if NOT has_uncommitted AND NOT has_untracked AND NOT has_commits:
+      if claim_no_change(task, allow_claim): return true
       relabel: status/failed
       forgejo.comment_on_issue(task.issue_id, "No changes produced by agent.")
       db.update_task(task.id, status: 'failed')
@@ -360,7 +382,14 @@ post_dev_agent(task) -> boolean:
         body: "Automated PR for #{task.issue_id}\n\nCloses #{task.issue_id}"
       )
       task.pr_number = pr.number
+      if pr.changed_files == 0:
+        if claim_no_change(task, allow_claim): return true   # PR left open until finalised
+        relabel: status/failed   # "PR #N has no changes" — left open for inspection
+        return false
     else:
+      if forgejo.get_pull_request(task.pr_number).changed_files == 0:
+        if claim_no_change(task, allow_claim): return true
+        # no claim: carry on as before (attempt_merge has its own empty-diff guard)
       forgejo.comment_on_pr(task.pr_number,
         "Branch updated with rework changes (attempt {task.attempt})")
   catch error:
@@ -372,6 +401,8 @@ post_dev_agent(task) -> boolean:
     free slot
     return false
 
+  if allow_claim and /output/no-change.json exists:
+    record_task_event(task, 'no_change_claim_ignored', ...)   # work wins
   return true
 ```
 
@@ -690,15 +721,17 @@ on_dev_agent_complete(task, result):
     # post_dev_agent verifies push, salvages if needed, creates/updates PR.
     # Returns true if a PR is ready for review, false if the task was marked as failed.
     if post_dev_agent(task):
-      forgejo.comment_on_issue(task.issue_id,
-        "Implementation complete (attempt {task.attempt}).")
+      if not task.no_change_claim:   # a claim already posted its own comment
+        forgejo.comment_on_issue(task.issue_id,
+          "Implementation complete (attempt {task.attempt}).")
       continue_to_review(task)
     # If post_dev_agent returned false, it already marked the task as failed and freed the slot.
 
   if result.status == "timeout":
     # Check if the agent produced usable work before timing out.
     # post_dev_agent handles salvage — returns true if work was saved and PR is ready.
-    if post_dev_agent(task):
+    # A timed-out run cannot make a no-change claim (allow_claim = false).
+    if post_dev_agent(task, allow_claim: false):
       forgejo.comment_on_issue(task.issue_id,
         "Agent timed out but partial work was salvaged (attempt {task.attempt}).")
       continue_to_review(task)
@@ -714,9 +747,10 @@ on_dev_agent_complete(task, result):
 
 
 continue_to_review(task):
+  # A no-change claim goes to the same reviewer a PR would.
   if "human-review" label present:
-    relabel: status/awaiting-human-review
-    free slot
+    relabel: status/awaiting-human-review   # claim (if any) shown on the task page
+    free slot                              # human uses Accept / Reject
   else:
     # Provider-pool gate for the review stage. With per-stage profiles
     # the review provider can differ from the dev one and may be
@@ -731,6 +765,8 @@ continue_to_review(task):
       return
     # Start review immediately in the same slot — no queuing.
     # launch_review_container handles relabelling, SHA recording, and container start.
+    # With task.no_change_claim set it writes the no-change review prompt
+    # (buildNoChangeReviewPrompt) instead of the PR review prompt.
     launch_review_container(task)
 
 
@@ -787,6 +823,22 @@ on_review_agent_complete(task, result):
 
   review = read /output/review.json
 
+  if task.no_change_claim:
+    # No-change review mode — there may be no branch or PR.
+    verdict = normalize(review.verdict)   # approved/changes_needed accepted as aliases
+    record_task_event(task, 'review_verdict', "Review verdict: {verdict} (no-change claim)")
+    if verdict == "no_change_confirmed":
+      finalize_no_change(task, confirmed_by: "review agent", reason: review.summary)
+      # no human step, even with human-merge — there is nothing to merge
+    elif verdict == "no_change_rejected":
+      # Exactly like changes_needed: post feedback, attempt++ (exhausted → failed),
+      # clear the claim, relaunch dev with the reviewer's feedback.
+      send_back_for_rework(task, feedback: rejection + review.feedback)
+    else:
+      relabel: status/needs-human-review     # human can Accept / Reject
+      free slot
+    return
+
   if review.verdict == "approved":
     if "human-merge" label present:
       relabel: status/awaiting-human-merge
@@ -816,6 +868,25 @@ on_review_agent_complete(task, result):
     relabel: status/needs-human-review
     free slot
 ```
+
+### No-change finalisation
+
+`finalizeNoChange` (`packages/server/src/actions.ts`) is reusable by any reviewer that concludes "nothing to do". It is called for a review agent's `no_change_confirmed` verdict and for a human's Accept (`PATCH /api/tasks/:id {action: 'accept_no_change'}`).
+
+```
+finalize_no_change(task, confirmed_by, reason):
+  # Status FIRST: closing the issue fires issues.closed, which cancels any
+  # task still in an active status.
+  db.update_task(task.id, status: 'no-change', container_id: null, completed_at: now)
+  record_task_event(task, 'no_change_confirmed', "confirmed by {confirmed_by}: {reason}")
+  stop container (if any); delete remote branch; close PR (if any)
+  forgejo.comment_on_issue(task.issue_id, "No code change needed — confirmed by {confirmed_by}. {reason}")
+  relabel: status/no-change   # keeps every non-status/* label
+  forgejo.close_issue(task.issue_id)
+  free slot
+```
+
+A human's Reject (`{action: 'reject_no_change', comment}`) goes through the same `send_back_for_rework` path as a review rejection. The comment is the feedback for the next attempt.
 
 ## Cancellation
 

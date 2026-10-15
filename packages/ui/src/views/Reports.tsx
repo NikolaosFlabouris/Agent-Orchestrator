@@ -787,6 +787,7 @@ const STATUS_COLORS: Partial<Record<TaskStatus, string>> = {
   'awaiting-human-merge': '#f59e0b',
   'awaiting-human-review': '#f59e0b',
   'needs-human-review': '#f59e0b',
+  'no-change': '#2dd4bf',
   reset: '#6b7280',
 };
 
@@ -863,6 +864,7 @@ type SortKey =
   | 'label'
   | 'task_count'
   | 'success_rate'
+  | 'no_change'
   | 'avg_implementation_seconds'
   | 'avg_review_seconds'
   | 'avg_rework'
@@ -881,6 +883,9 @@ const LEADERBOARD_COLUMNS: ColumnDef[] = [
   { key: 'label', label: 'Name', numeric: false, render: (r) => r.label },
   { key: 'task_count', label: 'Tasks', numeric: true, render: (r) => formatNumber(r.task_count) },
   { key: 'success_rate', label: 'Success', numeric: true, render: (r) => formatPercent(r.success_rate) },
+  // Confirmed "no code change required" outcomes — counted on their own,
+  // never part of the success rate.
+  { key: 'no_change', label: 'No change', numeric: true, render: (r) => formatNumber(r.terminal_counts.no_change) },
   { key: 'avg_implementation_seconds', label: 'Avg impl', numeric: true, render: (r) => formatDuration(r.avg_implementation_seconds) },
   { key: 'avg_review_seconds', label: 'Avg review', numeric: true, render: (r) => formatDuration(r.avg_review_seconds) },
   { key: 'avg_rework', label: 'Rework', numeric: true, render: (r) => formatRework(r.avg_rework) },
@@ -905,8 +910,8 @@ function sortRows(
   const factor = dir === 'asc' ? 1 : -1;
   return [...rows].sort((a, b) => {
     if (key === 'label') return factor * a.label.localeCompare(b.label);
-    const av = a[key] as number | null;
-    const bv = b[key] as number | null;
+    const av = key === 'no_change' ? a.terminal_counts.no_change : (a[key] as number | null);
+    const bv = key === 'no_change' ? b.terminal_counts.no_change : (b[key] as number | null);
     // Nulls always sort to the bottom regardless of direction.
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
@@ -1074,6 +1079,7 @@ function RepoScorecard({ board }: { board: ReportsLeaderboard }) {
             <dl className="grid grid-cols-2 gap-y-2 text-sm">
               <ScoreStat label="Throughput" value={formatNumber(row.task_count)} />
               <ScoreStat label="Success" value={formatPercent(row.success_rate)} />
+              <ScoreStat label="No change" value={formatNumber(row.terminal_counts.no_change)} />
               <ScoreStat label="Avg impl" value={formatDuration(row.avg_implementation_seconds)} />
               <ScoreStat label="Avg review" value={formatDuration(row.avg_review_seconds)} />
             </dl>
@@ -1152,6 +1158,14 @@ function LifecycleFunnelSection({ funnel }: { funnel: ReportsFunnel }) {
   return (
     <ChartCard title="Lifecycle funnel" empty={empty}>
       <FunnelChart stages={funnel.stages} />
+      {/* An exit, not a stage: these tasks were confirmed as needing no
+          code change, so they never reach "merged" and are not a drop-off. */}
+      {funnel.no_change > 0 && (
+        <p className="mt-2 text-xs text-gray-400">
+          {formatNumber(funnel.no_change)} task{funnel.no_change === 1 ? '' : 's'} closed as
+          no-change (no code change required) — not counted as merged or failed.
+        </p>
+      )}
     </ChartCard>
   );
 }

@@ -21,6 +21,7 @@ Every task flows through a well-defined state machine, modeled as exclusive scop
 | `status/awaiting-human-merge` | Agent work done, PR left for manual merge (`human-merge` label present) | Yes (from orchestrator's perspective) |
 | `status/awaiting-human-review` | Implementation done, waiting for human review (`human-review` label present) | Yes (from orchestrator's perspective) |
 | `status/needs-human-review` | Review agent produced unclear verdict | Yes (from orchestrator's perspective) |
+| `status/no-change` | The dev agent concluded no code change is required (already fixed, duplicate, not reproducible, obsolete) and the reviewer confirmed it. Issue closed, branch and PR cleaned up. Neither a failure nor a merge. | Yes |
 
 Terminal states free the active slot. The issue may remain open in Forgejo (e.g., `awaiting-human-merge`) but the orchestrator considers the task complete and moves on.
 
@@ -40,6 +41,15 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
                                                                                │
                                                                  merge conflict┘
                                                                  (treated as rework)
+
+No-change outcome (the dev agent wrote /output/no-change.json and left no work):
+
+in-progress ──► in-review (no-change mode) ──► no-change
+     │                    │
+     │                    └─ claim rejected ──► changes-needed ──► in-progress
+     │
+     └─ (human-review) ──► awaiting-human-review ──Accept──► no-change
+                                     └──Reject + comment──► changes-needed ──► in-progress
 ```
 
 ### Transition Details
@@ -98,6 +108,29 @@ queued ──► preparing ──► in-progress ──► in-review ──► a
 - Action: relabel, post comment asking for human intervention
 - Slot is freed
 
+**in-progress → in-review (no-change mode)** / **in-progress → awaiting-human-review** (no-change claim)
+- Trigger: the dev agent finished successfully and produced no work — its branch matches base, nothing was pushed and nothing is left locally, or the PR has an empty diff (including on a rework attempt whose existing PR is empty) — **and** it left a valid `/output/no-change.json` (see [04 - Agent Harness](./04-agent-harness.md)).
+- Without that file, or with a malformed one, these paths still go to `failed` exactly as before ("No changes produced"). A run that timed out cannot make a claim. A run that produced work *and* a claim is reviewed as a normal implementation; the claim is ignored with a warning.
+- Action: store the claim on the task (`tasks.no_change_claim`), record a `no_change_claimed` event, and post the claim (category, reason, evidence) as an issue comment. The task is **not** marked failed. The dev attempt is recorded as completed.
+- The claim then goes to the task's configured reviewer, like a PR would:
+  - Without `human-review`: the review agent (the task's effective review profile) runs in no-change mode. It checks the claim against the current base branch and the original task. There may be no PR or diff.
+  - With `human-review`: no review agent runs. The task parks in `awaiting-human-review` with the claim shown on the task page. Status derivation keeps it there even though there is no PR.
+
+**in-review (no-change mode) → no-change / changes-needed / needs-human-review**
+- Verdict `no_change_confirmed` → finalise as `no-change` (below). There is no further human step, **even with `human-merge`**, because there is nothing to merge.
+- Verdict `no_change_rejected` → handled exactly like `changes_needed`: feedback is posted, the attempt counter increments (counting against `max_attempts`; exhausted → `failed`), and the next dev attempt gets the reviewer's feedback in its prompt.
+- Verdict `unclear` (or anything else) → `needs-human-review`, where a human can Accept or Reject the claim.
+
+**awaiting-human-review / needs-human-review (pending claim) → no-change / changes-needed**
+- Trigger: a human uses **Accept** or **Reject** on the task page (`PATCH /api/tasks/:id` with `action: accept_no_change` / `reject_no_change`).
+- Accept → finalise as `no-change`.
+- Reject requires a comment. It starts a rework attempt with the comment as review feedback, counting against `max_attempts` like a review rejection.
+
+**→ no-change** (finalise)
+- Set `status: no-change` and `completed_at` (frees the slot), record `no_change_confirmed`, delete the agent branch, close any open PR, post a comment with the confirmed reason and who confirmed it (review agent or human reviewer), set the `status/no-change` label while keeping every non-`status/*` label, and close the issue.
+- The status is stored before the issue is closed, so the `issues.closed` webhook sees a terminal task and does not cancel it. A closed issue labelled `status/no-change` derives to `no-change`, not `cancelled`.
+- Reports count `no-change` separately: it is excluded from the success rate (neither a failure nor a merge).
+
 **changes-needed → preparing** (orphaned rework only)
 - Trigger: task found in `changes-needed` without an active slot (e.g., after orchestrator restart)
 - Action: relabel, post comment "Preparing rework (attempt N)"
@@ -138,7 +171,7 @@ Anything unrecognised stays retryable (the existing retry behaviour). So do time
 
 **Terminal state (except merged) → (unqueued)**
 - Trigger: user resets task via UI
-- Valid from: `failed`, `cancelled`, `awaiting-human-merge`, `awaiting-human-review`, `needs-human-review`
+- Valid from: `failed`, `cancelled`, `awaiting-human-merge`, `awaiting-human-review`, `needs-human-review`, `no-change`
 - Not valid from: `merged` (the code is already in main — resetting would not undo the merge)
 - Action: stop container if running, delete remote branch, close PR if open, delete workspace, remove `status/*` label, reset attempt counter and prep failure count, post comment "Task reset by user."
 - The issue returns to a clean state in Forgejo with no `status/*` label. It can be re-queued later via the UI.
@@ -162,7 +195,7 @@ When present on an issue, the orchestrator completes the full agent workflow (im
 
 ### human-review
 
-When present on an issue, the orchestrator completes implementation and creates the PR but does not launch the review agent. The task transitions to `status/awaiting-human-review` and the slot is freed. A human reviews the PR manually.
+When present on an issue, the orchestrator completes implementation and creates the PR but does not launch the review agent. The task transitions to `status/awaiting-human-review` and the slot is freed. A human reviews the PR manually. If the dev agent instead made a no-change claim, the human reviews the claim and uses Accept or Reject on the task page. There may be no PR in that case.
 
 ## Rework Handling
 
@@ -200,4 +233,7 @@ Every orchestrator action is logged as an issue comment:
 | Failed | "Failed after {N} attempts. Last error: {detail}" |
 | Cancelled | "Task cancelled: {reason}. Branch and PR cleaned up." |
 | Human merge deferred | "Review approved. PR #{pr} is ready for manual merge. Label `human-merge` detected." |
+| No-change claimed | "The dev agent concluded no code change is required (attempt {N}). The claim will be reviewed before the task is closed.\n\n{category, reason, evidence}" |
+| No-change claim rejected | "Review rejected the no-change claim (attempt {N}). Sending back for rework.\n\n{feedback}" |
+| No-change confirmed | "No code change needed — confirmed by {review agent / human reviewer}.\n\n{reason}\n\nAgent branch and PR cleaned up; issue closed." |
 | Orchestrator recovered | "Orchestrator recovered after restart. {recovery_action_taken}" |

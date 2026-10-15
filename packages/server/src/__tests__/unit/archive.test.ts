@@ -162,6 +162,22 @@ describe('archiveTaskArtifacts', () => {
     );
   });
 
+  it('archives a no-change.json claim alongside the other artifacts', async () => {
+    const task = await seedTask(9, { progress: 'log', result: '{}' });
+    const claim = '{"category":"duplicate","reason":"dup of #3","evidence":["#3"]}';
+    await fsp.writeFile(path.join(getOutputDir(task), 'no-change.json'), claim);
+
+    await archiveTaskArtifacts(task, testLog);
+
+    const dir = getArchiveDir(task);
+    expect((await fsp.readdir(dir)).sort()).toEqual([
+      'no-change.json',
+      'progress.log.gz',
+      'result.json',
+    ]);
+    expect(await fsp.readFile(path.join(dir, 'no-change.json'), 'utf-8')).toBe(claim);
+  });
+
   it('tolerates missing optional files', async () => {
     // No review.json (a dev-only attempt) and no meta.json.
     const task = await seedTask(8, { progress: 'log', result: '{}' });

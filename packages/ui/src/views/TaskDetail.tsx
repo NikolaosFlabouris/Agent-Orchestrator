@@ -19,12 +19,23 @@ import { Timeline } from '../components/Timeline.js';
 import { Elapsed, RetryIn, useTicker } from '../components/LiveTime.js';
 import { isErrorLine, visibleLines } from '../logFilter.js';
 import { useStore } from '../store.js';
+import { parseNoChangeClaim } from '@orchestrator/shared';
 
 const ACTIVE_STATUSES = new Set([
   'preparing', 'in-progress', 'in-review', 'changes-needed',
 ]);
 const RESETTABLE_STATUSES = new Set([
   'failed', 'cancelled', 'awaiting-human-merge', 'awaiting-human-review', 'needs-human-review',
+  'no-change',
+]);
+// A pending no-change claim can be decided by a human while the task is
+// parked for human review, or after the review agent returned "unclear".
+const NO_CHANGE_DECIDABLE_STATUSES = new Set([
+  'awaiting-human-review', 'needs-human-review',
+]);
+// Statuses in which a stored claim is live: being reviewed, or confirmed.
+const NO_CHANGE_CLAIM_STATUSES = new Set([
+  'in-review', 'awaiting-human-review', 'needs-human-review', 'no-change',
 ]);
 const REQUEUEABLE_STATUSES = new Set(['reset', 'cancelled']);
 const EXTENDABLE_STATUSES = new Set(['failed']);
@@ -262,6 +273,8 @@ export function TaskDetail() {
       if (!confirm('Force-fail this task?')) return;
     } else if (actionName === 'requeue') {
       if (!confirm('Requeue this task? It will be placed at the end of the queue.')) return;
+    } else if (actionName === 'accept_no_change') {
+      if (!confirm('Accept the no-change claim? The issue will be closed, the branch/PR cleaned up, and the task marked no-change.')) return;
     }
 
     setActionPending(true);
@@ -758,7 +771,7 @@ export function TaskDetail() {
               Cancel
             </Button>
           )}
-          {task.status !== 'merged' && (
+          {task.status !== 'merged' && task.status !== 'no-change' && (
             <Button
               variant="danger"
               onClick={() => handleAction({ action: 'close' })}
@@ -769,7 +782,7 @@ export function TaskDetail() {
               Close
             </Button>
           )}
-          {task.status === 'in-review' && (
+          {task.status === 'in-review' && !task.no_change_claim && (
             <Button
               variant="success"
               onClick={() => handleAction({ action: 'force_approve' })}
@@ -941,6 +954,14 @@ export function TaskDetail() {
             event row remains in the timeline as a record of what
             happened. */}
         <FailureBanner task={task} />
+
+        {/* The dev agent's no-change claim — shown while it is reviewed and
+            after it is confirmed; Accept/Reject when a human decides. */}
+        <NoChangeClaimPanel
+          task={task}
+          pending={actionPending}
+          onDecide={(action) => handleAction(action)}
+        />
 
         {/* Dependencies */}
         <DependencySection task={task} onChanged={setTask} />
@@ -1231,6 +1252,102 @@ function DependencyRow({
         {hint && <p className="text-xs text-gray-500 mt-0.5">{hint}</p>}
       </div>
     </div>
+  );
+}
+
+/** True when a human can Accept/Reject the task's no-change claim. Pure and
+ *  exported for tests. */
+export function canDecideNoChange(
+  task: Pick<TaskResponse, 'status' | 'no_change_claim'>
+): boolean {
+  return (
+    parseNoChangeClaim(task.no_change_claim) !== null &&
+    NO_CHANGE_DECIDABLE_STATUSES.has(task.status)
+  );
+}
+
+function NoChangeClaimPanel({
+  task,
+  pending,
+  onDecide,
+}: {
+  task: TaskDetailResponse;
+  pending: boolean;
+  onDecide: (
+    action:
+      | { action: 'accept_no_change'; comment?: string }
+      | { action: 'reject_no_change'; comment: string }
+  ) => void;
+}) {
+  const [comment, setComment] = useState('');
+  const commentId = useId();
+  const claim = parseNoChangeClaim(task.no_change_claim);
+  if (!claim || !NO_CHANGE_CLAIM_STATUSES.has(task.status)) return null;
+  const decidable = canDecideNoChange(task);
+  const confirmed = task.status === 'no-change';
+
+  return (
+    <section className="rounded border border-teal-800 bg-teal-950/30 px-4 py-3">
+      <h2 className="text-teal-300 font-medium mb-1">
+        {confirmed
+          ? 'No change needed — confirmed'
+          : decidable
+            ? 'No-change claim — awaiting your decision'
+            : 'No-change claim — under review'}
+      </h2>
+      <p className="text-sm text-gray-400 mb-2">
+        Attempt {claim.attempt} concluded no code change is required
+        {' '}(<span className="font-mono">{claim.category}</span>).
+      </p>
+      <p className="text-sm text-gray-200 whitespace-pre-wrap mb-2">{claim.reason}</p>
+      <ul className="list-disc pl-5 text-sm text-gray-300 space-y-0.5 break-words">
+        {claim.evidence.map((e, i) => (
+          <li key={i}>{e}</li>
+        ))}
+      </ul>
+      {decidable && (
+        <div className="mt-3 space-y-2">
+          <label htmlFor={commentId} className="block text-xs text-gray-500">
+            Comment (required to reject — it becomes the feedback for the next attempt)
+          </label>
+          <textarea
+            id={commentId}
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            rows={3}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+          />
+          <div className="flex flex-wrap gap-3">
+            <Button
+              variant="success"
+              onClick={() =>
+                onDecide(
+                  comment.trim()
+                    ? { action: 'accept_no_change', comment: comment.trim() }
+                    : { action: 'accept_no_change' }
+                )
+              }
+              disabled={pending}
+              className="text-sm px-3 py-1.5"
+              title="Close the task as no-change: issue closed, branch/PR cleaned up"
+            >
+              Accept
+            </Button>
+            <Button
+              variant="warn"
+              onClick={() =>
+                onDecide({ action: 'reject_no_change', comment: comment.trim() })
+              }
+              disabled={pending || comment.trim() === ''}
+              className="text-sm px-3 py-1.5"
+              title="Start a rework attempt with your comment as review feedback"
+            >
+              Reject
+            </Button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

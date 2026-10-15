@@ -424,6 +424,11 @@ export async function evaluateTaskDependencies(
       detail =
         `merged via task #${tracked.id}` +
         (tracked.pr_number ? ` / PR #${tracked.pr_number}` : '');
+    } else if (tracked && tracked.status === 'no-change') {
+      // Confirmed as needing no code change — the work it stood for is
+      // already on the base branch (or moot), so dependents may proceed.
+      state = 'satisfied';
+      detail = `resolved as no-change via task #${tracked.id}`;
     } else if (!repo) {
       state = 'error';
       detail = 'repo not found';

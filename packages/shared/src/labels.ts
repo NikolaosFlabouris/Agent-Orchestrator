@@ -14,6 +14,7 @@ export const STATUS_LABELS = {
   AWAITING_HUMAN_MERGE: 'status/awaiting-human-merge',
   AWAITING_HUMAN_REVIEW: 'status/awaiting-human-review',
   NEEDS_HUMAN_REVIEW: 'status/needs-human-review',
+  NO_CHANGE: 'status/no-change',
 } as const;
 
 /** Override labels (not scoped under status/). */
@@ -49,6 +50,7 @@ export const TERMINAL_STATUSES = new Set([
   'awaiting-human-merge',
   'awaiting-human-review',
   'needs-human-review',
+  'no-change',
 ]);
 
 /** Convert a DB status value to a Forgejo label. */

@@ -76,6 +76,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     started_at: null,
     completed_at: null,
     created_at: '2026-09-26T00:00:00Z',
+    no_change_claim: null,
     ...overrides,
   };
 }

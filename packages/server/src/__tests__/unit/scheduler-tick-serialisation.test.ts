@@ -254,6 +254,7 @@ function mkTask(overrides: Partial<Task> = {}): Task {
     started_at: '2026-06-20T00:00:00Z',
     completed_at: null,
     created_at: '2026-06-20T00:00:00Z',
+    no_change_claim: null,
     ...overrides,
   };
 }
@@ -681,5 +682,107 @@ describe('effort level launch snapshot', () => {
       'install_commands',
       'agent_command',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. No-change claims (#223): routing to the configured reviewer, and the
+//    per-attempt reset of the claim.
+// ---------------------------------------------------------------------------
+
+describe('no-change claim routing', () => {
+  const CLAIM = JSON.stringify({
+    category: 'already_fixed',
+    reason: 'Fixed by abc123 on main',
+    evidence: ['git show abc123'],
+    attempt: 1,
+  });
+
+  /** postDevAgent stand-in for a valid claim: it records the claim on the
+   *  task and reports "ready for review" without a PR. */
+  function claimOnPostDev(): void {
+    mocks.postDevAgent.mockImplementation(async (t: Task) => {
+      Object.assign(store.find((x) => x.id === t.id)!, { no_change_claim: CLAIM });
+      return true;
+    });
+  }
+
+  it('human-review task: parks in awaiting-human-review without launching the review agent', async () => {
+    store = [mkTask({ id: 1, status: 'in-progress', container_id: 'c1', pr_number: null })];
+    writeResult('success');
+    claimOnPostDev();
+    fakeForgejo.getIssue.mockResolvedValueOnce({
+      title: 'Issue',
+      body: 'body',
+      labels: [{ name: 'human-review' }],
+    });
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+    await scheduler.tick();
+
+    expect(store[0].status).toBe('awaiting-human-review');
+    expect(mocks.createAgentContainer).not.toHaveBeenCalled();
+    const comments = fakeForgejo.commentOnIssue.mock.calls.map((c: unknown[]) => c[2]);
+    expect(comments.some((c: string) => c.includes('No-change claim ready for human review'))).toBe(true);
+    // The claim posted its own comment — no "Implementation complete".
+    expect(comments.some((c: string) => c.startsWith('Implementation complete'))).toBe(false);
+  });
+
+  it('agent-review task: launches the review agent with the no-change review prompt', async () => {
+    store = [mkTask({ id: 1, status: 'in-progress', container_id: 'c1', pr_number: null })];
+    writeResult('success');
+    claimOnPostDev();
+    mocks.shouldDeferReviewLaunch.mockReturnValue(false);
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+    await scheduler.tick();
+
+    expect(mocks.createAgentContainer).toHaveBeenCalledTimes(1);
+    expect(store[0].status).toBe('in-review');
+    const prompt = fs.readFileSync(path.join(tmpDir, 'prompt.md'), 'utf-8');
+    expect(prompt).toContain('No-change claim');
+    expect(prompt).toContain('Fixed by abc123 on main');
+    expect(prompt).toContain('no_change_confirmed');
+  });
+
+  it('a timed-out run may not make a claim', async () => {
+    store = [mkTask({ id: 1, status: 'in-progress', container_id: 'c1' })];
+    fs.writeFileSync(path.join(tmpDir, 'result.json'), JSON.stringify({ status: 'timeout' }));
+    mocks.postDevAgent.mockResolvedValue(false);
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+    await scheduler.tick();
+
+    expect(mocks.postDevAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { allowNoChangeClaim: false }
+    );
+  });
+
+  it('a new dev attempt clears the previous attempt\'s no-change.json and claim', async () => {
+    const task = mkTask({
+      id: 1,
+      status: 'changes-needed',
+      attempt: 2,
+      container_id: null,
+      no_change_claim: CLAIM,
+    });
+    store = [task];
+    // No result.json → archivePreviousOutput skips; the file must still go.
+    fs.writeFileSync(path.join(tmpDir, 'no-change.json'), CLAIM);
+    mocks.getModel.mockReturnValue({ id: 1, provider_id: 'prov' });
+    mocks.createAgentContainer.mockResolvedValue({ id: 'x1' });
+
+    const scheduler = new Scheduler(fakeForgejo, silentLog);
+    await scheduler.launchDevContainer(task);
+
+    expect(fs.existsSync(path.join(tmpDir, 'no-change.json'))).toBe(false);
+    expect(store[0].no_change_claim).toBeNull();
+    // And the dev prompt tells the agent how to make a claim of its own.
+    const prompt = fs.readFileSync(path.join(tmpDir, 'prompt.md'), 'utf-8');
+    expect(prompt).toContain('/output/no-change.json');
   });
 });

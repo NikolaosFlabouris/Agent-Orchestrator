@@ -6,6 +6,7 @@ import {
   applyTaskEvent,
   deriveLastFailure,
   isNearTimeout,
+  canDecideNoChange,
 } from '../views/TaskDetail.js';
 import type {
   TaskDetailResponse,
@@ -500,5 +501,28 @@ describe('isNearTimeout', () => {
     expect(isNearTimeout('not-a-date', 30, at('2026-01-01T12:45:00Z'))).toBe(
       false
     );
+  });
+});
+
+// A human decides a dev agent's no-change claim only while the task is
+// parked for them — never while the review agent is still judging it.
+describe('canDecideNoChange', () => {
+  const claim = JSON.stringify({
+    category: 'already_fixed',
+    reason: 'Fixed by abc123',
+    evidence: ['git show abc123'],
+    attempt: 1,
+  });
+
+  it('is true for a pending claim awaiting human review or after an unclear verdict', () => {
+    expect(canDecideNoChange({ status: 'awaiting-human-review', no_change_claim: claim })).toBe(true);
+    expect(canDecideNoChange({ status: 'needs-human-review', no_change_claim: claim })).toBe(true);
+  });
+
+  it('is false without a claim, with a malformed one, or in other statuses', () => {
+    expect(canDecideNoChange({ status: 'awaiting-human-review', no_change_claim: null })).toBe(false);
+    expect(canDecideNoChange({ status: 'awaiting-human-review', no_change_claim: '{bad' })).toBe(false);
+    expect(canDecideNoChange({ status: 'in-review', no_change_claim: claim })).toBe(false);
+    expect(canDecideNoChange({ status: 'no-change', no_change_claim: claim })).toBe(false);
   });
 });

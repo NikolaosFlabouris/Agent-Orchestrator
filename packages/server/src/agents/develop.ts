@@ -28,6 +28,7 @@ import {
 import { DEFAULT_MAX_ATTEMPTS } from '../constants.js';
 import { classifyFailure } from '../failure-classifier.js';
 import { failTaskPermanently } from './permanent-failure.js';
+import { readNoChangeClaim, recordNoChangeClaim } from './no-change.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 /** Timeout for the salvage force-push. Generous — a large branch over a slow
@@ -210,15 +211,80 @@ async function reconcilePullRequest(
 }
 
 /**
+ * Called on each path where the agent produced no change. When the agent
+ * left a valid `no-change.json` the claim is recorded on the task and true
+ * is returned: the caller hands the task to review instead of failing it.
+ * No file, or a malformed one, returns false and the caller fails the task
+ * exactly as before.
+ */
+async function claimNoChange(
+  task: Task,
+  repo: Repo,
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger,
+  allowClaim: boolean
+): Promise<boolean> {
+  if (!allowClaim) return false;
+  const read = await readNoChangeClaim(task);
+  if (read.kind === 'none') return false;
+  if (read.kind === 'invalid') {
+    recordTaskEvent(
+      task.id,
+      'no_change_claim_invalid',
+      `Ignored /output/no-change.json — ${read.detail}.`
+    );
+    log.warn(
+      { event: 'no_change_claim_invalid', task_id: task.id, detail: read.detail },
+      'Malformed no-change.json ignored'
+    );
+    return false;
+  }
+  await recordNoChangeClaim(task, repo, read.claim, forgejo, log);
+  return true;
+}
+
+/**
+ * The agent produced real work AND left a no-change.json. That is
+ * ambiguous; the work wins (it goes to review as a normal implementation)
+ * and the claim is ignored with a warning.
+ */
+async function warnIgnoredNoChangeClaim(
+  task: Task,
+  log: FastifyBaseLogger
+): Promise<void> {
+  const read = await readNoChangeClaim(task);
+  if (read.kind === 'none') return;
+  recordTaskEvent(
+    task.id,
+    'no_change_claim_ignored',
+    'Ignored /output/no-change.json — the agent also produced changes, so they are reviewed as a normal implementation.'
+  );
+  log.warn(
+    { event: 'no_change_claim_ignored', task_id: task.id },
+    'Agent produced changes and a no-change.json — treating as a normal implementation'
+  );
+}
+
+export interface PostDevAgentOptions {
+  /** Honour a `no-change.json` on the no-change paths. Off for a run that
+   *  timed out: only a run that finished can make a deliberate claim. */
+  allowNoChangeClaim?: boolean;
+}
+
+/**
  * Post-dev-agent verification.
  * Verifies push, salvages if needed, creates/updates PR.
- * Returns true if a PR is ready for review, false if the task was marked as failed.
+ * Returns true if the task is ready for review — a PR, or (when
+ * `task.no_change_claim` was just set) a no-change claim — and false if the
+ * task was marked as failed or parked.
  */
 export async function postDevAgent(
   task: Task,
   forgejo: ForgejoClient,
-  log: FastifyBaseLogger
+  log: FastifyBaseLogger,
+  options: PostDevAgentOptions = {}
 ): Promise<boolean> {
+  const allowClaim = options.allowNoChangeClaim ?? true;
   const repo = getRepo(task.repo_id);
   if (!repo) {
     log.error({ event: 'repo_not_found', task_id: task.id }, 'Repo not found');
@@ -276,6 +342,7 @@ export async function postDevAgent(
 
     // Verify the remote is ahead of base
     if (baseSha && branchSha === baseSha) {
+      if (await claimNoChange(task, repo, forgejo, log, allowClaim)) return true;
       updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
@@ -330,6 +397,7 @@ export async function postDevAgent(
       !changes.hasUntracked &&
       !changes.hasLocalCommits
     ) {
+      if (await claimNoChange(task, repo, forgejo, log, allowClaim)) return true;
       updateTaskWithSync(task.id, {
         status: 'failed',
         completed_at: new Date().toISOString(),
@@ -661,6 +729,10 @@ export async function postDevAgent(
         // "Merge failed unexpectedly" message hours later. Fail here instead.
         // The empty PR is left open so a human can inspect what happened.
         if (createdPr && createdPr.changed_files === 0) {
+          // A deliberate no-change claim turns the empty PR into a claim
+          // for review; the PR stays open until the claim is resolved
+          // (finalising as no-change closes it).
+          if (await claimNoChange(task, repo, forgejo, log, allowClaim)) return true;
           updateTaskWithSync(task.id, {
             status: 'failed',
             completed_at: new Date().toISOString(),
@@ -727,8 +799,13 @@ export async function postDevAgent(
       // Rework path: ensure the existing PR still links to the issue even if
       // a human (or future automation) edited the body. Read it back, and if
       // the link is missing, re-apply via PATCH; otherwise leave untouched.
+      // The same read drives the rework no-change check: an empty PR plus a
+      // valid claim goes to claim review. Without a claim an empty rework
+      // PR carries on exactly as before (attemptMerge guards the merge).
+       let reworkPrEmpty = false;
        try {
          const existing = await forgejo.getPullRequest(repo, task.pr_number);
+         reworkPrEmpty = existing.changed_files === 0;
          if (!hasIssueLink(existing.body, task.issue_id)) {
            const repaired = ensureIssueLink(existing.body, task.issue_id);
            await forgejo.updatePullRequest(repo, task.pr_number, {
@@ -755,6 +832,10 @@ export async function postDevAgent(
            'Could not verify existing PR body — skipping link check'
          );
        }
+
+      if (reworkPrEmpty && (await claimNoChange(task, repo, forgejo, log, allowClaim))) {
+        return true;
+      }
 
       try {
         await forgejo.commentOnIssue(
@@ -789,6 +870,7 @@ export async function postDevAgent(
     return false;
   }
 
+  if (allowClaim) await warnIgnoredNoChangeClaim(task, log);
   return true;
 }
 
