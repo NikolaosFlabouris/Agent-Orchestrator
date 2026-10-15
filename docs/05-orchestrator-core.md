@@ -863,6 +863,17 @@ on_review_agent_complete(task, result):
     post comment: "Failed after {max_attempts} attempts."
     free slot
 
+  if review.verdict == "no_change_superseded":
+    # Base already has the work. Careless-verdict check: superseded_by must be
+    # valid and name every file the PR's diff against base touches.
+    if evidence valid && every PR file named in superseded_by[].files:
+      comment on PR with reason + evidence
+      finalize_no_change(task, confirmed_by: "review agent", reason + evidence)  # even with human-merge
+    else:
+      post comment explaining why the verdict was not accepted
+      relabel: status/needs-human-review   # nothing closed or deleted
+      free slot
+
   if review.verdict == "unclear":
     post comment asking for human intervention
     relabel: status/needs-human-review
@@ -871,7 +882,7 @@ on_review_agent_complete(task, result):
 
 ### No-change finalisation
 
-`finalizeNoChange` (`packages/server/src/actions.ts`) is reusable by any reviewer that concludes "nothing to do". It is called for a review agent's `no_change_confirmed` verdict and for a human's Accept (`PATCH /api/tasks/:id {action: 'accept_no_change'}`).
+`finalizeNoChange` (`packages/server/src/actions.ts`) is reusable by any reviewer that concludes "nothing to do". It is called for a review agent's `no_change_confirmed` verdict, for a verified `no_change_superseded` verdict on a PR review, and for a human's Accept (`PATCH /api/tasks/:id {action: 'accept_no_change'}`).
 
 ```
 finalize_no_change(task, confirmed_by, reason):

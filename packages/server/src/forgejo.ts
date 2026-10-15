@@ -46,6 +46,15 @@ export interface ForgejoPullRequest {
   base: { ref: string };
 }
 
+/** One entry of `GET /pulls/{index}/files`: a file the PR's diff touches. */
+export interface ForgejoChangedFile {
+  filename: string;
+  previous_filename?: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
 export interface ForgejoBranch {
   name: string;
   commit: { id: string; message: string };
@@ -427,6 +436,29 @@ export class ForgejoClient {
       'GET',
       `${this.repoPath(repo)}/pulls/${prNumber}`
     );
+  }
+
+  /**
+   * Every file the PR's diff against its base touches (all pages). Used to
+   * check a review agent's `no_change_superseded` evidence against the PR.
+   */
+  async listPullRequestFiles(
+    repo: Repo,
+    prNumber: number
+  ): Promise<ForgejoChangedFile[]> {
+    // Page until an empty page rather than stopping on a short one: the
+    // server may cap `limit` below what we ask for, and a missed file would
+    // weaken that check.
+    const files: ForgejoChangedFile[] = [];
+    for (let page = 1; page <= 100; page++) {
+      const batch = await this.request<ForgejoChangedFile[]>(
+        'GET',
+        `${this.repoPath(repo)}/pulls/${prNumber}/files?page=${page}&limit=50`
+      );
+      if (!Array.isArray(batch) || batch.length === 0) return files;
+      files.push(...batch);
+    }
+    throw new Error(`PR #${prNumber} lists too many files to check`);
   }
 
   async listPullRequests(

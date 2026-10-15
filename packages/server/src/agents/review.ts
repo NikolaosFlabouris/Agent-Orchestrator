@@ -65,8 +65,11 @@ interface ReviewVerdict {
     | 'changes_needed'
     | 'unclear'
     | 'no_change_confirmed'
-    | 'no_change_rejected';
+    | 'no_change_rejected'
+    | 'no_change_superseded';
   summary?: string;
+  /** Evidence for `no_change_superseded`; see parseSupersededEvidence. */
+  superseded_by?: unknown;
   rubric?: Partial<Record<RubricDimension, RubricEntry>> &
     Record<string, RubricEntry>;
   // New shape carries category/severity/suggestion. The legacy
@@ -749,6 +752,174 @@ async function processNoChangeVerdict(
   );
 }
 
+/** One evidence entry of a `no_change_superseded` verdict: which commit /
+ *  PR on the base branch satisfies which requirement, and which of the PR's
+ *  files that accounts for. */
+export interface SupersededEvidence {
+  requirement: string;
+  satisfied_by: string;
+  files: string[];
+}
+
+/** Normalise a repo-relative path for comparison: trim, drop a leading
+ *  `./` or `/`. */
+function normalizeRepoPath(p: string): string {
+  return p.trim().replace(/^(\.\/|\/)+/, '');
+}
+
+/**
+ * Validate the `superseded_by` evidence of a `no_change_superseded` verdict.
+ * Returns null unless it is a non-empty array whose every entry names a
+ * requirement and what on the base branch satisfies it. `files` is
+ * optional per entry (non-string items are dropped).
+ */
+export function parseSupersededEvidence(
+  raw: unknown
+): SupersededEvidence[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const out: SupersededEvidence[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return null;
+    const e = item as Record<string, unknown>;
+    const requirement = asString(e.requirement);
+    const satisfiedBy = asString(e.satisfied_by);
+    if (!requirement || !satisfiedBy) return null;
+    const files = Array.isArray(e.files)
+      ? e.files
+          .filter((f): f is string => typeof f === 'string')
+          .map(normalizeRepoPath)
+          .filter((f) => f !== '')
+      : [];
+    out.push({ requirement, satisfied_by: satisfiedBy, files });
+  }
+  return out;
+}
+
+/**
+ * The careless-verdict guard for `no_change_superseded`: the PR files the
+ * reviewer's evidence does not account for. A file is accounted for when
+ * an evidence entry names it exactly (a renamed file may be named by its
+ * old or new path). Directories and globs are deliberately not accepted —
+ * the reviewer has to name every file the PR still changes.
+ */
+export function findUnaccountedFiles(
+  prFiles: Array<{ filename: string; previous_filename?: string }>,
+  evidence: SupersededEvidence[]
+): string[] {
+  const named = new Set(evidence.flatMap((e) => e.files));
+  return prFiles
+    .filter(
+      (f) =>
+        !named.has(normalizeRepoPath(f.filename)) &&
+        !(f.previous_filename && named.has(normalizeRepoPath(f.previous_filename)))
+    )
+    .map((f) => f.filename);
+}
+
+/** Render superseded evidence as a markdown list for comments. */
+export function formatSupersededEvidence(
+  evidence: SupersededEvidence[]
+): string {
+  return evidence
+    .map(
+      (e) =>
+        `- ${e.requirement} — satisfied by ${e.satisfied_by}` +
+        (e.files.length > 0
+          ? ` (${e.files.map((f) => `\`${f}\``).join(', ')})`
+          : '')
+    )
+    .join('\n');
+}
+
+/**
+ * Act on a `no_change_superseded` verdict on a normal PR review: the base
+ * branch already meets every requirement and the PR adds nothing necessary.
+ *
+ * Accepted only when the verdict carries valid `superseded_by` evidence and
+ * every file the PR's diff against the current base still touches is named
+ * in that evidence (an empty diff trivially passes; a missing PR fails).
+ * Accepted → finalise as `no-change` (PR closed, branch deleted, issue
+ * closed; no human step, even with `human-merge`). Anything else → treated as `unclear`
+ * (`needs-human-review`) with nothing closed or deleted, so a careless
+ * verdict cannot throw away real work.
+ */
+async function processSupersededVerdict(
+  task: Task,
+  repo: Repo,
+  review: ReviewVerdict,
+  prStats: { changed_files: number } | null,
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger
+): Promise<void> {
+  const prNumber = getTask(task.id)?.pr_number ?? null;
+  const summary = asString(review.summary) ?? '';
+  const evidence = parseSupersededEvidence(review.superseded_by);
+
+  let problem: string | null = null;
+  if (!evidence) {
+    problem =
+      'the verdict carries no valid `superseded_by` evidence (each entry needs a requirement and the base-branch commit or PR that satisfies it)';
+  } else if (!prNumber) {
+    problem = 'there is no PR to check the evidence against';
+  } else if (prStats?.changed_files !== 0) {
+    try {
+      const files = await forgejo.listPullRequestFiles(repo, prNumber);
+      const unaccounted = findUnaccountedFiles(files, evidence);
+      if (unaccounted.length > 0) {
+        problem =
+          `PR #${prNumber} still changes files the evidence does not account for: ` +
+          unaccounted.map((f) => `\`${f}\``).join(', ');
+      }
+    } catch {
+      problem = `the files changed by PR #${prNumber} could not be listed to check the evidence`;
+    }
+  }
+
+  const evidenceMd = evidence ? formatSupersededEvidence(evidence) : '';
+
+  if (problem) {
+    updateTaskWithSync(task.id, {
+      status: 'needs-human-review',
+      completed_at: new Date().toISOString(),
+    });
+    try {
+      await forgejo.commentOnIssue(
+        repo,
+        task.issue_id,
+        `Review agent judged ${prNumber ? `PR #${prNumber}` : 'the task'} superseded by ${repo.base_branch}, but ${problem}. ` +
+          `Treating the verdict as unclear — human review required. Nothing was closed or deleted.` +
+          [summary, evidenceMd].filter(Boolean).map((p) => `\n\n${p}`).join('')
+      );
+    } catch { /* best effort */ }
+    log.warn(
+      { event: 'superseded_verdict_unverified', task_id: task.id, problem },
+      'Superseded verdict failed the evidence check — needs human review'
+    );
+    return;
+  }
+
+  const reason = [
+    `${repo.base_branch} already meets every requirement of this task, so PR #${prNumber} is no longer needed.`,
+    summary,
+    evidenceMd ? `Evidence:\n${evidenceMd}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  try {
+    await forgejo.commentOnPr(
+      repo,
+      prNumber!,
+      `Closing as superseded — confirmed by review agent.\n\n${reason}`
+    );
+  } catch { /* best effort */ }
+
+  await finalizeNoChange(task, forgejo, log, {
+    confirmedBy: 'review agent',
+    reason,
+  });
+}
+
 /**
  * Process the review verdict after a successful review agent run.
  */
@@ -924,6 +1095,8 @@ export async function processReviewVerdict(
       log,
       launchDevContainer
     );
+  } else if (review.verdict === 'no_change_superseded') {
+    await processSupersededVerdict(task, repo, review, prStats, forgejo, log);
   } else if (review.verdict === 'unclear') {
     updateTaskWithSync(task.id, {
       status: 'needs-human-review',

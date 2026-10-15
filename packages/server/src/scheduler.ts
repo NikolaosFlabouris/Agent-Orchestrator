@@ -1840,7 +1840,7 @@ export class Scheduler {
     // Read review.json
     const outputDir = getOutputDir(task);
     const reviewPath = path.join(outputDir, 'review.json');
-    let review: { verdict: 'approved' | 'changes_needed' | 'unclear'; summary?: string; feedback?: any };
+    let review: Parameters<typeof processReviewVerdict>[1];
     try {
       const raw = await fsp.readFile(reviewPath, 'utf-8');
       review = JSON.parse(raw);
@@ -2581,6 +2581,9 @@ ${stripDependencySection(issue.body)}
 4. Read and understand every changed file
 5. Run the test suite if one exists
 6. Evaluate the change against the rubric below, one dimension at a time
+7. Check whether ${repo.base_branch} has meanwhile made this PR redundant
+   (see "no_change_superseded" below): git log origin/${repo.base_branch} for
+   commits / PRs merged since the branch was created that did the same work
 
 ## Review Rubric
 
@@ -2601,14 +2604,16 @@ outcome is "pass".
    keep scope discipline (no unrelated or out-of-scope changes)?
 
 Base the verdict on the rubric outcome: any dimension that is "fail" (or a
-"concern" serious enough to block) means the verdict is "changes_needed".
+"concern" serious enough to block) means the verdict is "changes_needed" —
+unless the whole PR is superseded by ${repo.base_branch} (see
+"no_change_superseded" below), in which case reworking it would be wasted.
 
 ## Output
 
 Create a file at /output/review.json with EXACTLY this structure:
 
 {
-  "verdict": "approved" | "changes_needed" | "unclear",
+  "verdict": "approved" | "changes_needed" | "unclear" | "no_change_superseded",
   "summary": "1-2 sentence overall assessment",
   "rubric": {
     "requirements": { "status": "pass" | "concern" | "fail", "note": "..." },
@@ -2626,8 +2631,18 @@ Create a file at /output/review.json with EXACTLY this structure:
       "comment": "What is wrong and why it matters",
       "suggestion": "A concrete, actionable change the implementer can make — not a restatement of the problem"
     }
+  ],
+  "superseded_by": [
+    {
+      "requirement": "A requirement / acceptance criterion from the task",
+      "satisfied_by": "The commit SHA and/or PR on ${repo.base_branch} that already satisfies it",
+      "files": ["every file this PR changes that the commit / PR accounts for"]
+    }
   ]
 }
+
+"superseded_by" is only read for the "no_change_superseded" verdict; omit it
+otherwise.
 
 Schema rules:
 - "verdict":
@@ -2640,6 +2655,19 @@ Schema rules:
   - "unclear" — you genuinely cannot determine whether the change is correct
     (e.g. the diff is unreadable, the task is ambiguous, or you lack the
     context to judge). Use this sparingly; it routes to a human.
+  - "no_change_superseded" — ${repo.base_branch} ALREADY meets every
+    requirement of the task (e.g. the same fix was merged from another PR
+    while this one waited), and this PR adds nothing necessary on top of it.
+    The task is then closed as no-change: the PR is closed and its branch
+    deleted, so be certain. This is NOT for "the PR is wrong or incomplete"
+    — that is "changes_needed". It is only for "the work is no longer
+    needed because ${repo.base_branch} already has it". Requires
+    "superseded_by": one entry per requirement, naming the commit / PR on
+    ${repo.base_branch} that satisfies it, and together the entries' "files"
+    MUST list every file in
+    \`git diff origin/${repo.base_branch}...HEAD --name-only\`. If the PR
+    changes any file you cannot account for this way, the verdict is
+    treated as "unclear" and routed to a human.
 - "rubric": one entry per dimension above, with the dimension name as the
   key. Every dimension MUST be present. "note" briefly justifies the status.
 - "feedback": each entry's "category" MUST be one of the five rubric
