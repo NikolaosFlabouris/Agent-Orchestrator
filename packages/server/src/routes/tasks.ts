@@ -1,4 +1,5 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { getSessionFromRequest } from '../auth.js';
 import {
   getTask,
   getTasks,
@@ -551,6 +552,37 @@ export function createTaskRoutes(
                 error: 'Cannot close a no-change task — it is already resolved and its issue closed.',
               });
             }
+            // Resolution: `cancelled` (default) or `no-change` for a
+            // duplicate / already-done task. A human's decision is the
+            // review, so no-change finalises directly — but only with a
+            // reason, which becomes the closing comment.
+            const resolution = body.resolution ?? 'cancelled';
+            if (resolution !== 'cancelled' && resolution !== 'no-change') {
+              return reply.status(400).send({
+                error: `Unknown close resolution '${String(resolution)}'. Valid: cancelled, no-change`,
+              });
+            }
+            if (resolution === 'no-change') {
+              const reason =
+                typeof body.reason === 'string' ? body.reason.trim() : '';
+              if (!reason) {
+                return reply.status(400).send({
+                  error: 'reason is required to close as no-change (e.g. "duplicate of #123").',
+                });
+              }
+              const login = sessionLogin(request);
+              await finalizeNoChange(
+                task,
+                forgejo,
+                log,
+                {
+                  confirmedBy: login ? `human (${login})` : 'human',
+                  reason,
+                },
+                () => scheduler.triggerTick()
+              );
+              break;
+            }
             await closeTask(
               task,
               forgejo,
@@ -716,6 +748,18 @@ export function validateAgentProfile(
     return { valid: false, error: `Unknown ${fieldName}: ${profileId}` };
   }
   return { valid: true };
+}
+
+/** Forgejo login of the signed-in human, for attributing a decision in an
+ *  issue comment. Null when auth is disabled or the session has no identity
+ *  (the userinfo lookup is best effort). */
+function sessionLogin(request: FastifyRequest): string | null {
+  try {
+    return getSessionFromRequest(request)?.user?.login ?? null;
+  } catch {
+    // No cookie support registered on this instance (e.g. tests).
+    return null;
+  }
 }
 
 // The task serializer (`enrichTask`, `enrichTaskWithDerivation`, the

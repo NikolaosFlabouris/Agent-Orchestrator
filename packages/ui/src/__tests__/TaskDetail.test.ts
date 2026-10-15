@@ -7,6 +7,7 @@ import {
   deriveLastFailure,
   isNearTimeout,
   canDecideNoChange,
+  closeAsNoChangeAction,
 } from '../views/TaskDetail.js';
 import type {
   TaskDetailResponse,
@@ -524,5 +525,19 @@ describe('canDecideNoChange', () => {
     expect(canDecideNoChange({ status: 'awaiting-human-review', no_change_claim: '{bad' })).toBe(false);
     expect(canDecideNoChange({ status: 'in-review', no_change_claim: claim })).toBe(false);
     expect(canDecideNoChange({ status: 'no-change', no_change_claim: claim })).toBe(false);
+  });
+});
+
+describe('closeAsNoChangeAction', () => {
+  it('builds a close with the no-change resolution and the trimmed reason', () => {
+    expect(closeAsNoChangeAction('  duplicate of #123 ')).toEqual({
+      action: 'close',
+      resolution: 'no-change',
+      reason: 'duplicate of #123',
+    });
+  });
+
+  it('returns null for a blank reason — the server requires one', () => {
+    expect(closeAsNoChangeAction('   ')).toBeNull();
   });
 });

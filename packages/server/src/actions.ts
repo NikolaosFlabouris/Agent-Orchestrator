@@ -112,7 +112,9 @@ export async function cancelTask(
  * ALSO closes the Forgejo issue, and — unlike cancel — works on terminal
  * statuses such as `failed`. The orchestrator task lands in the existing
  * `cancelled` terminal status: here "cancelled" means orchestration was
- * stopped because there is no work to perform. No new TaskStatus is introduced.
+ * stopped because there is no work to perform. To record a duplicate or
+ * already-done task as `no-change` instead, the Close route calls
+ * finalizeNoChange (resolution `no-change`).
  *
  * Idempotent/best-effort against Forgejo: closing an already-closed issue or a
  * missing branch/PR is swallowed.
@@ -174,6 +176,12 @@ export interface NoChangeConfirmation {
   confirmedBy: string;
   /** The confirmed reason, as the reviewer stated it. */
   reason: string;
+  /**
+   * The issue is already closed — someone on Forgejo closed it carrying
+   * `status/no-change`. The closer has explained it, so post only a short
+   * note and do not close the issue again.
+   */
+  issueAlreadyClosed?: boolean;
 }
 
 /**
@@ -222,21 +230,22 @@ export async function finalizeNoChange(
 
   // 3. Explain, relabel (keeping non-status labels), close the issue
   if (repo) {
+    const comment = confirmation.issueAlreadyClosed
+      ? `Task recorded as no-change — ${confirmation.reason}. Agent branch and PR cleaned up.`
+      : `No code change needed — confirmed by ${confirmation.confirmedBy}.\n\n${confirmation.reason}\n\nAgent branch and PR cleaned up; issue closed.`;
     try {
-      await forgejo.commentOnIssue(
-        repo,
-        fresh.issue_id,
-        `No code change needed — confirmed by ${confirmation.confirmedBy}.\n\n${confirmation.reason}\n\nAgent branch and PR cleaned up; issue closed.`
-      );
+      await forgejo.commentOnIssue(repo, fresh.issue_id, comment);
     } catch { /* best effort */ }
 
     try {
       await replaceStatusLabel(forgejo, repo, fresh.issue_id, 'status/no-change');
     } catch { /* best effort */ }
 
-    try {
-      await forgejo.closeIssue(repo, fresh.issue_id);
-    } catch { /* best effort — issue may already be closed */ }
+    if (!confirmation.issueAlreadyClosed) {
+      try {
+        await forgejo.closeIssue(repo, fresh.issue_id);
+      } catch { /* best effort — issue may already be closed */ }
+    }
   }
 
   log.info(
@@ -250,6 +259,55 @@ export async function finalizeNoChange(
 
   // 4. Let the scheduler reuse the freed slot
   onSlotFreed?.();
+}
+
+/**
+ * Stored statuses an external `status/no-change` may convert to `no-change`:
+ * every non-terminal status, plus `cancelled` so a duplicate that was
+ * cancelled (e.g. closed before #228) can be reclassified. `merged` and
+ * `failed` are never converted — they record a real outcome.
+ */
+export function canFinalizeExternalNoChange(
+  status: Task['status'],
+  issueClosed: boolean
+): boolean {
+  if (!TERMINAL_STATUSES.has(status)) return true;
+  return status === 'cancelled' && issueClosed;
+}
+
+/**
+ * Finalise a task as `no-change` because someone on Forgejo marked its issue
+ * `status/no-change` — by closing it with that label (Imbina's CI resolve
+ * step does this for a duplicate `ci-failure` issue) or by applying the label
+ * to the issue. The human who set the label is the review.
+ *
+ * Used by the issues webhook and by the poller when the webhook was missed.
+ * The resulting `status/no-change` echo is a fixed point: `no-change` is
+ * terminal and not `cancelled`, so `canFinalizeExternalNoChange` refuses it.
+ */
+export async function finalizeExternalNoChange(
+  task: Task,
+  forgejo: ForgejoClient,
+  log: FastifyBaseLogger,
+  issueClosed: boolean,
+  onSlotFreed?: () => void
+): Promise<void> {
+  await finalizeNoChange(
+    task,
+    forgejo,
+    log,
+    issueClosed
+      ? {
+          confirmedBy: 'external close with the status/no-change label',
+          reason: 'issue closed on Forgejo with the status/no-change label',
+          issueAlreadyClosed: true,
+        }
+      : {
+          confirmedBy: 'external status/no-change label',
+          reason: 'The status/no-change label was applied to the issue on Forgejo.',
+        },
+    onSlotFreed
+  );
 }
 
 export interface ResetOptions {

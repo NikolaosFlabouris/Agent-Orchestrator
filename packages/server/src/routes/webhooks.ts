@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { STATUS_LABELS, TERMINAL_STATUSES } from '@orchestrator/shared';
 import { scanForHumanMergeConflicts } from '../conflict-detector.js';
 
 // Terminal-state tasks that should re-enter the queue when the user re-applies
@@ -26,6 +26,10 @@ import type { ForgejoClient } from '../forgejo.js';
 import type { Scheduler } from '../scheduler.js';
 import { invalidateSnapshot } from '../forgejo-snapshot.js';
 import { notifyTaskCreated, updateTaskWithSync } from '../state-sync.js';
+import {
+  canFinalizeExternalNoChange,
+  finalizeExternalNoChange,
+} from '../actions.js';
 import {
   syncTaskDependencies,
   reevaluateDependentsOfIssue,
@@ -138,6 +142,11 @@ export function createWebhookRoutes(
 //   • → `queued`: the re-queue branch requires a status in
 //     REQUEUEABLE_FROM_LABEL, which deliberately excludes `queued`; the echo
 //     lands in the "duplicate queue request" log line instead.
+//   • → `no-change` (external `status/no-change` label, or a close carrying
+//     it): gated on `canFinalizeExternalNoChange`, which accepts only a
+//     non-terminal status or `cancelled` with a closed issue. `no-change` is
+//     neither, so the `status/no-change` echo, and the `closed` event that
+//     finalising an open issue triggers, are both no-ops.
 // Keep that invariant in mind before adding a branch here: any new transition
 // must be unreachable from the label its own sync writes.
 // ---------------------------------------------------------------------------
@@ -260,6 +269,27 @@ async function handleIssueEvent(
       const tracked = getTaskByIssue(repo.id, issue.number);
       if (!tracked) return;
 
+      // An externally applied status/no-change finalises the task as
+      // no-change (and closes the issue if it is still open). Checked before
+      // status/cancelled so a duplicate is never recorded as cancelled.
+      if (hasNoChangeLabel(issue)) {
+        const issueClosed = issue.state === 'closed';
+        if (canFinalizeExternalNoChange(tracked.status, issueClosed)) {
+          log.info(
+            {
+              event: 'webhook_external_no_change',
+              task_id: tracked.id,
+              previous_status: tracked.status,
+            },
+            'Task finalised as no-change via external status/no-change label'
+          );
+          await finalizeExternalNoChange(tracked, forgejo, log, issueClosed, () =>
+            scheduler.triggerTick()
+          );
+        }
+        return;
+      }
+
       // If the issue now has a status/cancelled label applied externally
       const hasCancelled = issue.labels?.some(
         (l: { name: string }) => l.name === 'status/cancelled'
@@ -332,6 +362,20 @@ async function handleIssueEvent(
     const tracked = getTaskByIssue(repo.id, issue.number);
     if (!tracked) return;
 
+    // Closed as a duplicate / already done: the closer set status/no-change
+    // first (e.g. Imbina's CI resolve step). Record no-change, not cancelled,
+    // and leave the issue and the closer's comment alone.
+    if (hasNoChangeLabel(issue) && !TERMINAL_STATUSES.has(tracked.status)) {
+      log.info(
+        { event: 'webhook_issue_closed_no_change', task_id: tracked.id },
+        'Task finalised as no-change — issue closed externally with status/no-change'
+      );
+      await finalizeExternalNoChange(tracked, forgejo, log, true, () =>
+        scheduler.triggerTick()
+      );
+      return;
+    }
+
     // If still active, mark as cancelled
     if (!TERMINAL_STATUSES.has(tracked.status)) {
       updateTaskWithSync(tracked.id, {
@@ -345,6 +389,12 @@ async function handleIssueEvent(
       scheduler.triggerTick();
     }
   }
+}
+
+function hasNoChangeLabel(issue: { labels?: Array<{ name: string }> }): boolean {
+  return (
+    issue.labels?.some((l) => l.name === STATUS_LABELS.NO_CHANGE) ?? false
+  );
 }
 
 async function handlePullRequestEvent(

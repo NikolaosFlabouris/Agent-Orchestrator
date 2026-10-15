@@ -1,4 +1,4 @@
-import { TERMINAL_STATUSES } from '@orchestrator/shared';
+import { STATUS_LABELS, TERMINAL_STATUSES } from '@orchestrator/shared';
 import { scanForHumanMergeConflicts } from './conflict-detector.js';
 
 // Terminal-state tasks that should re-enter the queue if the user re-applies
@@ -26,6 +26,10 @@ import { POLL_INTERVAL_SECONDS } from './constants.js';
 import { notifyTaskCreated, updateTaskWithSync } from './state-sync.js';
 import { invalidateSnapshot } from './forgejo-snapshot.js';
 import { syncTaskDependencies } from './dependencies.js';
+import {
+  canFinalizeExternalNoChange,
+  finalizeExternalNoChange,
+} from './actions.js';
 import type { ForgejoClient } from './forgejo.js';
 import type { Scheduler } from './scheduler.js';
 import type { FastifyBaseLogger } from 'fastify';
@@ -236,6 +240,7 @@ export class Poller {
 
   /**
    * Detect external state changes on tracked tasks:
+   * - `status/no-change` on the issue (closed or open) → no-change
    * - Issue closed externally → cancel
    * - PR merged manually → mark as merged
    * - Label changed externally → sync state
@@ -299,6 +304,35 @@ export class Poller {
           } catch {
             // PR may not exist
           }
+        }
+
+        // status/no-change on the issue (closed with it, or applied to an
+        // open issue) → no-change, not cancelled: the lost-webhook fallback
+        // for the same branches in routes/webhooks.ts. Checked before the
+        // issue-closed and external-cancel branches so a duplicate never
+        // lands in `cancelled`.
+        const issueClosed = issue.state === 'closed';
+        if (
+          issue.labels.some((l) => l.name === STATUS_LABELS.NO_CHANGE) &&
+          canFinalizeExternalNoChange(task.status, issueClosed)
+        ) {
+          invalidateSnapshot(task.id);
+          await finalizeExternalNoChange(
+            task,
+            this.forgejo,
+            this.log,
+            issueClosed,
+            () => this.scheduler.triggerTick()
+          );
+          this.log.info(
+            {
+              event: 'poll_external_no_change',
+              task_id: task.id,
+              previous_status: task.status,
+            },
+            'Task finalised as no-change — status/no-change on the issue (detected by poll)'
+          );
+          continue;
         }
 
         // Issue closed externally → cancel. Skip tasks already in a terminal

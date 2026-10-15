@@ -41,7 +41,7 @@ Accessed by clicking any task (active, queued, or completed). Shows full task li
 
 **Header:** issue number, title, repo, branch name, PR number (linked to Forgejo), current status, elapsed time. Two amber lines appear under the attempt counter when the task is in a git-outage backoff, each with a live "in Xm Ys" countdown: *"Workspace prep failed ×N — retry in …"* while a queued task is waiting out `prep_next_attempt_at`, and *"Completed work is held locally — push retry in …"* while `salvage_next_attempt_at` is set (finished agent work that has not reached the git host yet). Without them a task in either state is indistinguishable from an idle queued one.
 
-**Actions bar:** Cancel, Force Approve, Force Fail, Reset buttons (context-dependent). A task carrying a dev agent's no-change claim shows the claim (category, reason, evidence) in a panel above the timeline, with Accept and Reject (comment required) buttons while a human decision is pending. Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`, `no-change`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
+**Actions bar:** Cancel, Close, Close as no-change, Force Approve, Force Fail, Reset buttons (context-dependent). Close (any status except `merged` and `no-change`) cleans up the branch and PR, closes the issue and marks the task `cancelled`. Close as no-change (same statuses) is for a duplicate or already-done task: it opens a dialog asking for a required reason (e.g. "duplicate of #123", "already fixed by #456") and finalises the task as `no-change`, posting the reason as the closing comment. A task carrying a dev agent's no-change claim shows the claim (category, reason, evidence) in a panel above the timeline, with Accept and Reject (comment required) buttons while a human decision is pending. Reset is available on any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`, `no-change`) and requires confirmation: *"This will delete the branch, PR, and all agent work. The issue will return to an unqueued state. Continue?"*
 
 **Timeline:** chronological list of orchestrator events (preparing, container started, agent running, review started, merged, etc.) with timestamps. Each row also states its raw `event_type` in a muted monospace chip beside the timestamp — messages are prose written per call site, so two rows can read alike while being entirely different events, and the type is what you grep the server for. Rows are coloured by `event_type` (`EVENT_COLORS` in `Timeline.tsx`); the dot glyph itself is a uniform `•`.
 
@@ -269,6 +269,7 @@ Two request shapes. **Direct field updates** carry one or more editable fields a
 ```json
 { "action": "reorder", "queue_position": 3 }
 { "action": "cancel", "reason": "No longer needed" }
+{ "action": "close", "resolution": "no-change", "reason": "duplicate of #123" }
 { "action": "force_approve" }
 { "action": "force_fail", "reason": "Known bad approach" }
 { "action": "reset" }
@@ -278,6 +279,7 @@ Two request shapes. **Direct field updates** carry one or more editable fields a
 |---|---|---|---|
 | `reorder` | Change position in queue | `queued` | Updates `queue_position`. Requires `queue_position` (integer). |
 | `cancel` | Cancel the task | Any active state | Stops container, deletes branch/PR, relabels. Optional `reason` (string). |
+| `close` | Resolve the task and close its issue | Any state except `merged` and `no-change` | Stops container, deletes branch/PR, closes the issue. Optional `resolution`: `cancelled` (default, task marked `cancelled`) or `no-change` (finalises as `no-change`, label `status/no-change`; requires a non-empty `reason` and posts it in the closing comment with the human's name). Optional `reason` (string) otherwise. |
 | `force_approve` | Skip review, go straight to merge | `in-review` | Treats review as approved, attempts merge. |
 | `force_fail` | Manually fail the task | Any active state | Stops container, marks as failed. Optional `reason` (string). |
 | `reset` | Reset to clean unqueued state | Any terminal state (`failed`, `cancelled`, `awaiting-human-*`, `needs-human-review`, `no-change`) | Deletes branch/PR/workspace, removes labels, resets attempt counter. |
