@@ -50,6 +50,13 @@ in-progress ──► in-review (no-change mode) ──► no-change
      │
      └─ (human-review) ──► awaiting-human-review ──Accept──► no-change
                                      └──Reject + comment──► changes-needed ──► in-progress
+
+No-change resolved from outside (duplicate / already done):
+
+any non-terminal ──(issue closed carrying status/no-change)──► no-change
+any non-terminal ──(status/no-change applied on Forgejo)─────► no-change
+cancelled + closed issue ──(status/no-change applied)────────► no-change
+any status but merged / no-change ──(Close, resolution no-change + reason)──► no-change
 ```
 
 ### Transition Details
@@ -138,6 +145,23 @@ in-progress ──► in-review (no-change mode) ──► no-change
 - Set `status: no-change` and `completed_at` (frees the slot), record `no_change_confirmed`, delete the agent branch, close any open PR, post a comment with the confirmed reason and who confirmed it (review agent or human reviewer), set the `status/no-change` label while keeping every non-`status/*` label, and close the issue.
 - The status is stored before the issue is closed, so the `issues.closed` webhook sees a terminal task and does not cancel it. A closed issue labelled `status/no-change` derives to `no-change`, not `cancelled`.
 - Reports count `no-change` separately: it is excluded from the success rate (neither a failure nor a merge).
+
+**Any non-terminal state → no-change** (issue closed with `status/no-change`)
+- Trigger: the issue is closed on Forgejo while it carries `status/no-change`. The closer sets the label first, then closes. Imbina's CI resolve step does this for a `ci-failure` issue whose checks have all passed on `main`, i.e. a duplicate of work already merged.
+- Action: finalise as `no-change` (above), with two differences: the issue is not closed again, and the closing comment is a short note ("Task recorded as no-change — …"), because the closer already explained it. The `no_change_confirmed` event names the source: external close with the `status/no-change` label.
+- Without the label, the outcome is unchanged: the task is `cancelled`.
+
+**Any non-terminal state → no-change** (external `status/no-change` label)
+- Trigger: `status/no-change` is applied to the issue on Forgejo.
+- Action: finalise as `no-change` (above), which also closes the issue.
+- Also valid from `cancelled` when the issue is already closed, so a human can reclassify a duplicate that was cancelled. `merged` and `failed` are never converted, and nor is `cancelled` with an open issue.
+- Lost webhooks: the poller runs the same check on every task that is not `merged`, `cancelled` or `no-change`. A closed (or open) issue carrying `status/no-change` ends as stored `no-change` with label `status/no-change`. The poller does not re-read `cancelled` tasks, so reclassifying a cancelled task depends on the `label_updated` webhook.
+- No ping-pong: the `status/no-change` label the sync writes back, and the `closed` event from closing the issue, both find a `no-change` task. That status is terminal and not `cancelled`, so neither event causes another transition.
+
+**Any state except merged / no-change → no-change** (human Close as no-change)
+- Trigger: the Close action with `resolution: "no-change"` and a required `reason` (e.g. "duplicate of #123"). Valid from the same statuses as a plain Close.
+- Action: finalise as `no-change` (above). The human's decision is the review. The closing comment names the human (their Forgejo login when known) and the reason.
+- Close without a resolution (or with `resolution: "cancelled"`) is unchanged: cleanup, issue closed, task `cancelled`.
 
 **changes-needed → preparing** (orphaned rework only)
 - Trigger: task found in `changes-needed` without an active slot (e.g., after orchestrator restart)
@@ -243,5 +267,6 @@ Every orchestrator action is logged as an issue comment:
 | Human merge deferred | "Review approved. PR #{pr} is ready for manual merge. Label `human-merge` detected." |
 | No-change claimed | "The dev agent concluded no code change is required (attempt {N}). The claim will be reviewed before the task is closed.\n\n{category, reason, evidence}" |
 | No-change claim rejected | "Review rejected the no-change claim (attempt {N}). Sending back for rework.\n\n{feedback}" |
-| No-change confirmed | "No code change needed — confirmed by {review agent / human reviewer}.\n\n{reason}\n\nAgent branch and PR cleaned up; issue closed." |
+| No-change confirmed | "No code change needed — confirmed by {review agent / human reviewer / human (login) / external status/no-change label}.\n\n{reason}\n\nAgent branch and PR cleaned up; issue closed." |
+| No-change on external close | "Task recorded as no-change — issue closed on Forgejo with the status/no-change label. Agent branch and PR cleaned up." |
 | Orchestrator recovered | "Orchestrator recovered after restart. {recovery_action_taken}" |

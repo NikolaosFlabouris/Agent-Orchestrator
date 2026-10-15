@@ -166,6 +166,9 @@ export function TaskDetail() {
   const [extendModalOpen, setExtendModalOpen] = useState(false);
   const [extendAmount, setExtendAmount] = useState(1);
   const [extendError, setExtendError] = useState<string | null>(null);
+  const [noChangeModalOpen, setNoChangeModalOpen] = useState(false);
+  const [noChangeReason, setNoChangeReason] = useState('');
+  const [noChangeError, setNoChangeError] = useState<string | null>(null);
   const [editingMaxAttempts, setEditingMaxAttempts] = useState(false);
   const [maxAttemptsDraft, setMaxAttemptsDraft] = useState<number | null>(null);
   const [maxAttemptsError, setMaxAttemptsError] = useState<string | null>(null);
@@ -177,11 +180,14 @@ export function TaskDetail() {
   // it when the modal closes (it is the only way in, so it is always the
   // element the user came from).
   const extendTriggerRef = useRef<HTMLButtonElement>(null);
+  // Same hand-back for the Close-as-no-change dialog.
+  const noChangeTriggerRef = useRef<HTMLButtonElement>(null);
   // One id root for this view's label/control pairs and the dialog title.
   const uid = useId();
   const agentProfileSelectId = `${uid}-agent-profile`;
   const reviewProfileSelectId = `${uid}-review-profile`;
   const extendTitleId = `${uid}-extend-title`;
+  const noChangeTitleId = `${uid}-no-change-title`;
 
   useEffect(() => {
     if (!id) return;
@@ -241,6 +247,17 @@ export function TaskDetail() {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [extendModalOpen]);
+
+  // Escape closes the Close-as-no-change dialog the same way.
+  useEffect(() => {
+    if (!noChangeModalOpen) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return;
+      closeNoChangeModal();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [noChangeModalOpen]);
 
   // Load agent profiles into store if not already cached
   useEffect(() => {
@@ -313,6 +330,33 @@ export function TaskDetail() {
       closeExtendModal();
     } catch (err) {
       setExtendError(err instanceof Error ? err.message : 'Extend failed');
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  function closeNoChangeModal() {
+    setNoChangeModalOpen(false);
+    setNoChangeError(null);
+    noChangeTriggerRef.current?.focus();
+  }
+
+  async function handleCloseAsNoChange() {
+    if (!task || actionPending) return;
+    const action = closeAsNoChangeAction(noChangeReason);
+    if (!action) {
+      setNoChangeError('A reason is required, e.g. "duplicate of #123".');
+      return;
+    }
+    setActionPending(true);
+    setNoChangeError(null);
+    try {
+      await api.patchTask(task.id, action);
+      const updated = await api.getTask(task.id);
+      setTask(updated);
+      closeNoChangeModal();
+    } catch (err) {
+      setNoChangeError(err instanceof Error ? err.message : 'Close failed');
     } finally {
       setActionPending(false);
     }
@@ -782,6 +826,18 @@ export function TaskDetail() {
               Close
             </Button>
           )}
+          {task.status !== 'merged' && task.status !== 'no-change' && (
+            <Button
+              variant="secondary"
+              ref={noChangeTriggerRef}
+              onClick={() => { setNoChangeReason(''); setNoChangeError(null); setNoChangeModalOpen(true); }}
+              disabled={actionPending}
+              className="text-sm px-3 py-1.5"
+              title="Resolve a duplicate or already-done task: close the Forgejo issue and mark the task no-change"
+            >
+              Close as no-change
+            </Button>
+          )}
           {task.status === 'in-review' && !task.no_change_claim && (
             <Button
               variant="success"
@@ -937,6 +993,61 @@ export function TaskDetail() {
               >
                 {actionPending ? 'Extending…' : 'Confirm'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Close-as-no-change dialog — same shape as the Extend modal. */}
+      {noChangeModalOpen && task && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={noChangeTitleId}
+            className="bg-gray-900 border border-gray-700 rounded-lg p-6 w-full max-w-sm shadow-xl"
+          >
+            <h2 id={noChangeTitleId} className="text-lg font-semibold mb-4">Close as no-change</h2>
+            <p className="text-sm text-gray-400 mb-4">
+              For a duplicate or already-done task. The Forgejo issue is closed
+              with <span className="font-mono">status/no-change</span>
+              {task.pr_number != null ? `, PR #${task.pr_number} closed` : ''} and
+              the branch deleted. Your reason is posted as the closing comment.
+            </p>
+            <div className="mb-3">
+              <label htmlFor={`${uid}-no-change-reason`} className="block text-xs text-gray-500 mb-1">
+                Reason (required)
+              </label>
+              <textarea
+                id={`${uid}-no-change-reason`}
+                value={noChangeReason}
+                autoFocus
+                rows={3}
+                placeholder="duplicate of #123 / already fixed by #456"
+                onChange={(e) => setNoChangeReason(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            {noChangeError && (
+              <p className="text-xs text-red-400 mb-3">{noChangeError}</p>
+            )}
+            <div className="flex gap-3 justify-end">
+              <Button
+                variant="secondary"
+                onClick={closeNoChangeModal}
+                disabled={actionPending}
+                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5"
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                onClick={handleCloseAsNoChange}
+                disabled={actionPending || noChangeReason.trim() === ''}
+                className="min-h-11 sm:min-h-0 text-sm px-4 py-1.5"
+              >
+                {actionPending ? 'Closing…' : 'Close as no-change'}
+              </Button>
             </div>
           </div>
         </div>
@@ -1257,6 +1368,16 @@ function DependencyRow({
 
 /** True when a human can Accept/Reject the task's no-change claim. Pure and
  *  exported for tests. */
+/** The PATCH body for Close with the `no-change` resolution, or null when
+ *  the reason is blank — the server requires one. */
+export function closeAsNoChangeAction(
+  reason: string
+): Extract<TaskAction, { action: 'close' }> | null {
+  const trimmed = reason.trim();
+  if (!trimmed) return null;
+  return { action: 'close', resolution: 'no-change', reason: trimmed };
+}
+
 export function canDecideNoChange(
   task: Pick<TaskResponse, 'status' | 'no_change_claim'>
 ): boolean {

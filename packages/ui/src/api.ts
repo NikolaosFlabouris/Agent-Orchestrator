@@ -448,7 +448,12 @@ export interface QueueTaskRequest {
 export type TaskAction =
   | { action: 'reorder'; queue_position: number }
   | { action: 'cancel'; reason?: string }
-  | { action: 'close'; reason?: string }
+  | {
+      action: 'close';
+      /** Default `cancelled`. `no-change` requires a non-empty `reason`. */
+      resolution?: 'cancelled' | 'no-change';
+      reason?: string;
+    }
   | { action: 'force_approve' }
   | { action: 'force_fail'; reason?: string }
   | { action: 'reset' }
