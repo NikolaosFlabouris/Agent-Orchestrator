@@ -57,6 +57,8 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  1.3.x (1.3.0), which is what images/agent/Dockerfile installs. No
  *  harness change was needed coming from 1.1.x (nor from 1.0.x to 1.1.x,
  *  0.87.x to 1.0.x or 0.84.x to 0.87.x before that). Verified on 1.3.0:
+ *    same findings as 1.2.0 — nothing in 1.2.0→1.3.0 changes the
+ *    orchestrator's usage surface. Verified on 1.3.0:
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
@@ -67,11 +69,12 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
- *      `models[].id`, `models[].contextWindow`. 1.2.0 regenerates the
- *      schema (also published as `schemas/models.schema.json`) with no
- *      field removed; the generated file still passes its validator. The
- *      only field added since 0.87.1 is `samplingParamsByThinkingLevel`
- *      (1.0.x).
+ *      `models[].id`, `models[].contextWindow`. 1.2.0 introduced
+ *      generated schemas (also published as
+ *      `schemas/models.schema.json`) with no field removed; the
+ *      generated file still passes its validator. The only field added
+ *      since 0.87.1 is `samplingParamsByThinkingLevel` (1.0.x). 1.3.0
+ *      did not change the schema.
  *    - The generated agent_command against a stub openai-compatible
  *      server produces the same json-mode event sequence as 1.1.0
  *      (event types listed below), sends the same default tool set
@@ -79,10 +82,11 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      built-in extensions added in 0.99 are not enabled by default),
  *      and exits 0. An unreachable baseUrl still exits 0 with a final
  *      `agent_end` whose last message has `stopReason: "error"`, which
- *      harness-cli.sh's pi_terminal_error relies on. 1.2.0's new
- *      exit 1 for errors and output-token truncation (`stopReason:
- *      "length"`) applies only to `--mode text`; json mode still exits
- *      0 for both, and a truncated run is recorded as `success`.
+ *      harness-cli.sh's pi_terminal_error relies on. 1.2.0 added exit 1
+ *      for errors and output-token truncation (`stopReason:
+ *      "length"`) but only for `--mode text`; json mode still exits 0
+ *      for both, and a truncated run is recorded as `success`. 1.3.0
+ *      did not change exit-code behavior.
  *    - Thinking on a self-hosted model comes from the server, not pi.
  *      Against llama-swap's `qwen3.6-35b-a3b` (reasons by default) the
  *      generated openai-compatible models.json — no `reasoning` flag —
