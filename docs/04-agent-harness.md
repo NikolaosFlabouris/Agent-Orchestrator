@@ -298,7 +298,7 @@ unpinned (pi is `~1.2.0`), so re-check these when the image is rebuilt.
 | **Turn cap** | `--max-turns` (from `max_turns`) | none; wall-clock timeout only | none | none |
 | **Auth and conditional flags** | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`). No `--bare`, so **both kinds load the repo's `CLAUDE.md` and `.claude/settings.json`** and get the full toolset | Credential via `buildProviderEnv` (`ANTHROPIC_API_KEY`) | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into the generated config as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` | Credential via `buildProviderEnv` (kind's standard env var); `openai-compatible` token goes into `models.json` as `${OPENAI_COMPAT_AUTH_TOKEN:-ollama}` |
 | **Generated config** | none | none | `/tmp/opencode.json`, `openai-compatible` only | `~/.pi/agent/models.json`, every kind |
-| **Usage (turns/tokens) reporting** | yes — stream-json `result` events summed by `harness-cli.sh` | yes — SDK `result` message | no — usage columns NULL (no Claude-style `result` events) | no — usage columns NULL (no Claude-style `result` events) |
+| **Usage (turns/tokens) reporting** | yes — stream-json `result` events summed by `harness-cli.sh` | yes — SDK `result` messages summed by `harness-sdk.ts` (a session emits one per follow-up turn, e.g. when a background task reports back) | no — usage columns NULL (no Claude-style `result` events) | no — usage columns NULL (no Claude-style `result` events) |
 | **Failure detection** | Exit code; error text from the final `result` event when `is_error` is set (`[API <status>] <result>`), else the log tail | Caught SDK exception | Exit code; log tail as the error text | Exit code **plus** pi's terminal event: pi exits 0 even when every model request failed, so `harness-cli.sh` marks the run `failure` when the last top-level `agent_end` event (`willRetry` false/absent) ends with an assistant message whose `stopReason` is `"error"`, using its `errorMessage` as the error text. Never classified as a usage limit |
 | **Effort / reasoning level** | `effort_level` → `--effort <level>` (every kind); unset → no flag, agent default | `effort_level` → `meta.effort_level` → `query()` option `effort` (`EffortLevel`); unset → option omitted, agent default | Unsupported — rejected at save and launch. Native `--variant <name>` not wired; see note | Unsupported — rejected at save and launch. Native `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` not wired; see note |
 
@@ -316,7 +316,12 @@ in the Settings UI and in save/launch errors. pi's
 `compat.supportsReasoningEffort: false`, so no level reaches the server.
 On self-hosted endpoints reasoning is fixed by the inference server (for
 example a model entry started with `--reasoning off`), so it is chosen by
-registering a different model, not by a flag. The cloud-kind
+registering a different model, not by a flag. Verified 2026-10-18 on pi
+1.2.0 against llama-swap's `qwen3.6-35b-a3b`, which reasons by default:
+pi records each turn's `reasoning_content` as a thinking block and sends
+it back as `reasoning_content` on the following turns, and the request
+carries no reasoning or sampling fields, so the server's own thinking-mode
+sampling applies. The cloud-kind
 `--thinking` path is left unwired until there is real usage to validate
 it. opencode's `--variant`
 names are provider-specific with no fixed level vocabulary, and custom

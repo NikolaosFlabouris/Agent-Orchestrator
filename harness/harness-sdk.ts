@@ -42,20 +42,21 @@ interface Result {
   status: 'success' | 'failure' | 'timeout';
   exit_code: number;
   error_message: string | null;
-  /** Per-run effort metrics, populated from the SDK's final `result`
-   *  message when available. Optional and backward-compatible: when the
+  /** Per-run effort metrics, summed over every `result` message the SDK
+   *  emits (see addUsage). Optional and backward-compatible: when the
    *  SDK reports no usage the field is omitted and the orchestrator leaves
    *  the attempt's usage columns NULL. Raw counts only — no cost. */
   usage?: Usage;
 }
 
-/** The Claude Agent SDK streams messages; the final one has
- *  `type: 'result'` and carries `num_turns` plus a `usage` object with
- *  `input_tokens` / `output_tokens` (mirroring the Anthropic Messages API
- *  shape). Map that final message into our `Usage` shape, taking only the
- *  fields that are present as finite numbers. Returns undefined when the
- *  message isn't a usable result message — the caller then omits `usage`
- *  entirely so behaviour is unchanged from the no-usage harness.
+/** The Claude Agent SDK streams messages; a `type: 'result'` message
+ *  carries `num_turns` plus a `usage` object with `input_tokens` /
+ *  `output_tokens` (mirroring the Anthropic Messages API shape). Map one
+ *  result message into our `Usage` shape, taking only the fields that are
+ *  present as finite numbers. Returns undefined when the message isn't a
+ *  usable result message — the caller then leaves `usage` untouched, so a
+ *  run with no usable result omits it entirely, as the no-usage harness
+ *  does.
  *
  *  Exported as a pure function so the mapping is unit-testable without
  *  driving a live SDK run. The token usage object can carry extra fields
@@ -90,6 +91,25 @@ export function extractUsage(message: unknown): Usage | undefined {
     }
   }
   return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+/** Add one result message's usage to the running total, field by field.
+ *  One `query()` can emit several `result` messages: one when the agent
+ *  first ends its turn, then one more for every follow-up turn the
+ *  session runs when a background task (a backgrounded `git push`, say)
+ *  reports back. Each carries only its own turns and tokens, not a
+ *  running total, so keeping just the last one recorded the final
+ *  follow-up: task 627's rework logged 10, 2 and 1 turns and was stored
+ *  as 1 turn and 95 output tokens instead of 13 and 3,047. harness-cli.sh
+ *  sums its result events the same way. A field absent from every
+ *  message stays absent. */
+export function addUsage(total: Usage | undefined, next: Usage): Usage {
+  const sum: Usage = { ...total };
+  for (const key of Object.keys(next) as (keyof Usage)[]) {
+    const value = next[key];
+    if (value !== undefined) sum[key] = (sum[key] ?? 0) + value;
+  }
+  return sum;
 }
 
 const meta: Meta = JSON.parse(readFileSync('/task/meta.json', 'utf-8'));
@@ -188,11 +208,10 @@ async function main() {
       writeFileSync('/output/progress.log', JSON.stringify(message) + '\n', {
         flag: 'a',
       });
-      // The SDK emits a final `result` message with turn/token usage. Keep
-      // the latest one we see; whatever survives the loop is the run's
-      // authoritative usage summary.
+      // Every `result` message carries the usage of its own turns only, and
+      // a session can emit several (see addUsage), so sum them all.
       const u = extractUsage(message);
-      if (u) result.usage = u;
+      if (u) result.usage = addUsage(result.usage, u);
     }
   } catch (error: unknown) {
     result.status = 'failure';

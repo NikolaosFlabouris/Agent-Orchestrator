@@ -83,6 +83,18 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      exit 1 for errors and output-token truncation (`stopReason:
  *      "length"`) applies only to `--mode text`; json mode still exits
  *      0 for both, and a truncated run is recorded as `success`.
+ *    - Thinking on a self-hosted model comes from the server, not pi.
+ *      Against llama-swap's `qwen3.6-35b-a3b` (reasons by default) the
+ *      generated openai-compatible models.json — no `reasoning` flag —
+ *      sends no reasoning or sampling fields; pi still records each
+ *      turn's `reasoning_content` as a thinking block and sends it back
+ *      as `reasoning_content` on later turns (verified 2026-10-18).
+ *      Marking the model `reasoning: true` with `thinkingFormat:
+ *      "qwen-chat-template"` would instead make pi send
+ *      `chat_template_kwargs.enable_thinking` from its own thinking level
+ *      (default `medium`) on every request, overriding the choice the
+ *      server entry makes together with its matching sampling, so it
+ *      stays unset.
  *    - Cloud kinds need no models.json: `--model anthropic/<id>` and
  *      `--model google/<id>` (reads GEMINI_API_KEY) resolve against the
  *      built-in catalogue, and an uncatalogued id warns and runs as a
