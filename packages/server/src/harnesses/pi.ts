@@ -56,9 +56,9 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  Upstream version: verified against @earendil-works/pi-coding-agent
  *  1.3.x (1.3.0), which is what images/agent/Dockerfile installs. No
  *  harness change was needed coming from 1.1.x (nor from 1.0.x to 1.1.x,
- *  0.87.x to 1.0.x or 0.84.x to 0.87.x before that). Verified on 1.3.0:
- *    same findings as 1.2.0 — nothing in 1.2.0→1.3.0 changes the
- *    orchestrator's usage surface. Verified on 1.3.0:
+ *  0.87.x to 1.0.x or 0.84.x to 0.87.x before that). Verified on 1.3.0
+ *    (same findings as 1.2.0; nothing in 1.2.0→1.3.0 changes the
+ *    orchestrator's usage surface):
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json

@@ -70,8 +70,8 @@ RUN npm install -g opencode-ai
 # Invoked non-interactively with `pi -p "<prompt>"` for autonomous dev-env use,
 # same pattern as OpenCode. The package was renamed from
 # @mariozechner/pi-coding-agent when the project moved to
-# github.com/earendil-works/pi. Ranged at ~1.2.0 (1.2.x) because
-# packages/server/src/harnesses/pi.ts is verified against that line's CLI
+# github.com/earendil-works/pi. Ranged at ~1.3.0 (1.3.x, verified on 1.3.0)
+# because packages/server/src/harnesses/pi.ts is verified against that line's CLI
 # flags, models.json schema and json-mode event stream (see its header
 # comment) — patches still float on rebuild, but moving to a new minor
 # line (1.4, …) means re-verifying the harness first and recording it
