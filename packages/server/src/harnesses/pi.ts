@@ -54,18 +54,19 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  1.3.x (1.3.0), which is what images/agent/Dockerfile installs. No
- *  harness change was needed coming from 1.1.x (nor from 1.0.x to 1.1.x,
- *  0.87.x to 1.0.x or 0.84.x to 0.87.x before that). Verified on 1.3.0
- *    (same findings as 1.2.0; nothing in 1.2.0→1.3.0 changes the
- *    orchestrator's usage surface):
+ *  1.4.x (1.4.0), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 1.3.x (nor from 1.2.x to 1.3.x,
+ *  1.1.x to 1.2.x, 1.0.x to 1.1.x, 0.87.x to 1.0.x or 0.84.x to 0.87.x
+ *  before that). Verified on 1.4.0 (same findings as 1.2.0 and 1.3.0;
+ *  nothing in 1.3.0→1.4.0 changes the orchestrator's usage surface —
+ *  each check below was re-run side by side against 1.3.0):
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
  *      providers. Since 1.0.0 `--provider` without `--model` is an
  *      error; the harness never passes `--provider`. `--help` is
- *      unchanged from 1.1.0 (whose only change since 1.0.4 was the
- *      additive `--tools +name/-name` syntax).
+ *      unchanged from 1.1.0 through 1.4.0 (1.1.0's only change since
+ *      1.0.4 was the additive `--tools +name/-name` syntax).
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
@@ -74,7 +75,9 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      `schemas/models.schema.json`) with no field removed; the
  *      generated file still passes its validator. The only field added
  *      since 0.87.1 is `samplingParamsByThinkingLevel` (1.0.x). 1.3.0
- *      did not change the schema.
+ *      did not change the schema; 1.4.0 only adds field descriptions
+ *      and the classifier-only `compat.imageInput` /
+ *      `compat.sendImageOptInHeader`, neither used here.
  *    - The generated agent_command against a stub openai-compatible
  *      server produces the same json-mode event sequence as 1.1.0
  *      (event types listed below), sends the same default tool set
@@ -86,7 +89,10 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      for errors and output-token truncation (`stopReason:
  *      "length"`) but only for `--mode text`; json mode still exits 0
  *      for both, and a truncated run is recorded as `success`. 1.3.0
- *      did not change exit-code behavior.
+ *      and 1.4.0 did not change exit-code behavior: on 1.4.0 the
+ *      unreachable-baseUrl run still emits four `agent_end` events
+ *      (three retries) ending in `stopReason: "error"`, and
+ *      pi_terminal_error still reports "Connection error.".
  *    - Thinking on a self-hosted model comes from the server, not pi.
  *      Against llama-swap's `qwen3.6-35b-a3b` (reasons by default) the
  *      generated openai-compatible models.json — no `reasoning` flag —
@@ -106,16 +112,21 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      context window (`pi --list-models` showed claude-sonnet-5-5 at
  *      200K / 128K output / thinking / images with a 200000 override),
  *      whereas a `models: [{id}]` entry replaced the catalogue entry
- *      with 128K / 16.4K / no thinking / no images (verified 2026-10-16).
+ *      with 128K / 16.4K / no thinking / no images (verified 2026-10-16;
+ *      the override result re-checked on 1.4.0).
  *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
  *      codemode APIs, MCP, and the Azure provider's name
  *      (`azure-openai-responses` → `azure`) — none of which the
  *      orchestrator uses. 1.1.0 has no breaking changes listed; 1.2.0's
  *      touch theme schemas, the extension `before_agent_start` event and
- *      `pi mcp list --json` — again none used here. From 1.0.1 the npm
- *      package no longer ships npm-shrinkwrap.json, so transitive
- *      dependencies float on rebuild (see images/agent/Dockerfile).
- *    - As on 1.0.4 and 1.1.0, `pi -p` reads piped stdin until EOF
+ *      `pi mcp list --json` — again none used here. 1.4.0's changes
+ *      (provider attribution headers, summaries using the model's output
+ *      limit, new default models for providers not used here, codemode
+ *      worker queueing) don't touch the CLI, models.json or json-mode
+ *      surface either. From 1.0.1 the npm package no longer ships
+ *      npm-shrinkwrap.json, so transitive dependencies float on rebuild
+ *      (see images/agent/Dockerfile).
+ *    - As on 1.0.4 through 1.4.0, `pi -p` reads piped stdin until EOF
  *      before starting, so a run whose stdin is a pipe that never closes
  *      hangs. The harness smoke runs don't hit this, so agent_command
  *      leaves stdin alone; add `</dev/null` if a launcher ever pipes
