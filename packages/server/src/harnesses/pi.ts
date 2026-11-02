@@ -54,19 +54,22 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *  source reference when the project moved to github.com/earendil-works/pi.
  *
  *  Upstream version: verified against @earendil-works/pi-coding-agent
- *  1.4.x (1.4.0), which is what images/agent/Dockerfile installs. No
- *  harness change was needed coming from 1.3.x (nor from 1.2.x to 1.3.x,
- *  1.1.x to 1.2.x, 1.0.x to 1.1.x, 0.87.x to 1.0.x or 0.84.x to 0.87.x
- *  before that). Verified on 1.4.0 (same findings as 1.2.0 and 1.3.0;
- *  nothing in 1.3.0→1.4.0 changes the orchestrator's usage surface —
- *  each check below was re-run side by side against 1.3.0):
+ *  1.5.x (1.5.0), which is what images/agent/Dockerfile installs. No
+ *  harness change was needed coming from 1.4.x (nor from 1.3.x to 1.4.x,
+ *  1.2.x to 1.3.x, 1.1.x to 1.2.x, 1.0.x to 1.1.x, 0.87.x to 1.0.x or
+ *  0.84.x to 0.87.x before that). Verified on 1.5.0 (same findings as
+ *  1.2.0 through 1.4.0; nothing in 1.4.0→1.5.0 changes the
+ *  orchestrator's usage surface — each check below was re-run side by
+ *  side against 1.4.0):
  *    - CLI contract: `-p/--print` + `--mode json` + `--no-session`,
  *      `@<file>` prompt arguments (rejected only in `--mode rpc`), and
  *      `--model <provider>/<model_id>` resolution for models.json
  *      providers. Since 1.0.0 `--provider` without `--model` is an
  *      error; the harness never passes `--provider`. `--help` is
  *      unchanged from 1.1.0 through 1.4.0 (1.1.0's only change since
- *      1.0.4 was the additive `--tools +name/-name` syntax).
+ *      1.0.4 was the additive `--tools +name/-name` syntax); 1.5.0 only
+ *      rewords the session-flag descriptions, adds an optional output
+ *      path to `--export` and documents `PI_SELF_UPDATE_COMMAND`.
  *    - models.json schema (`dist/core/model-config.d.ts`) still accepts
  *      every field written below: `baseUrl`, `api`, `apiKey`,
  *      `compat.supportsDeveloperRole`, `compat.supportsReasoningEffort`,
@@ -77,10 +80,14 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      since 0.87.1 is `samplingParamsByThinkingLevel` (1.0.x). 1.3.0
  *      did not change the schema; 1.4.0 only adds field descriptions
  *      and the classifier-only `compat.imageInput` /
- *      `compat.sendImageOptInHeader`, neither used here.
+ *      `compat.sendImageOptInHeader`, neither used here. 1.5.0 leaves
+ *      `schemas/models.schema.json` unchanged; `model-config.d.ts`
+ *      differs only in how the types are expressed (pi-schema instead
+ *      of TypeBox), with the same field names.
  *    - The generated agent_command against a stub openai-compatible
  *      server produces the same json-mode event sequence as 1.1.0
- *      (event types listed below), sends the same default tool set
+ *      (event types listed below; identical on 1.4.0 and 1.5.0, with
+ *      the same request body keys), sends the same default tool set
  *      (read, bash, edit, write — the codemode / tool_search / MCP
  *      built-in extensions added in 0.99 are not enabled by default),
  *      and exits 0. An unreachable baseUrl still exits 0 with a final
@@ -88,8 +95,8 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      harness-cli.sh's pi_terminal_error relies on. 1.2.0 added exit 1
  *      for errors and output-token truncation (`stopReason:
  *      "length"`) but only for `--mode text`; json mode still exits 0
- *      for both, and a truncated run is recorded as `success`. 1.3.0
- *      and 1.4.0 did not change exit-code behavior: on 1.4.0 the
+ *      for both, and a truncated run is recorded as `success`. 1.3.0,
+ *      1.4.0 and 1.5.0 did not change exit-code behavior: on 1.5.0 the
  *      unreachable-baseUrl run still emits four `agent_end` events
  *      (three retries) ending in `stopReason: "error"`, and
  *      pi_terminal_error still reports "Connection error.".
@@ -113,7 +120,9 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      200K / 128K output / thinking / images with a 200000 override),
  *      whereas a `models: [{id}]` entry replaced the catalogue entry
  *      with 128K / 16.4K / no thinking / no images (verified 2026-10-16;
- *      the override result re-checked on 1.4.0).
+ *      the override result re-checked on 1.4.0 and 1.5.0; 1.5.0's move
+ *      to the models.dev v2 catalogue keeps claude-sonnet-5-5 at 1M /
+ *      128K / thinking / images).
  *    - Breaking changes in 0.99–1.0.3 touch the TUI, extension/SDK and
  *      codemode APIs, MCP, and the Azure provider's name
  *      (`azure-openai-responses` → `azure`) — none of which the
@@ -123,10 +132,15 @@ import type { Provider, Model, ProviderKind } from '@orchestrator/shared';
  *      (provider attribution headers, summaries using the model's output
  *      limit, new default models for providers not used here, codemode
  *      worker queueing) don't touch the CLI, models.json or json-mode
- *      surface either. From 1.0.1 the npm package no longer ships
+ *      surface either. 1.5.0's one breaking change moves tool-argument
+ *      validation to `@earendil-works/pi-schema` (affects extension and
+ *      MCP tool schemas, and the wording of validation errors the model
+ *      sees); its other changes (models.dev v2 catalogue, default OpenAI
+ *      model `gpt-6.1-sol`, MCP OAuth registration, self-update command,
+ *      TUI fixes) don't touch what the harness uses. From 1.0.1 the npm package no longer ships
  *      npm-shrinkwrap.json, so transitive dependencies float on rebuild
  *      (see images/agent/Dockerfile).
- *    - As on 1.0.4 through 1.4.0, `pi -p` reads piped stdin until EOF
+ *    - As on 1.0.4 through 1.5.0, `pi -p` reads piped stdin until EOF
  *      before starting, so a run whose stdin is a pipe that never closes
  *      hangs. The harness smoke runs don't hit this, so agent_command
  *      leaves stdin alone; add `</dev/null` if a launcher ever pipes
